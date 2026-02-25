@@ -281,7 +281,6 @@ def fastapi_app():
         ModelsResponse,
         StatusResponse,
         TaskStatus,
-        AddAccountRequest,
         AccountResponse,
     )
 
@@ -513,11 +512,16 @@ def fastapi_app():
 
     # ── POST /admin/accounts ─────────────────────────────────────────────────
     @api.post("/admin/accounts", tags=["Admin"], status_code=201)
-    async def admin_add_account(body: AddAccountRequest = Body(...), _ip: str = Depends(get_admin_auth("add_account"))):
+    async def admin_add_account(
+        label: str = Body(...),
+        token_id: str = Body(...),
+        token_secret: str = Body(...),
+        _ip: str = Depends(get_admin_auth("add_account"))
+    ):
         account_id = acc_store.add_account(
-            label=body.label,
-            token_id=body.token_id,
-            token_secret=body.token_secret,
+            label=label,
+            token_id=token_id,
+            token_secret=token_secret,
         )
         deploy_account_async(account_id)
         return {"id": account_id, "status": "pending", "message": "Deploying..."}
