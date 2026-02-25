@@ -13,7 +13,6 @@ Deploy:
 Local serve (no GPU, for testing routes):
     modal serve backend/app.py
 """
-from __future__ import annotations
 
 import json
 import mimetypes
