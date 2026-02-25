@@ -261,7 +261,7 @@ def fastapi_app():
         if _p not in _sys.path:
             _sys.path.insert(0, _p)
 
-    from fastapi import Depends, FastAPI, HTTPException, Query, status
+    from fastapi import Depends, FastAPI, HTTPException, Query, status, Body
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import FileResponse, JSONResponse, Response
     from pydantic import BaseModel as PydanticBase
@@ -513,7 +513,7 @@ def fastapi_app():
 
     # ── POST /admin/accounts ─────────────────────────────────────────────────
     @api.post("/admin/accounts", tags=["Admin"], status_code=201)
-    async def admin_add_account(body: AddAccountRequest, _ip: str = Depends(get_admin_auth("add_account"))):
+    async def admin_add_account(body: AddAccountRequest = Body(...), _ip: str = Depends(get_admin_auth("add_account"))):
         account_id = acc_store.add_account(
             label=body.label,
             token_id=body.token_id,
