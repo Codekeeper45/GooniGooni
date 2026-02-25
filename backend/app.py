@@ -71,7 +71,7 @@ video_image = (
         "numpy",
     )
     .env({"HF_HOME": MODEL_CACHE_PATH, "TRANSFORMERS_CACHE": MODEL_CACHE_PATH})
-    .add_local_dir(".", remote_path="/root")  # ALL backend .py files
+    .add_local_dir(str(Path(__file__).parent), remote_path="/root")  # backend/ .py files
 )
 
 # Image generation image (T4 — 16 GB, includes bitsandbytes for NF4)
@@ -89,14 +89,14 @@ image_gen_image = (
         "numpy",
     )
     .env({"HF_HOME": MODEL_CACHE_PATH, "TRANSFORMERS_CACHE": MODEL_CACHE_PATH})
-    .add_local_dir(".", remote_path="/root")  # ALL backend .py files
+    .add_local_dir(str(Path(__file__).parent), remote_path="/root")  # backend/ .py files
 )
 
 # API server image (no GPU, lightweight)
 api_image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install(*_base_pkgs, "modal")  # modal CLI needed by deployer.py
-    .add_local_dir(".", remote_path="/root")  # ALL backend .py files
+    .add_local_dir(str(Path(__file__).parent), remote_path="/root")  # backend/ .py files
 )
 
 # ─── Volume mounts helper ─────────────────────────────────────────────────────
@@ -257,8 +257,9 @@ def fastapi_app():
       https://<workspace>--gooni-api.modal.run
     """
     import sys as _sys
-    if "/root" not in _sys.path:
-        _sys.path.insert(0, "/root")
+    for _p in ("/root", "/root/backend"):
+        if _p not in _sys.path:
+            _sys.path.insert(0, _p)
 
     from fastapi import Depends, FastAPI, HTTPException, Query, status
     from fastapi.middleware.cors import CORSMiddleware
