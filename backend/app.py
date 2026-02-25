@@ -45,7 +45,6 @@ hf_secret = modal.Secret.from_name("huggingface")
 
 # ─── Docker Images ────────────────────────────────────────────────────────────
 
-# Base Python packages shared by all images
 _base_pkgs = [
     "fastapi>=0.111",
     "uvicorn[standard]",
@@ -53,6 +52,7 @@ _base_pkgs = [
     "Pillow",
     "imageio[ffmpeg]",
     "huggingface_hub",
+    "httpx",
 ]
 
 # Video generation image (A10G — 24 GB)
@@ -314,18 +314,18 @@ def fastapi_app():
     async def list_models(_: str = Depends(verify_api_key)):
         return ModelsResponse(models=MODELS_SCHEMA)
 
-    # ── POST /generate ─────────────────────────────────────────────────────────
+    # ── POST /generate_direct ──────────────────────────────────────────────────
     @api.post(
-        "/generate",
+        "/generate_direct",
         response_model=GenerateResponse,
         status_code=status.HTTP_202_ACCEPTED,
         tags=["Generation"],
     )
-    async def generate(
+    async def generate_direct(
         req: GenerateRequest,
         _: str = Depends(verify_api_key),
     ):
-        # Persist the task immediately
+        """Internal endpoint for isolated Modal account execution."""
         params = req.model_dump(
             exclude={"prompt", "negative_prompt", "model", "type", "mode",
                      "width", "height", "seed",
@@ -344,14 +344,63 @@ def fastapi_app():
             seed=req.seed,
         )
 
-        # ── Account rotation: pick account with fallback ───────────────────────
         request_dict = req.model_dump()
         request_dict["model"] = req.model.value
         request_dict["type"] = req.type.value
 
+        if req.type.value == "video":
+            run_video_generation.spawn(request_dict, task_id)
+        else:
+            run_image_generation.spawn(request_dict, task_id)
+
+        return GenerateResponse(task_id=task_id, status=TaskStatus.pending)
+
+    # ── POST /generate ─────────────────────────────────────────────────────────
+    @api.post(
+        "/generate",
+        response_model=GenerateResponse,
+        status_code=status.HTTP_202_ACCEPTED,
+        tags=["Generation"],
+    )
+    async def generate(
+        req: GenerateRequest,
+        _: str = Depends(verify_api_key),
+    ):
         tried_accounts: list[str] = []
-        dispatched = False
         last_error = ""
+
+        # Default master behavior if no accounts or fallbacks fail
+        async def _fallback_dispatch():
+            # Persist local
+            params = req.model_dump(
+                exclude={"prompt", "negative_prompt", "model", "type", "mode",
+                         "width", "height", "seed",
+                         "reference_image", "first_frame_image",
+                         "last_frame_image", "arbitrary_frames"},
+            )
+            local_task = storage.create_task(
+                model=req.model.value,
+                gen_type=req.type.value,
+                mode=req.mode,
+                prompt=req.prompt,
+                negative_prompt=req.negative_prompt,
+                parameters=params,
+                width=req.width,
+                height=req.height,
+                seed=req.seed,
+            )
+            req_dict = req.model_dump()
+            req_dict["model"] = req.model.value
+            req_dict["type"] = req.type.value
+            if req.type.value == "video":
+                run_video_generation.spawn(req_dict, local_task)
+            else:
+                run_image_generation.spawn(req_dict, local_task)
+            return GenerateResponse(task_id=local_task, status=TaskStatus.pending)
+
+        import httpx
+        api_key_env = os.environ.get("API_KEY", "")
+        headers = {"X-API-Key": api_key_env}
 
         for attempt in range(MAX_FALLBACKS + 1):
             try:
@@ -361,33 +410,35 @@ def fastapi_app():
                     account = account_router.pick_with_fallback(tried=tried_accounts)
 
                 tried_accounts.append(account["id"])
+                workspace = account.get("workspace")
+                if not workspace:
+                    raise Exception("Account has no workspace configured.")
 
-                # Dispatch the right Modal function (non-blocking .spawn())
-                if req.type.value == "video":
-                    run_video_generation.spawn(request_dict, task_id)
-                else:
-                    run_image_generation.spawn(request_dict, task_id)
+                remote_url = f"https://{workspace}--gooni-api.modal.run/generate_direct"
+                
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    resp = await client.post(remote_url, json=req.model_dump(), headers=headers)
+                    resp.raise_for_status()
+                    data = resp.json()
+                    remote_task_id = data["task_id"]
 
                 account_router.mark_success(account["id"])
-                dispatched = True
-                break
+                
+                # Format task ID to encode the remote workspace
+                return GenerateResponse(
+                    task_id=f"{workspace}::{remote_task_id}",
+                    status=TaskStatus.pending
+                )
 
             except NoReadyAccountError:
-                # No accounts at all — fall through to single-account mode
                 break
             except Exception as exc:
                 last_error = str(exc)
                 if tried_accounts:
                     account_router.mark_failed(tried_accounts[-1], last_error)
 
-        if not dispatched:
-            # Fallback: dispatch without account routing (uses default Modal auth)
-            if req.type.value == "video":
-                run_video_generation.spawn(request_dict, task_id)
-            else:
-                run_image_generation.spawn(request_dict, task_id)
-
-        return GenerateResponse(task_id=task_id, status=TaskStatus.pending)
+        # Fallback to local dispatch
+        return await _fallback_dispatch()
 
     # ── GET /status/{task_id} ──────────────────────────────────────────────────
     @api.get(
@@ -399,6 +450,22 @@ def fastapi_app():
         task_id: str,
         _: str = Depends(verify_api_key),
     ):
+        if "::" in task_id:
+            workspace, remote_task_id = task_id.split("::", 1)
+            import httpx
+            api_key = os.environ.get("API_KEY", "")
+            remote_url = f"https://{workspace}--gooni-api.modal.run/status/{remote_task_id}"
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    resp = await client.get(remote_url, headers={"X-API-Key": api_key})
+                    if resp.status_code == 404:
+                        raise HTTPException(status_code=404, detail="Remote task not found")
+                    resp.raise_for_status()
+                    return resp.json()
+            except Exception as e:
+                # If remote is unreachable or failing, return 502 Bad Gateway
+                raise HTTPException(status_code=502, detail=f"Remote status fetch failed: {str(e)}")
+
         result = storage.get_task(task_id)
         if result is None:
             raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
@@ -410,6 +477,15 @@ def fastapi_app():
         task_id: str,
         _: str = Depends(verify_api_key),
     ):
+        if "::" in task_id:
+            from fastapi.responses import RedirectResponse
+            workspace, remote_task_id = task_id.split("::", 1)
+            api_key = os.environ.get("API_KEY", "")
+            import urllib.parse
+            qs = f"?api_key={urllib.parse.quote(api_key)}" if api_key else ""
+            remote_url = f"https://{workspace}--gooni-api.modal.run/results/{remote_task_id}{qs}"
+            return RedirectResponse(url=remote_url, status_code=307)
+
         task = storage.get_task(task_id)
         if task is None:
             raise HTTPException(status_code=404, detail="Task not found")
@@ -434,6 +510,7 @@ def fastapi_app():
             "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
         }
         media_type = media_types.get(ext, "application/octet-stream")
+        from fastapi.responses import FileResponse
         return FileResponse(fpath, media_type=media_type)
 
     # ── GET /preview/{task_id} ────────────────────────────────────────────────
@@ -442,6 +519,15 @@ def fastapi_app():
         task_id: str,
         _: str = Depends(verify_api_key),
     ):
+        if "::" in task_id:
+            from fastapi.responses import RedirectResponse
+            workspace, remote_task_id = task_id.split("::", 1)
+            api_key = os.environ.get("API_KEY", "")
+            import urllib.parse
+            qs = f"?api_key={urllib.parse.quote(api_key)}" if api_key else ""
+            remote_url = f"https://{workspace}--gooni-api.modal.run/preview/{remote_task_id}{qs}"
+            return RedirectResponse(url=remote_url, status_code=307)
+
         task_row = _get_raw_task(task_id)
         if not task_row:
             raise HTTPException(status_code=404, detail="Task not found")
@@ -450,6 +536,7 @@ def fastapi_app():
         if not preview_path or not os.path.exists(preview_path):
             raise HTTPException(status_code=404, detail="Preview not available yet")
 
+        from fastapi.responses import FileResponse
         return FileResponse(preview_path, media_type="image/jpeg")
 
     # ── GET /gallery ──────────────────────────────────────────────────────────

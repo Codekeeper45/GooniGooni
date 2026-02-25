@@ -15,9 +15,7 @@ import type {
 } from "./ControlPanel";
 import type { HistoryItem } from "./HistoryPanel";
 
-// ─── Backend configuration ────────────────────────────────────────────────────
-const API_URL = (import.meta.env.VITE_API_URL as string | undefined) ?? "";
-const API_KEY = (import.meta.env.VITE_API_KEY as string | undefined) ?? "";
+const API_URL = ((import.meta as any).env.VITE_API_URL as string | undefined) ?? "";
 
 // ─── Generation status messages ───────────────────────────────────────────────
 
@@ -44,6 +42,7 @@ import type { ModelId } from "../utils/configManager";
 // ─── API Integration ─────────────────────────────────────────────────────────
 async function generateMediaAPI(
   onProgress: (p: number) => void,
+  onStatusText: (text: string) => void,
   params: any,
   onTaskCreated?: (task_id: string) => void
 ): Promise<{ url: string; thumbnailUrl?: string }> {
@@ -77,6 +76,7 @@ async function generateMediaAPI(
     throw new Error("Backend not configured. Set VITE_API_URL in .env and rebuild the app.");
   }
 
+  const API_KEY = localStorage.getItem("mg_api_key") ?? "";
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     ...(API_KEY ? { "X-API-Key": API_KEY } : {}),
@@ -98,7 +98,7 @@ async function generateMediaAPI(
   onTaskCreated?.(task_id);
   onProgress(5);
 
-  return pollTask(task_id, params.type, onProgress);
+  return pollTask(task_id, params.type, onProgress, onStatusText);
 }
 
 // ─── Active task persistence helpers ─────────────────────────────────────────
@@ -133,9 +133,11 @@ function getActiveTask(): ActiveTask | null {
 /** Poll task until done/failed — reusable for both new and resumed tasks. */
 async function pollTask(
   task_id: string,
-  type: string,
-  onProgress: (p: number) => void
+  type: GenerationType,
+  onProgress: (p: number) => void,
+  onStatusText: (text: string) => void
 ): Promise<{ url: string; thumbnailUrl?: string }> {
+  const API_KEY = localStorage.getItem("mg_api_key") ?? "";
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     ...(API_KEY ? { "X-API-Key": API_KEY } : {}),
@@ -151,10 +153,19 @@ async function pollTask(
       status: string; progress: number; error?: string;
     };
     onProgress(status === "done" ? 100 : Math.max(5, Math.min(99, progress ?? 0)));
+    
     if (status === "failed") throw new Error(error ?? "Generation failed on the server");
+    
+    // Fallback to local text mapping if no explicit error to render
+    onStatusText(status === "pending" ? "Pending in queue..." : getStatusText(progress ?? 0, type));
+
     if (status === "done") {
-      const resultUrl = `${API_URL}/results/${task_id}`;
-      const previewUrl = `${API_URL}/preview/${task_id}`;
+      let resultUrl = `${API_URL}/results/${task_id}`;
+      let previewUrl = `${API_URL}/preview/${task_id}`;
+      if (API_KEY) {
+        resultUrl += `?api_key=${encodeURIComponent(API_KEY)}`;
+        previewUrl += `?api_key=${encodeURIComponent(API_KEY)}`;
+      }
       return { url: resultUrl, thumbnailUrl: type === "video" ? previewUrl : undefined };
     }
   }
@@ -309,7 +320,7 @@ export function MediaGenApp() {
     setError(null);
     setResult(null);
 
-    pollTask(saved.task_id, saved.type, setProgress)
+    pollTask(saved.task_id, saved.type as GenerationType, setProgress, setStatusText)
       .then(({ url: resultUrl, thumbnailUrl }) => {
         const newResult = {
           url: resultUrl,
@@ -345,7 +356,10 @@ export function MediaGenApp() {
     if (!prompt.trim()) return;
     
     if (generationType === "video") {
-      if ((videoMode === "i2v" || videoMode === "first_last_frame") && !referenceImage) {
+      if (videoMode === "i2v" && !referenceImage) {
+        return;
+      }
+      if (videoMode === "first_last_frame" && (!firstFrameImage || !lastFrameImage)) {
         return;
       }
     } else {
@@ -380,6 +394,7 @@ export function MediaGenApp() {
       clearActiveTask();
       const { url: resultUrl, thumbnailUrl } = await generateMediaAPI(
         (p) => setProgress(p),
+        (text) => setStatusText(text),
         {
           type: generationType,
           useAdvancedSettings,

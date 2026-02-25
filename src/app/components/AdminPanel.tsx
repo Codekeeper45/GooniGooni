@@ -24,13 +24,13 @@ const STATUS_CONFIG = {
 
 // ─── API helper ───────────────────────────────────────────────────────────────
 
-const ADMIN_KEY = import.meta.env.VITE_ADMIN_KEY ?? "";
-const API_URL = import.meta.env.VITE_API_URL ?? "";
+const API_URL = ((import.meta as any).env.VITE_API_URL as string | undefined) ?? "";
 
 async function adminFetch<T>(
   path: string,
   options: RequestInit = {}
 ): Promise<T> {
+  const ADMIN_KEY = localStorage.getItem("mg_admin_key") ?? "";
   const res = await fetch(`${API_URL}${path}`, {
     ...options,
     headers: {
