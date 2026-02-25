@@ -161,3 +161,20 @@ class HealthResponse(BaseModel):
     status: Literal["ok"] = "ok"
     version: str = "1.0.0"
     app: str = "gooni-gooni-backend"
+
+
+class AddAccountRequest(BaseModel):
+    label: str
+    token_id: str
+    token_secret: str
+
+
+class AccountResponse(BaseModel):
+    id: str
+    label: str
+    workspace: Optional[str] = None
+    status: str
+    use_count: int
+    last_used: Optional[str] = None
+    last_error: Optional[str] = None
+    added_at: str

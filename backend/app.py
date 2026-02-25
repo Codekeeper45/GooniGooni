@@ -281,6 +281,8 @@ def fastapi_app():
         ModelsResponse,
         StatusResponse,
         TaskStatus,
+        AddAccountRequest,
+        AccountResponse,
     )
 
     # ── Init DB on cold start ─────────────────────────────────────────────────
@@ -502,21 +504,6 @@ def fastapi_app():
     from admin_security import _ensure_audit_table, get_admin_auth
 
     _ensure_audit_table()
-
-    class AddAccountRequest(PydanticBase):
-        label: str
-        token_id: str
-        token_secret: str
-
-    class AccountResponse(PydanticBase):
-        id: str
-        label: str
-        workspace: Optional[str]
-        status: str
-        use_count: int
-        last_used: Optional[str]
-        last_error: Optional[str]
-        added_at: str
 
     # ── GET /admin/health — fast probe (also validates key) ─────────────────
     @api.get("/admin/health", tags=["Admin"])
