@@ -13,35 +13,13 @@ Or set env vars:
     export API_KEY=...
     pytest backend/tests/test_api.py -v
 """
-import os
 import time
 
 import httpx
 import pytest
 
 
-# ─── Config ───────────────────────────────────────────────────────────────────
 
-def pytest_addoption(parser):
-    parser.addoption("--base-url", default=os.environ.get("BACKEND_URL", "http://localhost:8000"))
-    parser.addoption("--api-key", default=os.environ.get("API_KEY", ""))
-
-
-@pytest.fixture(scope="session")
-def base_url(request):
-    return request.config.getoption("--base-url").rstrip("/")
-
-
-@pytest.fixture(scope="session")
-def api_key(request):
-    return request.config.getoption("--api-key")
-
-
-@pytest.fixture(scope="session")
-def client(base_url, api_key):
-    headers = {"X-API-Key": api_key} if api_key else {}
-    with httpx.Client(base_url=base_url, headers=headers, timeout=30) as c:
-        yield c
 
 
 # ─── Tests ────────────────────────────────────────────────────────────────────

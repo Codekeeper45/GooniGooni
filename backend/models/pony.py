@@ -50,7 +50,6 @@ class PonyPipeline(BasePipeline):
             cache_dir=cache_path,
             torch_dtype=torch.float16,
             use_safetensors=True,
-            variant="fp16",
         ).to("cuda")
 
         self._img2img = StableDiffusionXLImg2ImgPipeline.from_pipe(self._txt2img)

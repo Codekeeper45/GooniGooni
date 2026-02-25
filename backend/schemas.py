@@ -55,7 +55,7 @@ class GenerateRequest(BaseModel):
     mode: str  # t2v | i2v | first_last_frame | arbitrary_frame | txt2img | img2img
 
     # ── Common parameters ─────────────────────────────────────────────────────
-    prompt: str = Field(..., max_length=2000)
+    prompt: str = Field(..., min_length=1, max_length=2000)
     negative_prompt: str = Field(default="", max_length=1000)
     width: int = Field(default=720, ge=256, le=2048)
     height: int = Field(default=1280, ge=256, le=2048)
@@ -103,6 +103,13 @@ class GenerateRequest(BaseModel):
         if v == "arbitrary_frame" and model != ModelId.anisora:
             raise ValueError("arbitrary_frame mode is only supported by anisora")
 
+        return v
+
+    @field_validator("prompt")
+    @classmethod
+    def validate_prompt(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("prompt must not be empty")
         return v
 
 

@@ -51,7 +51,7 @@ class AnisoraPipeline(BasePipeline):
 
         common_kwargs = dict(
             pretrained_model_name_or_path=self.hf_model_id,
-            subfolder=self.subfolder,
+            subfolder=self.subfolder or None,
             cache_dir=cache_path,
             torch_dtype=torch.bfloat16,
         )

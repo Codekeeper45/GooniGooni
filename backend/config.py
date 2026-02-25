@@ -19,9 +19,9 @@ DB_PATH = f"{RESULTS_PATH}/gallery.db"
 # ─── HuggingFace model identifiers ─────────────────────────────────────────────
 # Override these via Modal Secrets / env vars for your private/licensed models.
 MODEL_IDS: dict[str, str] = {
-    # Anime video – Index-AniSora V3.2 (Wan2.2-based, V3.2 subfolder)
-    # Repo: https://huggingface.co/IndexTeam/Index-anisora/tree/main/V3.2
-    "anisora": os.environ.get("ANISORA_MODEL_ID", "IndexTeam/Index-anisora"),
+    # Video – Official Wan2.1 14B Diffusers (fallback since Index-anisora lacks diffusers format)
+    # Repo: https://huggingface.co/Wan-AI/Wan2.1-T2V-14B-Diffusers
+    "anisora": os.environ.get("ANISORA_MODEL_ID", "Wan-AI/Wan2.1-T2V-14B-Diffusers"),
 
     # Realistic video – Phr00t WAN 2.2 Rapid-AllInOne NSFW (single safetensors)
     # Repo: https://huggingface.co/Phr00t/WAN2.2-14B-Rapid-AllInOne
@@ -37,8 +37,8 @@ MODEL_IDS: dict[str, str] = {
     "flux": os.environ.get("FLUX_MODEL_ID", "black-forest-labs/FLUX.1-dev"),
 }
 
-# Sub-folder within the AniSora repo (the V3.2 weights live here)
-ANISORA_SUBFOLDER = os.environ.get("ANISORA_SUBFOLDER", "V3.2")
+# Subfolder is not used for the official diffusers model
+ANISORA_SUBFOLDER = os.environ.get("ANISORA_SUBFOLDER", "")
 
 # Filename of the Phr00t single-file checkpoint to download (latest Mega-v12)
 PHR00T_FILENAME = os.environ.get(

@@ -48,7 +48,7 @@ class TestModelIDs:
 
     def test_pony_default_id(self):
         import config
-        assert config.MODEL_IDS["pony"] == "LyliaEngine/Pony_Diffusion_V6_XL"
+        assert config.MODEL_IDS["pony"] == "Polenov2024/Pony-Diffusion-V6-XL"
 
     def test_flux_default_id(self):
         import config
