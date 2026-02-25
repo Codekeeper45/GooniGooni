@@ -66,6 +66,21 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onClose }) => {
   const [formSubmitting, setFormSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
+  // Security & Secrets state
+  const [apiKey, setApiKey] = useState(() => localStorage.getItem("mg_api_key") ?? "");
+  const [adminKey, setAdminKey] = useState(() => localStorage.getItem("mg_admin_key") ?? "");
+  const [securitySuccess, setSecuritySuccess] = useState(false);
+
+  const handleSaveSecurity = (e: React.FormEvent) => {
+    e.preventDefault();
+    localStorage.setItem("mg_api_key", apiKey.trim());
+    localStorage.setItem("mg_admin_key", adminKey.trim());
+    setSecuritySuccess(true);
+    setTimeout(() => setSecuritySuccess(false), 3000);
+    // Optionally reload to apply keys globally if needed by other components
+    // window.location.reload(); 
+  };
+
   // ── Fetch accounts ──────────────────────────────────────────────────────────
   const fetchAccounts = useCallback(async () => {
     if (!API_URL) { setError("VITE_API_URL not configured"); return; }
@@ -195,6 +210,44 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onClose }) => {
 
         {/* Global error */}
         {error && <div style={styles.errorBanner}>{error}</div>}
+
+        {/* Security & Secrets Section */}
+        <div style={styles.securitySection}>
+            <h3 style={styles.sectionTitle}>🔒 Security & Secrets</h3>
+            <p style={styles.sectionDesc}>
+                Manage your API and Admin keys. These are stored locally in your browser.
+            </p>
+            <form onSubmit={handleSaveSecurity} style={styles.securityForm}>
+                <div style={styles.formGrid}>
+                    <label style={styles.label}>
+                        Gooni API Key
+                        <input
+                            style={styles.input}
+                            type="password"
+                            placeholder="Modal API Key"
+                            value={apiKey}
+                            onChange={(e) => setApiKey(e.target.value)}
+                        />
+                    </label>
+                    <label style={styles.label}>
+                        Admin Key
+                        <input
+                            style={styles.input}
+                            type="password"
+                            placeholder="Admin Panel Secret"
+                            value={adminKey}
+                            onChange={(e) => setAdminKey(e.target.value)}
+                        />
+                    </label>
+                </div>
+                <div style={styles.securityActions}>
+                    {securitySuccess && <span style={styles.successText}>✅ Saved successfully!</span>}
+                    <button type="submit" style={{ ...styles.btn, ...styles.btnPrimary }}>
+                        Save Keys
+                    </button>
+                </div>
+            </form>
+        </div>
 
         {/* Add Account Form */}
         {showForm && (
@@ -428,6 +481,16 @@ const styles: Record<string, React.CSSProperties> = {
   btnPrimary: { background: "#6366f1", color: "#fff" },
   btnSecondary: { background: "#1f2937", color: "#d1d5db" },
   btnGhost: { background: "transparent", color: "#6b7280", padding: "0.5rem" },
+  securitySection: {
+    padding: "1.5rem",
+    borderBottom: "1px solid #1f2937",
+    background: "rgba(99, 102, 241, 0.03)",
+  },
+  sectionTitle: { margin: 0, fontSize: "1rem", color: "#f9fafb", fontWeight: 600 },
+  sectionDesc: { margin: "0.25rem 0 1rem", fontSize: "0.8rem", color: "#6b7280" },
+  securityForm: { display: "flex", flexDirection: "column", gap: "1rem" },
+  securityActions: { display: "flex", justifyContent: "flex-end", alignItems: "center", gap: "1rem", marginTop: "0.5rem" },
+  successText: { fontSize: "0.8rem", color: "#10b981", fontWeight: 500 },
 };
 
 export default AdminPanel;

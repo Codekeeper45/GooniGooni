@@ -1,9 +1,8 @@
-import { Sparkles, Clock, Zap, Grid3x3, Settings, KeyRound } from "lucide-react";
+import { Sparkles, Clock, Zap, Grid3x3, Settings } from "lucide-react";
 import { useNavigate } from "react-router";
 import { useState } from "react";
 import type React from "react";
 import { useGallery } from "../context/GalleryContext";
-import { SettingsModal } from "./SettingsModal";
 
 interface NavbarProps {
   onHistoryClick: () => void;
@@ -15,7 +14,6 @@ export function Navbar({ onHistoryClick, historyCount, onAdminClick }: NavbarPro
   const navigate = useNavigate();
   const { gallery } = useGallery();
   const galleryCount = gallery.length;
-  const [showSettings, setShowSettings] = useState(false);
 
   return (
     <header
@@ -75,18 +73,11 @@ export function Navbar({ onHistoryClick, historyCount, onAdminClick }: NavbarPro
           label="100 GPU·s"
         />
         <NavButton
-          icon={<KeyRound className="w-4 h-4" />}
-          label="API Keys"
-          onClick={() => setShowSettings(true)}
-        />
-        <NavButton
           icon={<Settings className="w-4 h-4" />}
           label="Admin"
           onClick={() => navigate("/admin")}
         />
       </div>
-
-      {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
     </header>
   );
 }
