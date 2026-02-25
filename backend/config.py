@@ -1,0 +1,150 @@
+"""
+Configuration for the Gooni Gooni Modal backend.
+All sensitive values come from Modal Secrets / environment variables.
+"""
+import os
+
+# ─── App identity ──────────────────────────────────────────────────────────────
+APP_NAME = "gooni-gooni-backend"
+
+# ─── Volume names ──────────────────────────────────────────────────────────────
+MODEL_CACHE_VOLUME = os.environ.get("CACHE_VOLUME", "model-cache")
+RESULTS_VOLUME_NAME = os.environ.get("RESULTS_VOLUME", "results")
+
+# Internal mount paths inside the Modal container
+MODEL_CACHE_PATH = "/model-cache"
+RESULTS_PATH = "/results"
+DB_PATH = f"{RESULTS_PATH}/gallery.db"
+
+# ─── HuggingFace model identifiers ─────────────────────────────────────────────
+# Override these via Modal Secrets / env vars for your private/licensed models.
+MODEL_IDS: dict[str, str] = {
+    # Anime video – Index-AniSora V3.2 (Wan2.2-based, V3.2 subfolder)
+    # Repo: https://huggingface.co/IndexTeam/Index-anisora/tree/main/V3.2
+    "anisora": os.environ.get("ANISORA_MODEL_ID", "IndexTeam/Index-anisora"),
+
+    # Realistic video – Phr00t WAN 2.2 Rapid-AllInOne NSFW (single safetensors)
+    # Repo: https://huggingface.co/Phr00t/WAN2.2-14B-Rapid-AllInOne
+    # File loaded via from_single_file() — see models/phr00t.py
+    "phr00t": os.environ.get("PHR00T_MODEL_ID", "Phr00t/WAN2.2-14B-Rapid-AllInOne"),
+
+    # Anime image – Pony Diffusion V6 XL (original author)
+    # Repo: https://huggingface.co/LyliaEngine/Pony_Diffusion_V6_XL
+    "pony": os.environ.get("PONY_MODEL_ID", "LyliaEngine/Pony_Diffusion_V6_XL"),
+
+    # Realistic image – Flux.1 [dev] (base repo, NF4 quantized on-the-fly via BnB)
+    # Repo: https://huggingface.co/black-forest-labs/FLUX.1-dev
+    "flux": os.environ.get("FLUX_MODEL_ID", "black-forest-labs/FLUX.1-dev"),
+}
+
+# Sub-folder within the AniSora repo (the V3.2 weights live here)
+ANISORA_SUBFOLDER = os.environ.get("ANISORA_SUBFOLDER", "V3.2")
+
+# Filename of the Phr00t single-file checkpoint to download (latest Mega-v12)
+PHR00T_FILENAME = os.environ.get(
+    "PHR00T_FILENAME",
+    "wan2.2-rapid-mega-aio-nsfw-v12.2.safetensors",
+)
+
+# ─── GPU config ────────────────────────────────────────────────────────────────
+VIDEO_GPU = os.environ.get("VIDEO_GPU", "A10G")  # 24 GB VRAM
+IMAGE_GPU = os.environ.get("IMAGE_GPU", "T4")    # 16 GB VRAM
+
+# Maximum concurrent executions per function
+VIDEO_CONCURRENCY = int(os.environ.get("VIDEO_CONCURRENCY", "1"))
+IMAGE_CONCURRENCY = int(os.environ.get("IMAGE_CONCURRENCY", "2"))
+
+# Timeout per generation job (seconds)
+VIDEO_TIMEOUT = int(os.environ.get("VIDEO_TIMEOUT", "900"))   # 15 min
+IMAGE_TIMEOUT = int(os.environ.get("IMAGE_TIMEOUT", "300"))   # 5 min
+
+# ─── Gallery defaults ──────────────────────────────────────────────────────────
+DEFAULT_PAGE_SIZE = 20
+MAX_PAGE_SIZE = 100
+
+# ─── Model metadata (schema exposed via /models endpoint) ──────────────────────
+MODELS_SCHEMA = [
+    {
+        "id": "anisora",
+        "name": "Index-AniSora V3.2",
+        "type": "video",
+        "category": "hentai",
+        "description": "High-quality anime video generation",
+        "modes": ["t2v", "i2v", "first_last_frame", "arbitrary_frame"],
+        "default_mode": "t2v",
+        "fixed_parameters": {
+            "steps": {"value": 8, "locked": True},
+            "guidance_scale": {"value": 1.0, "recommended": True},
+        },
+        "parameters_schema": {
+            "num_frames": {"type": "int", "default": 81, "min": 49, "max": 161},
+            "fps": {"type": "enum", "options": [8, 16, 24], "default": 16},
+            "motion_score": {"type": "float", "default": 3.0, "min": 0.0, "max": 5.0},
+            "reference_strength": {"type": "float", "default": 0.85, "min": 0.1, "max": 1.0},
+            "denoising_strength": {"type": "float", "default": 0.7, "min": 0.0, "max": 1.0},
+            "width": {"type": "int", "default": 720},
+            "height": {"type": "int", "default": 1280},
+            "seed": {"type": "int", "default": -1},
+        },
+    },
+    {
+        "id": "phr00t",
+        "name": "Phr00t WAN 2.2 Rapid",
+        "type": "video",
+        "category": "realistic",
+        "description": "Fast realistic NSFW video generation",
+        "modes": ["t2v", "i2v", "first_last_frame"],
+        "default_mode": "t2v",
+        "fixed_parameters": {
+            "steps": {"value": 4, "locked": True},
+            "cfg_scale": {"value": 1.0, "locked": True},
+        },
+        "parameters_schema": {
+            "num_frames": {"type": "int", "default": 81, "min": 49, "max": 161},
+            "fps": {"type": "enum", "options": [8, 16, 24], "default": 16},
+            "lighting_variant": {"type": "enum", "options": ["high_noise", "low_noise"], "default": "low_noise"},
+            "reference_strength": {"type": "float", "default": 1.0, "min": 0.5, "max": 1.0},
+            "denoising_strength": {"type": "float", "default": 0.7, "min": 0.0, "max": 1.0},
+            "width": {"type": "int", "default": 720},
+            "height": {"type": "int", "default": 1280},
+            "seed": {"type": "int", "default": -1},
+        },
+    },
+    {
+        "id": "pony",
+        "name": "Pony Diffusion V6 XL",
+        "type": "image",
+        "category": "hentai",
+        "description": "High-quality hentai image generation",
+        "modes": ["txt2img", "img2img"],
+        "default_mode": "txt2img",
+        "parameters_schema": {
+            "steps": {"type": "int", "default": 30, "min": 20, "max": 60},
+            "cfg_scale": {"type": "float", "default": 6.0, "min": 1.0, "max": 12.0},
+            "sampler": {"type": "enum", "options": ["Euler a", "DPM++ 2M Karras", "DPM++ SDE Karras"], "default": "Euler a"},
+            "clip_skip": {"type": "int", "default": 2, "min": 1, "max": 4},
+            "denoising_strength": {"type": "float", "default": 0.7, "min": 0.0, "max": 1.0},
+            "width": {"type": "int", "default": 1024},
+            "height": {"type": "int", "default": 1024},
+            "seed": {"type": "int", "default": -1},
+        },
+    },
+    {
+        "id": "flux",
+        "name": "Flux.1 [dev] nf4",
+        "type": "image",
+        "category": "realistic",
+        "description": "Realistic NSFW image generation",
+        "modes": ["txt2img", "img2img"],
+        "default_mode": "txt2img",
+        "parameters_schema": {
+            "steps": {"type": "int", "default": 25, "min": 15, "max": 50},
+            "guidance_scale": {"type": "float", "default": 3.5, "min": 1.0, "max": 10.0},
+            "sampler": {"type": "enum", "options": ["Euler", "flow-matching"], "default": "Euler"},
+            "denoising_strength": {"type": "float", "default": 0.7, "min": 0.0, "max": 1.0},
+            "width": {"type": "int", "default": 1024},
+            "height": {"type": "int", "default": 1024},
+            "seed": {"type": "int", "default": -1},
+        },
+    },
+]

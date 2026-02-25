@@ -1,0 +1,30 @@
+# ─── Core web server ────────────────────────────────────────────────────────
+fastapi>=0.111
+uvicorn[standard]>=0.30
+pydantic>=2.7
+
+# ─── Modal platform ─────────────────────────────────────────────────────────
+modal>=0.64
+
+# ─── ML core ────────────────────────────────────────────────────────────────
+torch==2.3.1
+torchvision==0.18.1
+torchaudio==2.3.1
+
+# ─── Diffusion & transformers ────────────────────────────────────────────────
+diffusers>=0.32.0
+transformers>=4.43.0
+accelerate>=0.32.0
+safetensors>=0.4
+sentencepiece
+
+# ─── Quantization (Flux NF4) ────────────────────────────────────────────────
+bitsandbytes>=0.43.0
+
+# ─── Image / video I/O ──────────────────────────────────────────────────────
+Pillow>=10
+imageio[ffmpeg]>=2.34
+numpy>=1.26
+
+# ─── HuggingFace Hub ────────────────────────────────────────────────────────
+huggingface_hub>=0.23

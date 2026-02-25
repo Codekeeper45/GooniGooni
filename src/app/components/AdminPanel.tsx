@@ -1,0 +1,433 @@
+import React, { useEffect, useState, useCallback } from "react";
+
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+interface Account {
+  id: string;
+  label: string;
+  workspace: string | null;
+  status: "pending" | "ready" | "failed" | "disabled";
+  use_count: number;
+  last_used: string | null;
+  last_error: string | null;
+  added_at: string;
+}
+
+// ─── Status badge config ──────────────────────────────────────────────────────
+
+const STATUS_CONFIG = {
+  pending:  { label: "⏳ Deploying",  color: "#f59e0b", bg: "rgba(245,158,11,0.15)" },
+  ready:    { label: "✅ Ready",       color: "#10b981", bg: "rgba(16,185,129,0.15)" },
+  failed:   { label: "❌ Failed",      color: "#ef4444", bg: "rgba(239,68,68,0.15)"  },
+  disabled: { label: "⚫ Disabled",   color: "#6b7280", bg: "rgba(107,114,128,0.15)"},
+} as const;
+
+// ─── API helper ───────────────────────────────────────────────────────────────
+
+const ADMIN_KEY = import.meta.env.VITE_ADMIN_KEY ?? "";
+const API_URL = import.meta.env.VITE_API_URL ?? "";
+
+async function adminFetch<T>(
+  path: string,
+  options: RequestInit = {}
+): Promise<T> {
+  const res = await fetch(`${API_URL}${path}`, {
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      "x-admin-key": ADMIN_KEY,
+      ...((options.headers as Record<string, string>) ?? {}),
+    },
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail ?? res.statusText);
+  }
+  return res.json();
+}
+
+// ─── Component ────────────────────────────────────────────────────────────────
+
+interface AdminPanelProps {
+  onClose?: () => void;
+}
+
+export const AdminPanel: React.FC<AdminPanelProps> = ({ onClose }) => {
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [deployingAll, setDeployingAll] = useState(false);
+
+  // Add form state
+  const [showForm, setShowForm] = useState(false);
+  const [formLabel, setFormLabel] = useState("");
+  const [formTokenId, setFormTokenId] = useState("");
+  const [formTokenSecret, setFormTokenSecret] = useState("");
+  const [formSubmitting, setFormSubmitting] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
+
+  // ── Fetch accounts ──────────────────────────────────────────────────────────
+  const fetchAccounts = useCallback(async () => {
+    if (!API_URL) { setError("VITE_API_URL not configured"); return; }
+    try {
+      const data = await adminFetch<{ accounts: Account[] }>("/admin/accounts");
+      setAccounts(data.accounts);
+      setError(null);
+    } catch (e: any) {
+      setError(e.message);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchAccounts();
+  }, [fetchAccounts]);
+
+  // Auto-refresh while any account is in 'pending' state
+  useEffect(() => {
+    const hasPending = accounts.some((a) => a.status === "pending");
+    if (!hasPending) return;
+    const timer = setInterval(fetchAccounts, 5000);
+    return () => clearInterval(timer);
+  }, [accounts, fetchAccounts]);
+
+  // ── Add account ─────────────────────────────────────────────────────────────
+  const handleAddAccount = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setFormSubmitting(true);
+    setFormError(null);
+    try {
+      await adminFetch("/admin/accounts", {
+        method: "POST",
+        body: JSON.stringify({
+          label: formLabel,
+          token_id: formTokenId,
+          token_secret: formTokenSecret,
+        }),
+      });
+      setFormLabel("");
+      setFormTokenId("");
+      setFormTokenSecret("");
+      setShowForm(false);
+      await fetchAccounts();
+    } catch (e: any) {
+      setFormError(e.message);
+    } finally {
+      setFormSubmitting(false);
+    }
+  };
+
+  // ── Actions ─────────────────────────────────────────────────────────────────
+  const handleDelete = async (id: string) => {
+    if (!confirm("Remove this account from rotation?")) return;
+    try {
+      await adminFetch(`/admin/accounts/${id}`, { method: "DELETE" });
+      await fetchAccounts();
+    } catch (e: any) { setError(e.message); }
+  };
+
+  const handleDeploy = async (id: string) => {
+    try {
+      await adminFetch(`/admin/accounts/${id}/deploy`, { method: "POST" });
+      await fetchAccounts();
+    } catch (e: any) { setError(e.message); }
+  };
+
+  const handleDisable = async (id: string) => {
+    try {
+      await adminFetch(`/admin/accounts/${id}/disable`, { method: "POST" });
+      await fetchAccounts();
+    } catch (e: any) { setError(e.message); }
+  };
+
+  const handleEnable = async (id: string) => {
+    try {
+      await adminFetch(`/admin/accounts/${id}/enable`, { method: "POST" });
+      await fetchAccounts();
+    } catch (e: any) { setError(e.message); }
+  };
+
+  const handleDeployAll = async () => {
+    setDeployingAll(true);
+    try {
+      await adminFetch("/admin/deploy-all", { method: "POST" });
+      await fetchAccounts();
+    } catch (e: any) { setError(e.message); }
+    finally { setDeployingAll(false); }
+  };
+
+  // ─── UI ────────────────────────────────────────────────────────────────────
+
+  const readyCount = accounts.filter((a) => a.status === "ready").length;
+
+  return (
+    <div style={styles.overlay}>
+      <div style={styles.panel}>
+        {/* Header */}
+        <div style={styles.header}>
+          <div>
+            <h2 style={styles.title}>⚙️ Modal Account Manager</h2>
+            <p style={styles.subtitle}>
+              {readyCount} of {accounts.length} account
+              {accounts.length !== 1 ? "s" : ""} in rotation
+            </p>
+          </div>
+          <div style={styles.headerActions}>
+            <button
+              style={{ ...styles.btn, ...styles.btnSecondary }}
+              onClick={handleDeployAll}
+              disabled={deployingAll || accounts.length === 0}
+            >
+              {deployingAll ? "🔄 Deploying…" : "🚀 Deploy All"}
+            </button>
+            <button
+              style={{ ...styles.btn, ...styles.btnPrimary }}
+              onClick={() => setShowForm((v) => !v)}
+            >
+              {showForm ? "✕ Cancel" : "+ Add Account"}
+            </button>
+            {onClose && (
+              <button style={{ ...styles.btn, ...styles.btnGhost }} onClick={onClose}>
+                ✕
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Global error */}
+        {error && <div style={styles.errorBanner}>{error}</div>}
+
+        {/* Add Account Form */}
+        {showForm && (
+          <form onSubmit={handleAddAccount} style={styles.form}>
+            <h3 style={styles.formTitle}>Add Modal Account</h3>
+            <div style={styles.formGrid}>
+              <label style={styles.label}>
+                Label
+                <input
+                  style={styles.input}
+                  placeholder="e.g. Account-2"
+                  value={formLabel}
+                  onChange={(e) => setFormLabel(e.target.value)}
+                  required
+                />
+              </label>
+              <label style={styles.label}>
+                Token ID
+                <input
+                  style={styles.input}
+                  placeholder="ak-xxxxxxxxxxxx"
+                  value={formTokenId}
+                  onChange={(e) => setFormTokenId(e.target.value)}
+                  required
+                />
+              </label>
+              <label style={{ ...styles.label, gridColumn: "1 / -1" }}>
+                Token Secret
+                <input
+                  style={styles.input}
+                  type="password"
+                  placeholder="as-xxxxxxxxxxxx"
+                  value={formTokenSecret}
+                  onChange={(e) => setFormTokenSecret(e.target.value)}
+                  required
+                />
+              </label>
+            </div>
+            {formError && <p style={styles.formError}>{formError}</p>}
+            <div style={styles.formActions}>
+              <button
+                type="submit"
+                style={{ ...styles.btn, ...styles.btnPrimary }}
+                disabled={formSubmitting}
+              >
+                {formSubmitting ? "Adding…" : "➕ Add & Deploy"}
+              </button>
+            </div>
+            <p style={styles.formHint}>
+              The account will begin deploying immediately. It will not join rotation until deployment succeeds.
+            </p>
+          </form>
+        )}
+
+        {/* Accounts Table */}
+        {accounts.length === 0 ? (
+          <div style={styles.empty}>
+            <p>No accounts added yet.</p>
+            <p style={{ fontSize: "0.85rem", color: "#9ca3af" }}>
+              Add a Modal account to enable distributed inference.
+            </p>
+          </div>
+        ) : (
+          <div style={styles.tableWrapper}>
+            <table style={styles.table}>
+              <thead>
+                <tr>
+                  {["Label", "Workspace", "Status", "Uses", "Last Used", "Actions"].map((h) => (
+                    <th key={h} style={styles.th}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {accounts.map((acct) => {
+                  const sc = STATUS_CONFIG[acct.status];
+                  return (
+                    <tr key={acct.id} style={styles.tr}>
+                      <td style={styles.td}>
+                        <strong>{acct.label}</strong>
+                      </td>
+                      <td style={{ ...styles.td, color: "#9ca3af", fontSize: "0.8rem" }}>
+                        {acct.workspace ?? "—"}
+                      </td>
+                      <td style={styles.td}>
+                        <span style={{
+                          ...styles.badge,
+                          color: sc.color,
+                          background: sc.bg,
+                        }}>
+                          {sc.label}
+                        </span>
+                        {acct.last_error && (
+                          <p style={styles.errorText} title={acct.last_error}>
+                            {acct.last_error.slice(0, 60)}…
+                          </p>
+                        )}
+                      </td>
+                      <td style={{ ...styles.td, textAlign: "center" }}>
+                        {acct.use_count}
+                      </td>
+                      <td style={{ ...styles.td, fontSize: "0.8rem", color: "#9ca3af" }}>
+                        {acct.last_used
+                          ? new Date(acct.last_used).toLocaleString()
+                          : "Never"}
+                      </td>
+                      <td style={styles.td}>
+                        <div style={styles.rowActions}>
+                          {/* Re-deploy */}
+                          <button
+                            style={{ ...styles.iconBtn, color: "#3b82f6" }}
+                            title="Re-deploy"
+                            onClick={() => handleDeploy(acct.id)}
+                          >🚀</button>
+                          {/* Disable / Enable */}
+                          {acct.status !== "disabled" ? (
+                            <button
+                              style={{ ...styles.iconBtn, color: "#f59e0b" }}
+                              title="Disable"
+                              onClick={() => handleDisable(acct.id)}
+                            >⏸️</button>
+                          ) : (
+                            <button
+                              style={{ ...styles.iconBtn, color: "#10b981" }}
+                              title="Enable"
+                              onClick={() => handleEnable(acct.id)}
+                            >▶️</button>
+                          )}
+                          {/* Delete */}
+                          <button
+                            style={{ ...styles.iconBtn, color: "#ef4444" }}
+                            title="Remove"
+                            onClick={() => handleDelete(acct.id)}
+                          >🗑️</button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+// ─── Styles ───────────────────────────────────────────────────────────────────
+
+const styles: Record<string, React.CSSProperties> = {
+  overlay: {
+    position: "fixed", inset: 0,
+    background: "rgba(0,0,0,0.7)",
+    zIndex: 9999,
+    display: "flex", alignItems: "center", justifyContent: "center",
+    padding: "1rem",
+    backdropFilter: "blur(6px)",
+  },
+  panel: {
+    background: "#111827",
+    border: "1px solid #1f2937",
+    borderRadius: "16px",
+    width: "100%", maxWidth: "900px",
+    maxHeight: "90vh",
+    overflow: "hidden",
+    display: "flex", flexDirection: "column",
+    boxShadow: "0 25px 60px rgba(0,0,0,0.5)",
+  },
+  header: {
+    display: "flex", alignItems: "flex-start",
+    justifyContent: "space-between",
+    padding: "1.5rem",
+    borderBottom: "1px solid #1f2937",
+    gap: "1rem",
+  },
+  headerActions: { display: "flex", gap: "0.5rem", alignItems: "center", flexShrink: 0 },
+  title: { margin: 0, fontSize: "1.25rem", fontWeight: 700, color: "#f9fafb" },
+  subtitle: { margin: "0.25rem 0 0", fontSize: "0.85rem", color: "#6b7280" },
+  errorBanner: {
+    background: "rgba(239,68,68,0.15)", border: "1px solid rgba(239,68,68,0.3)",
+    color: "#ef4444", padding: "0.75rem 1.5rem", fontSize: "0.875rem",
+  },
+  form: {
+    padding: "1.25rem 1.5rem",
+    borderBottom: "1px solid #1f2937",
+    background: "#0f172a",
+  },
+  formTitle: { margin: "0 0 1rem", fontSize: "0.9rem", color: "#d1d5db", fontWeight: 600 },
+  formGrid: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.75rem" },
+  label: { display: "flex", flexDirection: "column", gap: "0.35rem", fontSize: "0.8rem", color: "#9ca3af" },
+  input: {
+    background: "#1f2937", border: "1px solid #374151",
+    borderRadius: "8px", padding: "0.5rem 0.75rem",
+    color: "#f9fafb", fontSize: "0.875rem",
+    outline: "none",
+  },
+  formActions: { display: "flex", justifyContent: "flex-end", marginTop: "1rem" },
+  formError: { color: "#ef4444", fontSize: "0.8rem", margin: "0.5rem 0 0" },
+  formHint: { fontSize: "0.75rem", color: "#6b7280", margin: "0.5rem 0 0" },
+  empty: { padding: "3rem", textAlign: "center", color: "#6b7280" },
+  tableWrapper: { overflowY: "auto", flex: 1 },
+  table: { width: "100%", borderCollapse: "collapse" },
+  th: {
+    padding: "0.75rem 1rem", textAlign: "left",
+    fontSize: "0.75rem", color: "#6b7280", fontWeight: 600,
+    textTransform: "uppercase", letterSpacing: "0.05em",
+    borderBottom: "1px solid #1f2937",
+    whiteSpace: "nowrap",
+  },
+  tr: { borderBottom: "1px solid #1f2937", transition: "background 0.15s" },
+  td: { padding: "0.875rem 1rem", color: "#d1d5db", verticalAlign: "top" },
+  badge: {
+    display: "inline-block", padding: "3px 10px",
+    borderRadius: "999px", fontSize: "0.75rem", fontWeight: 600,
+    whiteSpace: "nowrap",
+  },
+  errorText: { margin: "0.25rem 0 0", fontSize: "0.7rem", color: "#ef4444" },
+  rowActions: { display: "flex", gap: "0.25rem", alignItems: "center" },
+  iconBtn: {
+    background: "transparent", border: "none",
+    cursor: "pointer", fontSize: "1.1rem", padding: "4px",
+    borderRadius: "6px", lineHeight: 1,
+    transition: "background 0.15s",
+  },
+  btn: {
+    padding: "0.5rem 1rem", borderRadius: "8px",
+    border: "none", cursor: "pointer",
+    fontSize: "0.875rem", fontWeight: 600,
+    transition: "opacity 0.15s",
+  },
+  btnPrimary: { background: "#6366f1", color: "#fff" },
+  btnSecondary: { background: "#1f2937", color: "#d1d5db" },
+  btnGhost: { background: "transparent", color: "#6b7280", padding: "0.5rem" },
+};
+
+export default AdminPanel;

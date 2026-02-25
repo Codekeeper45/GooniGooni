@@ -1,0 +1,629 @@
+{
+  "version": "2026-02-24",
+  "description": "Unified inference settings schema for MediaGen WebUI",
+  
+  "common": {
+    "prompt": {
+      "type": "string",
+      "required": true,
+      "default": "",
+      "maxLength": 2000,
+      "label": "Prompt",
+      "placeholder": "Describe what you want to generate...",
+      "advanced": false
+    },
+    "negative_prompt": {
+      "type": "string",
+      "required": false,
+      "default": "",
+      "maxLength": 1000,
+      "label": "Negative Prompt",
+      "placeholder": "What to exclude...",
+      "advanced": true
+    },
+    "width": {
+      "type": "int",
+      "required": true,
+      "default": 720,
+      "min": 512,
+      "max": 1280,
+      "step": 64,
+      "label": "Width",
+      "advanced": true
+    },
+    "height": {
+      "type": "int",
+      "required": true,
+      "default": 1280,
+      "min": 512,
+      "max": 1280,
+      "step": 64,
+      "label": "Height",
+      "advanced": true
+    },
+    "seed": {
+      "type": "int",
+      "required": true,
+      "default": -1,
+      "min": -1,
+      "max": 2147483647,
+      "label": "Seed",
+      "placeholder": "Random (-1)",
+      "advanced": true,
+      "help": "-1 for random seed"
+    },
+    "output_format": {
+      "type": "enum",
+      "options": ["mp4", "webm"],
+      "default": "mp4",
+      "label": "Output Format",
+      "advanced": true
+    }
+  },
+
+  "image_models": {
+    "Pony_V6_XL": {
+      "id": "pony",
+      "name": "Pony Diffusion V6 XL",
+      "type": "image",
+      "category": "hentai",
+      "description": "High-quality hentai image generation",
+      
+      "modes": {
+        "txt2img": {
+          "label": "Text to Image",
+          "description": "Generate image from text prompt",
+          "requires_reference": false
+        },
+        "img2img": {
+          "label": "Image to Image",
+          "description": "Transform existing image",
+          "requires_reference": true
+        }
+      },
+      "default_mode": "txt2img",
+      
+      "parameters": {
+        "reference_image": {
+          "type": "image_upload",
+          "required_if": "mode == img2img",
+          "label": "Reference Image",
+          "advanced": false,
+          "accepts": ["image/png", "image/jpeg", "image/webp"]
+        },
+        "steps": {
+          "type": "int",
+          "default": 30,
+          "min": 20,
+          "max": 60,
+          "step": 1,
+          "label": "Steps",
+          "advanced": true,
+          "help": "More steps = higher quality but slower"
+        },
+        "cfg_scale": {
+          "type": "float",
+          "default": 6.0,
+          "min": 1.0,
+          "max": 12.0,
+          "step": 0.5,
+          "label": "CFG Scale",
+          "advanced": true,
+          "help": "How closely to follow the prompt"
+        },
+        "sampler": {
+          "type": "enum",
+          "options": ["Euler a", "DPM++ 2M Karras", "DPM++ SDE Karras"],
+          "default": "Euler a",
+          "label": "Sampler",
+          "advanced": true
+        },
+        "clip_skip": {
+          "type": "int",
+          "default": 2,
+          "min": 1,
+          "max": 4,
+          "step": 1,
+          "label": "Clip Skip",
+          "advanced": true,
+          "help": "CLIP layer to stop at"
+        },
+        "denoising_strength": {
+          "type": "float",
+          "default": 0.7,
+          "min": 0.0,
+          "max": 1.0,
+          "step": 0.05,
+          "label": "Denoising Strength",
+          "advanced": true,
+          "visible_if": "mode == img2img",
+          "help": "How much to change the input image"
+        }
+      },
+      
+      "recommended_resolutions": [
+        { "width": 512, "height": 512, "label": "512×512" },
+        { "width": 768, "height": 768, "label": "768×768" },
+        { "width": 1024, "height": 1024, "label": "1024×1024" }
+      ]
+    },
+    
+    "Flux_dev_nf4": {
+      "id": "flux",
+      "name": "Flux.1 [dev] nf4",
+      "type": "image",
+      "category": "realistic",
+      "description": "Realistic NSFW image generation",
+      
+      "modes": {
+        "txt2img": {
+          "label": "Text to Image",
+          "description": "Generate image from text prompt",
+          "requires_reference": false
+        },
+        "img2img": {
+          "label": "Image to Image",
+          "description": "Transform existing image",
+          "requires_reference": true
+        }
+      },
+      "default_mode": "txt2img",
+      
+      "parameters": {
+        "reference_image": {
+          "type": "image_upload",
+          "required_if": "mode == img2img",
+          "label": "Reference Image",
+          "advanced": false,
+          "accepts": ["image/png", "image/jpeg", "image/webp"]
+        },
+        "steps": {
+          "type": "int",
+          "default": 25,
+          "min": 15,
+          "max": 50,
+          "step": 1,
+          "label": "Steps",
+          "advanced": true
+        },
+        "guidance_scale": {
+          "type": "float",
+          "default": 3.5,
+          "min": 1.0,
+          "max": 10.0,
+          "step": 0.1,
+          "label": "Guidance Scale",
+          "advanced": true,
+          "help": "How closely to follow the prompt"
+        },
+        "sampler": {
+          "type": "enum",
+          "options": ["Euler", "flow-matching"],
+          "default": "Euler",
+          "label": "Sampler",
+          "advanced": true
+        },
+        "denoising_strength": {
+          "type": "float",
+          "default": 0.7,
+          "min": 0.0,
+          "max": 1.0,
+          "step": 0.05,
+          "label": "Denoising Strength",
+          "advanced": true,
+          "visible_if": "mode == img2img",
+          "help": "How much to change the input image"
+        }
+      },
+      
+      "recommended_resolutions": [
+        { "width": 512, "height": 512, "label": "512×512" },
+        { "width": 768, "height": 768, "label": "768×768" },
+        { "width": 1024, "height": 1024, "label": "1024×1024" }
+      ]
+    }
+  },
+
+  "video_models": {
+    "Index-AniSora_V3.2": {
+      "id": "anisora",
+      "name": "Index-AniSora V3.2",
+      "type": "video",
+      "category": "hentai",
+      "description": "High-quality hentai video generation",
+      
+      "modes": {
+        "t2v": {
+          "label": "Text2Video",
+          "description": "Generate video from text prompt",
+          "requires_reference": false
+        },
+        "i2v": {
+          "label": "Image2Video",
+          "description": "Animate a single image",
+          "requires_reference": true
+        },
+        "first_last_frame": {
+          "label": "First+Last",
+          "description": "Generate video between two frames",
+          "requires_reference": true,
+          "requires_multiple": true
+        },
+        "arbitrary_frame": {
+          "label": "Arbitrary",
+          "description": "Multi-keyframe control with spatiotemporal guidance",
+          "requires_reference": true,
+          "requires_multiple": true,
+          "supports_keyframes": true
+        }
+      },
+      "default_mode": "t2v",
+      
+      "fixed_parameters": {
+        "steps": {
+          "value": 8,
+          "locked": true,
+          "warning": "⚠️ Fixed for optimal quality"
+        },
+        "guidance_scale": {
+          "value": 1.0,
+          "locked": false,
+          "recommended": true,
+          "warning": "⚠️ 1.0 recommended for best results"
+        }
+      },
+      
+      "parameters": {
+        "num_frames": {
+          "type": "int",
+          "default": 81,
+          "min": 49,
+          "max": 161,
+          "step": 4,
+          "label": "Num Frames",
+          "advanced": true,
+          "help": "More frames = longer video"
+        },
+        "fps": {
+          "type": "enum",
+          "options": [8, 16, 24],
+          "default": 16,
+          "label": "FPS",
+          "advanced": true
+        },
+        "motion_score": {
+          "type": "float",
+          "default": 3.0,
+          "min": 0.0,
+          "max": 5.0,
+          "step": 0.1,
+          "label": "Motion Score",
+          "advanced": true,
+          "help": "Controls motion intensity"
+        },
+        "reference_image": {
+          "type": "image_upload",
+          "required_if": "mode != t2v",
+          "label": "Reference Image",
+          "advanced": false,
+          "accepts": ["image/png", "image/jpeg", "image/webp"]
+        },
+        "reference_strength": {
+          "type": "float",
+          "default": 0.85,
+          "min": 0.1,
+          "max": 1.0,
+          "step": 0.05,
+          "label": "Reference Strength",
+          "advanced": true,
+          "visible_if": "mode == i2v || mode == arbitrary_frame",
+          "help": "How closely to follow reference image"
+        },
+        "first_frame_image": {
+          "type": "image_upload",
+          "required_if": "mode == first_last_frame",
+          "label": "First Frame",
+          "advanced": false,
+          "visible_if": "mode == first_last_frame"
+        },
+        "last_frame_image": {
+          "type": "image_upload",
+          "required_if": "mode == first_last_frame",
+          "label": "Last Frame",
+          "advanced": false,
+          "visible_if": "mode == first_last_frame"
+        },
+        "first_strength": {
+          "type": "float",
+          "default": 1.0,
+          "min": 0.5,
+          "max": 1.0,
+          "step": 0.05,
+          "label": "First Frame Strength",
+          "advanced": true,
+          "visible_if": "mode == first_last_frame"
+        },
+        "last_strength": {
+          "type": "float",
+          "default": 1.0,
+          "min": 0.5,
+          "max": 1.0,
+          "step": 0.05,
+          "label": "Last Frame Strength",
+          "advanced": true,
+          "visible_if": "mode == first_last_frame"
+        },
+        "arbitrary_frames": {
+          "type": "keyframe_array",
+          "default": [],
+          "label": "Keyframe References",
+          "advanced": false,
+          "visible_if": "mode == arbitrary_frame",
+          "help": "Multiple reference images at different frame positions",
+          "item_schema": {
+            "frame_index": {
+              "type": "int",
+              "min": 0,
+              "max": 160,
+              "help": "Frame position (0-N)"
+            },
+            "image": {
+              "type": "image_upload",
+              "help": "Reference image for this frame"
+            },
+            "strength": {
+              "type": "float",
+              "default": 0.85,
+              "min": 0.1,
+              "max": 1.0,
+              "help": "Influence strength"
+            }
+          }
+        },
+        "denoising_strength": {
+          "type": "float",
+          "default": 0.7,
+          "min": 0.0,
+          "max": 1.0,
+          "step": 0.05,
+          "label": "Denoising Strength",
+          "advanced": true,
+          "visible_if": "mode == i2v || mode == arbitrary_frame"
+        }
+      },
+      
+      "recommended_resolutions": [
+        { "width": 512, "height": 512, "label": "512×512" },
+        { "width": 768, "height": 768, "label": "768×768" },
+        { "width": 1024, "height": 1024, "label": "1024×1024" }
+      ]
+    },
+    
+    "Phr00t_WAN_Rapid_AllInOne_NSFW_v12": {
+      "id": "phr00t",
+      "name": "Phr00t WAN 2.2 Rapid",
+      "type": "video",
+      "category": "realistic",
+      "description": "Fast realistic NSFW video generation",
+      
+      "modes": {
+        "t2v": {
+          "label": "Text2Video",
+          "description": "Generate video from text prompt",
+          "requires_reference": false
+        },
+        "i2v": {
+          "label": "Image2Video",
+          "description": "Animate a single image",
+          "requires_reference": true
+        },
+        "first_last_frame": {
+          "label": "First+Last",
+          "description": "Generate video between two frames",
+          "requires_reference": true,
+          "requires_multiple": true
+        }
+      },
+      "default_mode": "t2v",
+      
+      "fixed_parameters": {
+        "steps": {
+          "value": 4,
+          "locked": true,
+          "warning": "⚠️ Fixed for rapid generation"
+        },
+        "cfg_scale": {
+          "value": 1.0,
+          "locked": true,
+          "warning": "⚠️ Must be 1.0 for this model"
+        }
+      },
+      
+      "parameters": {
+        "num_frames": {
+          "type": "int",
+          "default": 81,
+          "min": 49,
+          "max": 161,
+          "step": 4,
+          "label": "Num Frames",
+          "advanced": true,
+          "help": "More frames = longer video"
+        },
+        "fps": {
+          "type": "enum",
+          "options": [8, 16, 24],
+          "default": 16,
+          "label": "FPS",
+          "advanced": true
+        },
+        "lighting_variant": {
+          "type": "enum",
+          "options": ["high_noise", "low_noise"],
+          "default": "low_noise",
+          "label": "Lighting Variant",
+          "advanced": true,
+          "help": "Affects lighting and grain"
+        },
+        "reference_image": {
+          "type": "image_upload",
+          "required_if": "mode != t2v",
+          "label": "Reference Image",
+          "advanced": false,
+          "accepts": ["image/png", "image/jpeg", "image/webp"]
+        },
+        "reference_strength": {
+          "type": "float",
+          "default": 1.0,
+          "min": 0.5,
+          "max": 1.0,
+          "step": 0.05,
+          "label": "Reference Strength",
+          "advanced": true,
+          "visible_if": "mode == i2v",
+          "help": "How closely to follow reference image"
+        },
+        "first_frame_image": {
+          "type": "image_upload",
+          "required_if": "mode == first_last_frame",
+          "label": "First Frame",
+          "advanced": false,
+          "visible_if": "mode == first_last_frame"
+        },
+        "last_frame_image": {
+          "type": "image_upload",
+          "required_if": "mode == first_last_frame",
+          "label": "Last Frame",
+          "advanced": false,
+          "visible_if": "mode == first_last_frame"
+        },
+        "first_strength": {
+          "type": "float",
+          "default": 1.0,
+          "min": 0.5,
+          "max": 1.0,
+          "step": 0.05,
+          "label": "First Frame Strength",
+          "advanced": true,
+          "visible_if": "mode == first_last_frame"
+        },
+        "last_strength": {
+          "type": "float",
+          "default": 1.0,
+          "min": 0.5,
+          "max": 1.0,
+          "step": 0.05,
+          "label": "Last Frame Strength",
+          "advanced": true,
+          "visible_if": "mode == first_last_frame"
+        },
+        "denoising_strength": {
+          "type": "float",
+          "default": 0.7,
+          "min": 0.0,
+          "max": 1.0,
+          "step": 0.05,
+          "label": "Denoising Strength",
+          "advanced": true,
+          "visible_if": "mode == i2v"
+        }
+      },
+      
+      "recommended_resolutions": [
+        { "width": 512, "height": 512, "label": "512×512" },
+        { "width": 768, "height": 768, "label": "768×768" },
+        { "width": 1024, "height": 1024, "label": "1024×1024" }
+      ]
+    }
+  },
+
+  "ui_logic": {
+    "model_order": [
+      "Pony_V6_XL",
+      "Flux_dev_nf4",
+      "Index-AniSora_V3.2",
+      "Phr00t_WAN_Rapid_AllInOne_NSFW_v12"
+    ],
+    
+    "type_detection": {
+      "video_models": ["Index-AniSora_V3.2", "Phr00t_WAN_Rapid_AllInOne_NSFW_v12"],
+      "image_models": ["Pony_V6_XL", "Flux_dev_nf4"]
+    },
+    
+    "workflow": {
+      "on_model_change": [
+        "load_model_defaults",
+        "set_default_mode",
+        "render_mode_selector",
+        "render_parameters"
+      ],
+      "on_mode_change": [
+        "show_hide_reference_fields",
+        "update_parameter_visibility",
+        "validate_requirements"
+      ],
+      "on_parameter_change": [
+        "validate_value",
+        "update_dependencies",
+        "recalculate_estimate"
+      ]
+    },
+    
+    "validation": {
+      "before_generate": [
+        "check_required_fields",
+        "check_reference_image_if_needed",
+        "validate_ranges",
+        "warn_non_recommended_values"
+      ]
+    },
+    
+    "estimation": {
+      "video_formula": "(num_frames / fps) * 3.5",
+      "image_formula": "steps * 0.4"
+    }
+  },
+
+  "quick_presets": {
+    "duration": {
+      "type": "buttons",
+      "label": "Длительность видео",
+      "options": [
+        { "label": "3 сек (быстро)", "value": 3 },
+        { "label": "5 сек (стандарт ★)", "value": 5 },
+        { "label": "8 сек (динамика)", "value": 8 },
+        { "label": "10 сек (эпик)", "value": 10 }
+      ]
+    },
+    "aspect_ratio": {
+      "type": "buttons",
+      "label": "Соотношение сторон",
+      "options": [
+        { "label": "📱 9:16 Вертикаль", "width": 720, "height": 1280 },
+        { "label": "🖥 16:9 Горизонталь", "width": 1280, "height": 720 },
+        { "label": "⬛ 1:1 Квадрат", "width": 896, "height": 896 },
+        { "label": "📱 4:5 Портрет", "width": 896, "height": 1120 },
+        { "label": "🌊 16:10 Wide", "width": 1152, "height": 720 }
+      ]
+    }
+  },
+
+  "presets": {
+    "quick_test": {
+      "description": "Fast generation for testing",
+      "width": 512,
+      "height": 512,
+      "steps_multiplier": 0.7
+    },
+    "balanced": {
+      "description": "Good quality and speed",
+      "width": 768, "height": 768,
+      "steps_multiplier": 1.0
+    },
+    "high_quality": {
+      "description": "Maximum quality",
+      "width": 1024, "height": 1024,
+      "steps_multiplier": 1.3
+    }
+  }
+}
