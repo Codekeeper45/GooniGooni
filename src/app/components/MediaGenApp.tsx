@@ -44,7 +44,8 @@ import type { ModelId } from "../utils/configManager";
 // ─── API Integration ─────────────────────────────────────────────────────────
 async function generateMediaAPI(
   onProgress: (p: number) => void,
-  params: any
+  params: any,
+  onTaskCreated?: (task_id: string) => void
 ): Promise<{ url: string; thumbnailUrl?: string }> {
   // Build structured payload via configManager
   const modelId: ModelId = params.type === "video" ? params.videoModel : params.imageModel;
@@ -72,12 +73,10 @@ async function generateMediaAPI(
   console.log("🚀 Payload for inference:", payload);
   console.log("📋 Advanced settings:", params.useAdvancedSettings ? "ON" : "OFF");
 
-  // ── Guard: require API_URL ──────────────────────────────────────────────────
   if (!API_URL) {
     throw new Error("Backend not configured. Set VITE_API_URL in .env and rebuild the app.");
   }
 
-  // ── Real backend: POST /generate ──────────────────────────────────────────
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     ...(API_KEY ? { "X-API-Key": API_KEY } : {}),
@@ -96,46 +95,72 @@ async function generateMediaAPI(
 
   const { task_id } = await genRes.json() as { task_id: string };
   console.log(`📦 Task created: ${task_id}`);
+  onTaskCreated?.(task_id);
   onProgress(5);
 
-  // ── Poll /status/{task_id} every 3 seconds ────────────────────────────────
+  return pollTask(task_id, params.type, onProgress);
+}
+
+// ─── Active task persistence helpers ─────────────────────────────────────────
+const ACTIVE_TASK_KEY = "gg_active_task";
+
+interface ActiveTask {
+  task_id: string;
+  type: string;
+  prompt: string;
+  modelName: string;
+  width: number;
+  height: number;
+  seed: number;
+  startedAt: number;
+}
+
+function saveActiveTask(t: ActiveTask) {
+  localStorage.setItem(ACTIVE_TASK_KEY, JSON.stringify(t));
+}
+function clearActiveTask() {
+  localStorage.removeItem(ACTIVE_TASK_KEY);
+}
+function getActiveTask(): ActiveTask | null {
+  try {
+    const raw = localStorage.getItem(ACTIVE_TASK_KEY);
+    return raw ? (JSON.parse(raw) as ActiveTask) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Poll task until done/failed — reusable for both new and resumed tasks. */
+async function pollTask(
+  task_id: string,
+  type: string,
+  onProgress: (p: number) => void
+): Promise<{ url: string; thumbnailUrl?: string }> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...(API_KEY ? { "X-API-Key": API_KEY } : {}),
+  };
   const POLL_INTERVAL_MS = 3000;
-  const MAX_POLLS = 400; // ~20 min safety cap
+  const MAX_POLLS = 400;
 
   for (let poll = 0; poll < MAX_POLLS; poll++) {
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
-
     const statusRes = await fetch(`${API_URL}/status/${task_id}`, { headers });
-    if (!statusRes.ok) {
-      throw new Error(`Status check failed (${statusRes.status})`);
-    }
-
+    if (!statusRes.ok) throw new Error(`Status check failed (${statusRes.status})`);
     const { status, progress, error } = await statusRes.json() as {
-      status: string;
-      progress: number;
-      error?: string;
+      status: string; progress: number; error?: string;
     };
-
-    // Clamp progress to 5–99 during processing, 100 when done
     onProgress(status === "done" ? 100 : Math.max(5, Math.min(99, progress ?? 0)));
-
-    if (status === "failed") {
-      throw new Error(error ?? "Generation failed on the server");
-    }
-
+    if (status === "failed") throw new Error(error ?? "Generation failed on the server");
     if (status === "done") {
       const resultUrl = `${API_URL}/results/${task_id}`;
       const previewUrl = `${API_URL}/preview/${task_id}`;
-      return {
-        url: resultUrl,
-        thumbnailUrl: params.type === "video" ? previewUrl : undefined,
-      };
+      return { url: resultUrl, thumbnailUrl: type === "video" ? previewUrl : undefined };
     }
   }
-
   throw new Error("Generation timed out after polling limit reached");
-
 }
+
 
 function calcEstSeconds(
   type: GenerationType,
@@ -267,6 +292,48 @@ export function MediaGenApp() {
     }
   }, [generationType, videoModel, imageModel]);
 
+  // ── Resume generation from localStorage on page load ─────────────────────────
+  useEffect(() => {
+    const saved = getActiveTask();
+    if (!saved || !saved.task_id) return;
+
+    // Only resume if task started less than 25 minutes ago to avoid stale tasks
+    if (Date.now() - saved.startedAt > 25 * 60 * 1000) {
+      clearActiveTask();
+      return;
+    }
+
+    setStatus("generating");
+    setProgress(5);
+    setStatusText(getStatusText(5, saved.type as GenerationType));
+    setError(null);
+    setResult(null);
+
+    pollTask(saved.task_id, saved.type, setProgress)
+      .then(({ url: resultUrl, thumbnailUrl }) => {
+        const newResult = {
+          url: resultUrl,
+          thumbnailUrl,
+          seed: saved.seed,
+          width: saved.width,
+          height: saved.height,
+          prompt: saved.prompt,
+          model: saved.modelName,
+          type: saved.type as GenerationType,
+        };
+        setResult(newResult);
+        setStatus("done");
+        setProgress(100);
+        clearActiveTask();
+      })
+      .catch((err) => {
+        clearActiveTask();
+        setStatus("error");
+        setError(err instanceof Error ? err.message : "Generation failed");
+      });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const estSeconds = calcEstSeconds(
     generationType,
     generationType === "video" ? numFrames : undefined,
@@ -301,49 +368,65 @@ export function MediaGenApp() {
     setResult(null);
 
     try {
-      const { url: resultUrl, thumbnailUrl } = await generateMediaAPI((p) => setProgress(p), {
-        type: generationType,
-        useAdvancedSettings,
-        prompt,
-        negativePrompt: finalNegativePrompt,
-        width,
-        height,
-        seed: resolvedSeed,
-        outputFormat,
-        videoModel,
-        videoMode,
-        numFrames,
-        videoSteps,
-        fps,
-        guidanceScale,
-        cfgScaleVideo,
-        motionScore,
-        lightingVariant,
-        denoisingStrength,
-        referenceImage,
-        referenceStrength,
-        firstFrameImage,
-        lastFrameImage,
-        arbitraryFrames,
-        imageModel,
-        imageMode,
-        imageSteps,
-        cfgScaleImage,
-        imageGuidanceScale,
-        clipSkip,
-        sampler,
-        imgDenoisingStrength,
-      });
-
-      const modelName = 
+      const modelName =
         generationType === "video"
-          ? videoModel === "anisora" 
-            ? "Index-AniSora V3.2" 
+          ? videoModel === "anisora"
+            ? "Index-AniSora V3.2"
             : "Phr00t WAN 2.2 Rapid"
           : imageModel === "pony"
             ? "Pony Diffusion V6 XL"
             : "Flux.1 [dev] nf4";
 
+      clearActiveTask();
+      const { url: resultUrl, thumbnailUrl } = await generateMediaAPI(
+        (p) => setProgress(p),
+        {
+          type: generationType,
+          useAdvancedSettings,
+          prompt,
+          negativePrompt: finalNegativePrompt,
+          width,
+          height,
+          seed: resolvedSeed,
+          outputFormat,
+          videoModel,
+          videoMode,
+          numFrames,
+          videoSteps,
+          fps,
+          guidanceScale,
+          cfgScaleVideo,
+          motionScore,
+          lightingVariant,
+          denoisingStrength,
+          referenceImage,
+          referenceStrength,
+          firstFrameImage,
+          lastFrameImage,
+          arbitraryFrames,
+          imageModel,
+          imageMode,
+          imageSteps,
+          cfgScaleImage,
+          imageGuidanceScale,
+          clipSkip,
+          sampler,
+          imgDenoisingStrength,
+        },
+        // Save real task_id as soon as server assigns it
+        (task_id) => saveActiveTask({
+          task_id,
+          type: generationType,
+          prompt,
+          modelName,
+          width,
+          height,
+          seed: resolvedSeed,
+          startedAt: Date.now(),
+        })
+      );
+
+      clearActiveTask();
       const newResult = {
         url: resultUrl,
         thumbnailUrl,
@@ -387,9 +470,10 @@ export function MediaGenApp() {
         createdAt: new Date(),
       };
       addToGallery(galleryItem);
-    } catch {
+    } catch (err) {
+      clearActiveTask();
       setStatus("error");
-      setError("Connection to inference server failed.");
+      setError(err instanceof Error ? err.message : "Connection to inference server failed.");
     }
   };
 
