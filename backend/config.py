@@ -28,9 +28,9 @@ MODEL_IDS: dict[str, str] = {
     # File loaded via from_single_file() — see models/phr00t.py
     "phr00t": os.environ.get("PHR00T_MODEL_ID", "Phr00t/WAN2.2-14B-Rapid-AllInOne"),
 
-    # Anime image – Pony Diffusion V6 XL (original author)
-    # Repo: https://huggingface.co/LyliaEngine/Pony_Diffusion_V6_XL
-    "pony": os.environ.get("PONY_MODEL_ID", "LyliaEngine/Pony_Diffusion_V6_XL"),
+    # Anime image – Pony Diffusion V6 XL (full SDXL pipeline)
+    # Repo: https://huggingface.co/Polenov2024/Pony-Diffusion-V6-XL
+    "pony": os.environ.get("PONY_MODEL_ID", "Polenov2024/Pony-Diffusion-V6-XL"),
 
     # Realistic image – Flux.1 [dev] (base repo, NF4 quantized on-the-fly via BnB)
     # Repo: https://huggingface.co/black-forest-labs/FLUX.1-dev

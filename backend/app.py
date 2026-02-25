@@ -60,7 +60,7 @@ video_image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install(
         *_base_pkgs,
-        "torch==2.3.1",
+        "torch==2.4.0",
         "torchvision",
         "diffusers>=0.32",  # 0.32+ required for WanPipeline.from_single_file()
         "transformers>=4.43",
@@ -78,7 +78,7 @@ image_gen_image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install(
         *_base_pkgs,
-        "torch==2.3.1",
+        "torch==2.4.0",
         "torchvision",
         "diffusers>=0.30",
         "transformers>=4.43",
