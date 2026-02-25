@@ -8,7 +8,8 @@ dist/
 build/
 .vite/
 
-# Python
+# Python / Backend (not needed for frontend Vite build)
+backend/
 __pycache__/
 *.py[cod]
 *.pyo

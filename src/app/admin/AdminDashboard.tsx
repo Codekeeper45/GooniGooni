@@ -134,7 +134,11 @@ export function AdminDashboard() {
         await fetchAccounts();
       } else {
         const e2 = await res.json().catch(() => ({}));
-        showToast(`Ошибка: ${e2.detail ?? res.status}`, false);
+        let errMsg = e2.detail;
+        if (typeof errMsg === "object") {
+          errMsg = JSON.stringify(errMsg);
+        }
+        showToast(`Ошибка: ${errMsg ?? res.status}`, false);
       }
     } catch { showToast("Сетевая ошибка", false); }
     finally { setAddLoading(false); }

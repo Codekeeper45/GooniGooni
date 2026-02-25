@@ -270,6 +270,7 @@ def fastapi_app():
     from auth import verify_api_key
     from config import MODELS_SCHEMA, DEFAULT_PAGE_SIZE, DB_PATH
     from router import router as account_router, NoReadyAccountError, MAX_FALLBACKS
+    from deployer import deploy_account_async, deploy_all_accounts
     from schemas import (
         DeleteResponse,
         GalleryResponse,
