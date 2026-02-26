@@ -191,6 +191,7 @@ async function generateMediaAPI(
   params: any,
   onTaskCreated?: (task_id: string) => void,
   onTaskSnapshot?: (snapshot: PollSnapshot) => void,
+  signal?: AbortSignal,
 ): Promise<{ url: string; thumbnailUrl?: string }> {
   const modelId: ModelId = params.type === "video" ? params.videoModel : params.imageModel;
   const mode = params.type === "video" ? params.videoMode : params.imageMode;
@@ -251,7 +252,7 @@ async function generateMediaAPI(
   onTaskCreated?.(task_id);
   onProgress(5);
 
-  return pollTask(task_id, params.type, onProgress, onStatusText, onTaskSnapshot);
+  return pollTask(task_id, params.type, onProgress, onStatusText, onTaskSnapshot, signal);
 }
 
 async function pollTask(
@@ -260,15 +261,23 @@ async function pollTask(
   onProgress: (p: number) => void,
   onStatusText: (text: string) => void,
   onTaskSnapshot?: (snapshot: PollSnapshot) => void,
+  signal?: AbortSignal,
 ): Promise<{ url: string; thumbnailUrl?: string }> {
   const POLL_INTERVAL_MS = 3000;
   const MAX_POLLS = 400;
 
   for (let poll = 0; poll < MAX_POLLS; poll++) {
     if (poll > 0) {
-      await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(resolve, POLL_INTERVAL_MS);
+        signal?.addEventListener("abort", () => {
+          clearTimeout(timer);
+          reject(new DOMException("Polling aborted", "AbortError"));
+        }, { once: true });
+      });
     }
-    const statusRes = await sessionFetch(`/status/${task_id}`, {}, { retryOn401: true });
+    if (signal?.aborted) throw new DOMException("Polling aborted", "AbortError");
+    const statusRes = await sessionFetch(`/status/${task_id}`, { signal }, { retryOn401: true });
     if (!statusRes.ok) {
       const err = await readApiError(statusRes, "Status check failed.");
       throw new Error(`Status check failed (${statusRes.status}): ${err.detail} ${err.userAction}`.trim());
@@ -388,7 +397,12 @@ export function MediaGenApp() {
   const [showHistory, setShowHistory] = useState(false);
 
   const resumeStartedRef = useRef(false);
+  const pollAbortRef = useRef<AbortController | null>(null);
   const skipModelDefaultsRef = useRef(true);
+
+  useEffect(() => {
+    return () => { pollAbortRef.current?.abort(); };
+  }, []);
 
   const anisoraFixed = configManager.getFixedParameters("anisora");
   const phr00tFixed = configManager.getFixedParameters("phr00t");
@@ -646,14 +660,9 @@ export function MediaGenApp() {
       return;
     }
 
-    setGenerationTypePersisted(saved.type);
-    if (saved.type === "video") {
-      setVideoModelPersisted(saved.modelKey as VideoModel);
-      setVideoModePersisted(saved.mode as VideoMode);
-    } else {
-      setImageModelPersisted(saved.modelKey as ImageModel);
-      setImageModePersisted(saved.mode as ImageMode);
-    }
+    pollAbortRef.current?.abort();
+    const ac = new AbortController();
+    pollAbortRef.current = ac;
 
     setStatus("generating");
     const resumeProgress = Math.max(progress, persistedUi?.progress ?? 0, 5);
@@ -683,7 +692,7 @@ export function MediaGenApp() {
         error: snapshot.status === "failed" ? snapshot.errorMsg : undefined,
         thumbnailUrl: snapshot.previewUrl,
       });
-    })
+    }, ac.signal)
       .then(({ url: resultUrl, thumbnailUrl }) => {
         const newResult = {
           url: resultUrl,
@@ -721,6 +730,7 @@ export function MediaGenApp() {
         addToGallery(galleryItem);
       })
       .catch((err) => {
+        if ((err as { name?: string })?.name === "AbortError") return;
         clearActiveTask();
         setStatus("error");
         const message = err instanceof Error ? err.message : "Generation failed";
@@ -771,6 +781,10 @@ export function MediaGenApp() {
           : imageModel === "pony"
             ? "Pony Diffusion V6 XL"
             : "Flux.1 [dev] nf4";
+
+      pollAbortRef.current?.abort();
+      const ac = new AbortController();
+      pollAbortRef.current = ac;
 
       clearActiveTask();
       const { url: resultUrl, thumbnailUrl } = await generateMediaAPI(
@@ -845,7 +859,8 @@ export function MediaGenApp() {
             error: snapshot.status === "failed" ? snapshot.errorMsg : undefined,
             thumbnailUrl: snapshot.previewUrl,
           });
-        }
+        },
+        ac.signal
       );
 
       clearActiveTask();
@@ -901,6 +916,7 @@ export function MediaGenApp() {
       };
       addToGallery(galleryItem);
     } catch (err) {
+      if ((err as { name?: string })?.name === "AbortError") return;
       clearActiveTask();
       setStatus("error");
       const message = err instanceof Error ? err.message : "Connection to inference server failed.";
