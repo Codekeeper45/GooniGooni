@@ -1,5 +1,6 @@
 import { createContext, useContext, useState, useEffect } from "react";
 import type { GenerationType } from "../components/ControlPanel";
+import { sessionFetch } from "../utils/sessionClient";
 
 export interface GalleryItem {
   id: string;
@@ -55,6 +56,8 @@ export function GalleryProvider({ children }: { children: React.ReactNode }) {
 
   const removeFromGallery = (id: string) => {
     setGallery((prev) => prev.filter((item) => item.id !== id));
+    // Best-effort server cleanup — don't block UI on failure
+    sessionFetch(`/gallery/${id}`, { method: "DELETE" }).catch(() => {});
   };
 
   return (

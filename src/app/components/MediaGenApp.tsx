@@ -419,6 +419,7 @@ export function MediaGenApp() {
             : "Flux.1 [dev] nf4";
 
       clearActiveTask();
+      let capturedTaskId = "";
       const { url: resultUrl, thumbnailUrl } = await generateMediaAPI(
         (p) => setProgress(p),
         (text) => setStatusText(text),
@@ -456,16 +457,19 @@ export function MediaGenApp() {
           imgDenoisingStrength,
         },
         // Save real task_id as soon as server assigns it
-        (task_id) => saveActiveTask({
-          task_id,
-          type: generationType,
-          prompt,
-          modelName,
-          width,
-          height,
-          seed: resolvedSeed,
-          startedAt: Date.now(),
-        })
+        (task_id) => {
+          capturedTaskId = task_id;
+          saveActiveTask({
+            task_id,
+            type: generationType,
+            prompt,
+            modelName,
+            width,
+            height,
+            seed: resolvedSeed,
+            startedAt: Date.now(),
+          });
+        }
       );
 
       clearActiveTask();
@@ -485,8 +489,9 @@ export function MediaGenApp() {
       setProgress(100);
 
       // Add to history
+      const itemId = capturedTaskId || Date.now().toString();
       const historyItem: HistoryItem = {
-        id: Date.now().toString(),
+        id: itemId,
         prompt,
         type: generationType,
         model: modelName,
@@ -500,7 +505,7 @@ export function MediaGenApp() {
 
       // Add to gallery via context
       const galleryItem: GalleryItem = {
-        id: Date.now().toString(),
+        id: itemId,
         url: resultUrl,
         thumbnailUrl,
         prompt,

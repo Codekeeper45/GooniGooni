@@ -1259,23 +1259,27 @@ def fastapi_app():
                 async with httpx.AsyncClient(timeout=httpx.Timeout(connect=5.0, read=60.0, write=20.0, pool=5.0)) as client:
                     resp = await client.get(remote_url, headers={"X-API-Key": api_key})
                     if resp.status_code == 404:
-                        raise HTTPException(status_code=404, detail="Remote preview not found")
+                        raise HTTPException(status_code=404, detail=_error_payload(
+                            code="preview_not_found", detail="Remote preview not found.", user_action="Verify task id or regenerate."))
                     resp.raise_for_status()
                     content_type = resp.headers.get("content-type", "image/jpeg")
                     return Response(content=resp.content, media_type=content_type)
             except HTTPException:
                 raise
             except Exception as exc:
-                raise HTTPException(status_code=502, detail=f"Remote preview fetch failed: {exc}")
+                raise HTTPException(status_code=502, detail=_error_payload(
+                    code="remote_preview_unavailable", detail=f"Remote preview fetch failed: {exc}", user_action="Retry shortly."))
 
         results_vol.reload()
         task_row = _get_raw_task(task_id)
         if not task_row:
-            raise HTTPException(status_code=404, detail="Task not found")
+            raise HTTPException(status_code=404, detail=_error_payload(
+                code="task_not_found", detail="Task not found.", user_action="Verify task id and retry."))
 
         preview_path = task_row.get("preview_path")
         if not preview_path or not os.path.exists(preview_path):
-            raise HTTPException(status_code=404, detail="Preview not available yet")
+            raise HTTPException(status_code=404, detail=_error_payload(
+                code="preview_not_ready", detail="Preview not available yet.", user_action="Wait for completion and retry."))
 
         return FileResponse(preview_path, media_type="image/jpeg")
 
@@ -1318,7 +1322,8 @@ def fastapi_app():
         results_vol.reload()
         deleted = storage.delete_gallery_item(task_id)
         if not deleted:
-            raise HTTPException(status_code=404, detail="Item not found")
+            raise HTTPException(status_code=404, detail=_error_payload(
+                code="not_found", detail="Gallery item not found.", user_action="Verify item id and retry."))
         results_vol.commit()
         return DeleteResponse(deleted=True, id=task_id)
 
@@ -1411,19 +1416,9 @@ def fastapi_app():
     # ── GET /admin/health — fast probe (also validates key) ─────────────────
     @api.get("/admin/health", tags=["Admin"])
     async def admin_health(_ip: str = Depends(get_admin_auth("health"))):
-        import sqlite3 as _sql
-        from config import DB_PATH as _db
-
         results_vol.reload()
         ready = [a for a in acc_store.list_accounts() if a["status"] == "ready"]
-        storage_ok = False
-        try:
-            conn = _sql.connect(_db)
-            conn.execute("SELECT 1")
-            conn.close()
-            storage_ok = True
-        except Exception:
-            storage_ok = False
+        storage_ok = storage.check_storage_health()
         return {
             "ok": True,
             "storage_ok": storage_ok,
@@ -1466,7 +1461,8 @@ def fastapi_app():
         results_vol.reload()
         deleted = acc_store.delete_account(account_id)
         if not deleted:
-            raise HTTPException(status_code=404, detail="Account not found")
+            raise HTTPException(status_code=404, detail=_error_payload(
+                code="not_found", detail="Account not found.", user_action="Verify account id and retry."))
         results_vol.commit()
         return {"deleted": True, "id": account_id}
 
@@ -1490,7 +1486,14 @@ def fastapi_app():
     @api.post("/admin/accounts/{account_id}/deploy", tags=["Admin"])
     async def admin_deploy_account(account_id: str, _ip: str = Depends(get_admin_auth("deploy_account"))):
         if acc_store.get_account(account_id) is None:
-            raise HTTPException(status_code=404, detail="Account not found")
+            raise HTTPException(
+                status_code=404,
+                detail=_error_payload(
+                    code="not_found",
+                    detail="Account not found.",
+                    user_action="Verify account id and retry.",
+                ),
+            )
         deploy_account_async(account_id)
         return {"id": account_id, "status": "checking", "message": "Deploy started, health-check in progress."}
 
@@ -1503,30 +1506,12 @@ def fastapi_app():
     # ── GET /admin/logs — Returns recent audit log entries ────────────────────
     @api.get("/admin/logs", tags=["Admin"])
     async def admin_get_logs(limit: int = 100, _ip: str = Depends(get_admin_auth("read_logs"))):
-        import sqlite3 as _sql
-        from config import DB_PATH as _db
         results_vol.reload()
-        if not os.path.exists(_db):
-            return {"logs": []}
-        conn = _sql.connect(_db)
-        conn.row_factory = _sql.Row
-        rows = conn.execute(
-            "SELECT * FROM admin_audit_log ORDER BY ts DESC LIMIT ?", (limit,)
-        ).fetchall()
-        conn.close()
-        return {"logs": [dict(r) for r in rows]}
+        return {"logs": storage.get_audit_logs(limit=limit)}
 
     # ── Internal helper ───────────────────────────────────────────────────────
     def _get_raw_task(task_id: str) -> Optional[dict]:
-        """Return raw task dict from DB for file-serving endpoints."""
-        import sqlite3
-        from config import DB_PATH
-        if not os.path.exists(DB_PATH):
-            return None
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
-        row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
-        conn.close()
-        return dict(row) if row else None
+        """Delegate to storage module for raw task access."""
+        return storage.get_raw_task(task_id)
 
     return api

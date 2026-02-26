@@ -694,6 +694,41 @@ def get_operational_snapshot() -> dict[str, Any]:
     }
 
 
+
+# ─── Raw data access (used by file-serving and admin endpoints) ───────────────
+
+def get_raw_task(task_id: str) -> dict | None:
+    """Return raw task dict for file-serving endpoints."""
+    with _db() as conn:
+        row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def get_audit_logs(limit: int = 100) -> list[dict]:
+    """Return recent admin audit log entries, newest first."""
+    if not os.path.exists(DB_PATH):
+        return []
+    with _db() as conn:
+        try:
+            rows = conn.execute(
+                "SELECT * FROM admin_audit_log ORDER BY ts DESC LIMIT ?", (limit,)
+            ).fetchall()
+            return [dict(r) for r in rows]
+        except sqlite3.OperationalError:
+            # Table may not exist yet if admin_security hasn't initialized
+            return []
+
+
+def check_storage_health() -> bool:
+    """Return True when SQLite is reachable through the standard DB context."""
+    try:
+        with _db() as conn:
+            conn.execute("SELECT 1")
+        return True
+    except Exception:
+        return False
+
+
 # ─── File path helpers ────────────────────────────────────────────────────────
 
 def task_dir(task_id: str) -> Path:
