@@ -797,6 +797,13 @@ def fastapi_app():
                         user_action="Retry later.",
                     ),
                 )
+            storage.update_task_status(
+                task_id,
+                "pending",
+                progress=0,
+                stage="queued",
+                stage_detail="image_lane",
+            )
             results_vol.commit()
             return GenerateResponse(task_id=task_id, status=TaskStatus.pending)
 
@@ -1150,6 +1157,32 @@ def fastapi_app():
                     user_action="Verify task id and retry.",
                 ),
             )
+
+        pending_start_timeout_seconds = int(
+            os.environ.get("PENDING_WORKER_START_TIMEOUT_SECONDS", "120")
+        )
+        if (
+            result.status == TaskStatus.pending
+            and (result.progress or 0) == 0
+            and not result.stage
+            and result.created_at is not None
+        ):
+            age_seconds = (datetime.now(result.created_at.tzinfo) - result.created_at).total_seconds()
+            if age_seconds >= pending_start_timeout_seconds:
+                storage.update_task_status(
+                    task_id,
+                    "failed",
+                    progress=0,
+                    error_msg=(
+                        "Worker start timeout: no GPU worker picked up the task in time. "
+                        "Check Modal quota/account health and retry."
+                    ),
+                    stage="failed",
+                    stage_detail="worker_start_timeout",
+                )
+                results_vol.commit()
+                result = storage.get_task(task_id) or result
+
         return result
 
     # ── GET /results/{task_id} ────────────────────────────────────────────────
