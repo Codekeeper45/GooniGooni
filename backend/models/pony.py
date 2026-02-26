@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import warnings
 
+import numpy as np
 import torch
 from PIL import Image
 
@@ -24,7 +25,8 @@ class PonyPipeline(BasePipeline):
 
     def __init__(self, hf_model_id: str):
         self.hf_model_id = hf_model_id
-        self.vae_model_id = os.environ.get("PONY_VAE_MODEL_ID", "madebyollin/sdxl-vae-fp16-fix")
+        # Optional override for experimentation; by default use model-native VAE.
+        self.vae_model_id = (os.environ.get("PONY_VAE_MODEL_ID") or "").strip() or None
         self._loaded = False
         self._txt2img = None
         self._img2img = None
@@ -35,19 +37,22 @@ class PonyPipeline(BasePipeline):
 
         from diffusers import AutoencoderKL, StableDiffusionXLPipeline, StableDiffusionXLImg2ImgPipeline
 
-        vae = AutoencoderKL.from_pretrained(
-            self.vae_model_id,
-            cache_dir=cache_path,
-            torch_dtype=torch.float16,
-        )
-
-        self._txt2img = StableDiffusionXLPipeline.from_pretrained(
-            self.hf_model_id,
+        pipe_kwargs = dict(
             cache_dir=cache_path,
             torch_dtype=torch.float16,
             use_safetensors=True,
             low_cpu_mem_usage=False,
-            vae=vae,
+        )
+        if self.vae_model_id:
+            pipe_kwargs["vae"] = AutoencoderKL.from_pretrained(
+                self.vae_model_id,
+                cache_dir=cache_path,
+                torch_dtype=torch.float16,
+            )
+
+        self._txt2img = StableDiffusionXLPipeline.from_pretrained(
+            self.hf_model_id,
+            **pipe_kwargs,
         )
         # Fix for NaN fp16 VAE outputs (SDXL VAE bug on float16)
         if hasattr(self._txt2img, "vae") and self._txt2img.vae is not None:
@@ -73,10 +78,9 @@ class PonyPipeline(BasePipeline):
 
     @staticmethod
     def _run_pipe_checked(pipe, **kwargs) -> Image.Image:
-        # SDXL may emit NaN/Inf during VAE decode; treat this as a hard failure
-        # so the task is marked failed instead of silently returning a bad output.
-        if hasattr(pipe, "upcast_vae"):
-            pipe.upcast_vae()
+        # SDXL VAE decode is more stable in fp32.
+        if hasattr(pipe, "vae") and pipe.vae is not None:
+            pipe.vae.to(dtype=torch.float32)
 
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always", RuntimeWarning)
@@ -92,6 +96,18 @@ class PonyPipeline(BasePipeline):
 
         if image is None:
             raise RuntimeError("Pony pipeline returned empty image output.")
+        arr = np.asarray(image)
+        if not np.isfinite(arr).all():
+            raise RuntimeError(
+                "Pony decode produced invalid pixel values (NaN/Inf). "
+                "Retry with lower resolution/steps or a different seed."
+            )
+        # Detect near-uniform gray canvas collapse before saving artifacts.
+        if (arr.max() - arr.min()) < 4:
+            raise RuntimeError(
+                "Pony output collapsed to a near-uniform image. "
+                "Retry with a different seed or prompt."
+            )
         return image
 
     def generate(self, request: dict, task_id: str, results_path: str) -> tuple[str, str]:

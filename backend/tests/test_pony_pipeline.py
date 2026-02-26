@@ -56,6 +56,15 @@ class _DummyPipe:
                 RuntimeWarning,
                 stacklevel=1,
             )
+        # Non-uniform image to represent a valid decoded output.
+        img = Image.new("RGB", (16, 16), (128, 128, 128))
+        img.putpixel((0, 0), (96, 140, 180))
+        img.putpixel((1, 1), (180, 96, 140))
+        return _DummyResult(img)
+
+
+class _UniformDummyPipe:
+    def __call__(self, **kwargs):
         return _DummyResult(Image.new("RGB", (16, 16), (128, 128, 128)))
 
 
@@ -63,7 +72,6 @@ def test_run_pipe_checked_returns_image_without_warning():
     pipe = _DummyPipe(emit_invalid_cast_warning=False)
     image = PonyPipeline._run_pipe_checked(pipe, prompt="ok")
     assert isinstance(image, Image.Image)
-    assert pipe.upcast_called is True
 
 
 def test_run_pipe_checked_raises_on_invalid_cast_warning():
@@ -71,3 +79,10 @@ def test_run_pipe_checked_raises_on_invalid_cast_warning():
     with pytest.raises(RuntimeError) as exc:
         PonyPipeline._run_pipe_checked(pipe, prompt="bad")
     assert "invalid pixel values" in str(exc.value).lower()
+
+
+def test_run_pipe_checked_raises_on_uniform_collapsed_output():
+    pipe = _UniformDummyPipe()
+    with pytest.raises(RuntimeError) as exc:
+        PonyPipeline._run_pipe_checked(pipe, prompt="flat")
+    assert "near-uniform image" in str(exc.value).lower()
