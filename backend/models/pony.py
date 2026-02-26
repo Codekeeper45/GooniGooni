@@ -4,6 +4,7 @@ Pony Diffusion V6 XL pipeline for image generation.
 from __future__ import annotations
 
 import os
+import warnings
 
 import torch
 from PIL import Image
@@ -62,6 +63,29 @@ class PonyPipeline(BasePipeline):
         if cls:
             pipe.scheduler = cls.from_config(pipe.scheduler.config)
 
+    @staticmethod
+    def _run_pipe_checked(pipe, **kwargs) -> Image.Image:
+        # SDXL may emit NaN/Inf during VAE decode; treat this as a hard failure
+        # so the task is marked failed instead of silently returning a bad output.
+        if hasattr(pipe, "upcast_vae"):
+            pipe.upcast_vae()
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", RuntimeWarning)
+            image = pipe(**kwargs).images[0]
+
+        for warn in caught:
+            message = str(warn.message)
+            if "invalid value encountered in cast" in message:
+                raise RuntimeError(
+                    "Pony decode produced invalid pixel values (NaN/Inf). "
+                    "Retry with lower resolution/steps or a different seed."
+                )
+
+        if image is None:
+            raise RuntimeError("Pony pipeline returned empty image output.")
+        return image
+
     def generate(self, request: dict, task_id: str, results_path: str) -> tuple[str, str]:
         if not self._loaded:
             raise RuntimeError("Pipeline not initialized. Call load() first.")
@@ -89,7 +113,8 @@ class PonyPipeline(BasePipeline):
         with torch.inference_mode():
             if mode == "txt2img":
                 self._apply_sampler(self._txt2img, sampler)
-                image = self._txt2img(
+                image = self._run_pipe_checked(
+                    self._txt2img,
                     prompt=prompt,
                     negative_prompt=negative_prompt or None,
                     width=width,
@@ -98,12 +123,13 @@ class PonyPipeline(BasePipeline):
                     guidance_scale=cfg_scale,
                     clip_skip=clip_skip,
                     generator=generator,
-                ).images[0]
+                )
 
             elif mode == "img2img":
                 ref_img = self.decode_image(request["reference_image"]).resize((width, height), Image.LANCZOS)
                 self._apply_sampler(self._img2img, sampler)
-                image = self._img2img(
+                image = self._run_pipe_checked(
+                    self._img2img,
                     prompt=prompt,
                     negative_prompt=negative_prompt or None,
                     image=ref_img,
@@ -112,7 +138,7 @@ class PonyPipeline(BasePipeline):
                     guidance_scale=cfg_scale,
                     clip_skip=clip_skip,
                     generator=generator,
-                ).images[0]
+                )
 
             else:
                 raise ValueError(f"Unsupported mode for pony: {mode}")
@@ -120,4 +146,10 @@ class PonyPipeline(BasePipeline):
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
         image.save(out_path)
         self.make_preview_from_pil(image, prev_path)
+
+        if not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
+            raise RuntimeError("Pony result file was not created.")
+        if not os.path.exists(prev_path) or os.path.getsize(prev_path) == 0:
+            raise RuntimeError("Pony preview file was not created.")
+
         return out_path, prev_path

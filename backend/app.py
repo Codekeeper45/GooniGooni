@@ -240,6 +240,17 @@ def _execute_video_generation(
         storage.record_operational_event(*args, **kwargs)
         _commit_after_write()
 
+    def _ensure_artifacts_exist(result_path: str, preview_path: str) -> None:
+        missing: list[str] = []
+        for path in (result_path, preview_path):
+            if not path or not os.path.exists(path):
+                missing.append(path or "<empty>")
+        if missing:
+            raise RuntimeError(
+                "Generation completed but artifact(s) missing: "
+                + ", ".join(missing)
+            )
+
     results_vol.reload()
     storage.init_db()
     _update_status(
@@ -292,6 +303,7 @@ def _execute_video_generation(
         )
 
         result_path, preview_path = pipeline.generate(request_dict, task_id, RESULTS_PATH)
+        _ensure_artifacts_exist(result_path, preview_path)
         _update_status(
             task_id,
             "done",
@@ -457,6 +469,10 @@ def run_image_generation(request_dict: dict, task_id: str) -> dict:
         results_vol.commit()
 
         result_path, preview_path = pipeline.generate(request_dict, task_id, RESULTS_PATH)
+        if not result_path or not os.path.exists(result_path):
+            raise RuntimeError(f"Image generation finished without result artifact: {result_path}")
+        if not preview_path or not os.path.exists(preview_path):
+            raise RuntimeError(f"Image generation finished without preview artifact: {preview_path}")
         storage.update_task_status(
             task_id, "done", progress=100,
             result_path=result_path,
