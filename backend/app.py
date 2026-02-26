@@ -819,6 +819,14 @@ def fastapi_app():
         req_dict["seed"] = resolved_seed
 
         if req.type.value != "video":
+            storage.update_task_status(
+                task_id,
+                "pending",
+                progress=0,
+                stage="queued",
+                stage_detail="image_lane",
+            )
+            results_vol.commit()
             try:
                 run_image_generation.spawn(req_dict, task_id)
             except Exception as exc:
@@ -838,19 +846,20 @@ def fastapi_app():
                         user_action="Retry later.",
                     ),
                 )
-            storage.update_task_status(
-                task_id,
-                "pending",
-                progress=0,
-                stage="queued",
-                stage_detail="image_lane",
-            )
-            results_vol.commit()
             return GenerateResponse(task_id=task_id, status=TaskStatus.pending)
 
         fallback_reason = force_degraded_reason
         if fallback_reason is None:
             try:
+                storage.update_task_status(
+                    task_id,
+                    "pending",
+                    progress=0,
+                    stage="queued",
+                    stage_detail="dedicated_lane",
+                    lane_mode="dedicated",
+                )
+                results_vol.commit()
                 if model_key == "anisora":
                     run_anisora_generation.spawn(req_dict, task_id)
                 elif model_key == "phr00t":
@@ -863,15 +872,6 @@ def fastapi_app():
                     model=model_key,
                     lane_mode="dedicated",
                 )
-                storage.update_task_status(
-                    task_id,
-                    "pending",
-                    progress=0,
-                    stage="queued",
-                    stage_detail="dedicated_lane",
-                    lane_mode="dedicated",
-                )
-                results_vol.commit()
                 return GenerateResponse(task_id=task_id, status=TaskStatus.pending)
             except Exception as exc:
                 fallback_reason = _fallback_reason_from_error(exc)
@@ -926,6 +926,17 @@ def fastapi_app():
         req_dict["_degraded_wait_seconds"] = round(waited, 3)
         req_dict["_degraded_queue_depth"] = depth
 
+        storage.update_task_status(
+            task_id,
+            "pending",
+            progress=0,
+            stage="queued",
+            stage_detail=f"degraded_wait={round(waited, 3)}s",
+            lane_mode="degraded_shared",
+            fallback_reason=fallback_reason,
+        )
+        results_vol.commit()
+
         try:
             run_video_generation.spawn(req_dict, task_id)
         except Exception as exc:
@@ -949,15 +960,6 @@ def fastapi_app():
                 ),
             )
 
-        storage.update_task_status(
-            task_id,
-            "pending",
-            progress=0,
-            stage="queued",
-            stage_detail=f"degraded_wait={round(waited, 3)}s",
-            lane_mode="degraded_shared",
-            fallback_reason=fallback_reason,
-        )
         storage.record_operational_event(
             "queue_depth",
             task_id=task_id,
@@ -1199,8 +1201,11 @@ def fastapi_app():
                 ),
             )
 
-        pending_start_timeout_seconds = int(
-            os.environ.get("PENDING_WORKER_START_TIMEOUT_SECONDS", "120")
+        pending_start_warning_seconds = int(
+            os.environ.get("PENDING_WORKER_START_WARNING_SECONDS", "120")
+        )
+        pending_start_fail_seconds = int(
+            os.environ.get("PENDING_WORKER_START_FAIL_SECONDS", "0")
         )
         if (
             result.status == TaskStatus.pending
@@ -1209,7 +1214,7 @@ def fastapi_app():
             and result.created_at is not None
         ):
             age_seconds = (datetime.now(result.created_at.tzinfo) - result.created_at).total_seconds()
-            if age_seconds >= pending_start_timeout_seconds:
+            if pending_start_fail_seconds > 0 and age_seconds >= pending_start_fail_seconds:
                 storage.update_task_status(
                     task_id,
                     "failed",
@@ -1223,6 +1228,16 @@ def fastapi_app():
                 )
                 results_vol.commit()
                 result = storage.get_task(task_id) or result
+            elif age_seconds >= pending_start_warning_seconds:
+                result = result.model_copy(
+                    update={
+                        "stage": "queued",
+                        "stage_detail": (
+                            f"Awaiting GPU worker pickup ({int(age_seconds)}s). "
+                            "Queue delay detected."
+                        ),
+                    }
+                )
 
         return result
 

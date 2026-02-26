@@ -110,7 +110,7 @@ class TestGPUConfig:
 
     def test_default_image_gpu(self):
         import config
-        assert config.IMAGE_GPU == "T4"
+        assert config.IMAGE_GPU == "A10G"
 
     def test_env_override_video_gpu(self):
         cfg = _reload_config({"VIDEO_GPU": "A100"})

@@ -48,7 +48,7 @@ PHR00T_FILENAME = os.environ.get(
 
 # ─── GPU config ────────────────────────────────────────────────────────────────
 VIDEO_GPU = os.environ.get("VIDEO_GPU", "A10G")  # 24 GB VRAM
-IMAGE_GPU = os.environ.get("IMAGE_GPU", "T4")    # 16 GB VRAM
+IMAGE_GPU = os.environ.get("IMAGE_GPU", "A10G")  # 24 GB VRAM
 
 # Maximum concurrent executions per function
 VIDEO_CONCURRENCY = int(os.environ.get("VIDEO_CONCURRENCY", "1"))

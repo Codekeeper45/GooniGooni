@@ -86,7 +86,10 @@ class BasePipeline(abc.ABC):
         codec = "libx264" if output_format == "mp4" else "vp9"
         with imageio.get_writer(out_path, fps=fps, codec=codec, quality=8) as writer:
             for frame in frames:
-                writer.append_data(np.array(frame) if isinstance(frame, Image.Image) else frame)
+                frame_arr = np.array(frame) if isinstance(frame, Image.Image) else frame
+                if not np.isfinite(frame_arr).all():
+                    raise RuntimeError("Video decode produced invalid pixel values (NaN/Inf).")
+                writer.append_data(frame_arr)
 
     @staticmethod
     def clear_gpu_memory(sync: bool = False) -> None:

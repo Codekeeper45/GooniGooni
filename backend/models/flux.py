@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 
 import torch
+import numpy as np
 from PIL import Image
 
 from models.base import BasePipeline
@@ -103,6 +104,12 @@ class FluxPipeline(BasePipeline):
 
             else:
                 raise ValueError(f"Unsupported mode for flux: {mode}")
+
+        if not np.isfinite(np.asarray(image)).all():
+            raise RuntimeError(
+                "Flux decode produced invalid pixel values (NaN/Inf). "
+                "Retry with lower resolution/steps or a different seed."
+            )
 
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
         image.save(out_path)
