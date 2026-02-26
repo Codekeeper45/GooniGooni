@@ -35,6 +35,19 @@ results_vol = modal.Volume.from_name("results", create_if_missing=True)
 MODEL_CACHE_PATH = "/model-cache"
 RESULTS_PATH = "/results"
 
+
+def _resolve_video_gpu() -> str:
+    """Return a safe GPU class for heavy Wan-based video lanes."""
+    requested = os.environ.get("VIDEO_GPU", "A10G").strip() or "A10G"
+    if requested.upper() == "T4":
+        # T4 is insufficient for Wan 14B video generation; force a safe default.
+        print("[CONFIG] VIDEO_GPU=T4 is not supported for video lanes; overriding to A10G.")
+        return "A10G"
+    return requested
+
+
+VIDEO_GPU_CLASS = _resolve_video_gpu()
+
 # ─── Modal Secrets ────────────────────────────────────────────────────────────
 # Create via: modal secret create gooni-api-key API_KEY=your-secret-key
 
@@ -101,7 +114,13 @@ image_gen_image = (
         "safetensors",
         "numpy",
     )
-    .env({"HF_HOME": MODEL_CACHE_PATH, "TRANSFORMERS_CACHE": MODEL_CACHE_PATH})
+    .env(
+        {
+            "HF_HOME": MODEL_CACHE_PATH,
+            "TRANSFORMERS_CACHE": MODEL_CACHE_PATH,
+            "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+        }
+    )
     .add_local_dir(str(Path(__file__).parent), remote_path="/root")  # backend/ .py files
 )
 
@@ -329,7 +348,7 @@ def _execute_video_generation(
 
 @app.function(
     image=video_image,
-    gpu=os.environ.get("VIDEO_GPU", "A10G"),
+    gpu=VIDEO_GPU_CLASS,
     min_containers=int(os.environ.get("VIDEO_DEGRADED_MIN_CONTAINERS", "0")),
     max_containers=int(os.environ.get("VIDEO_CONCURRENCY", "1")),
     timeout=900,
@@ -348,7 +367,7 @@ def run_video_generation(request_dict: dict, task_id: str) -> dict:
 
 @app.function(
     image=video_image,
-    gpu=os.environ.get("VIDEO_GPU", "A10G"),
+    gpu=VIDEO_GPU_CLASS,
     min_containers=int(
         os.environ.get(
             "VIDEO_ANISORA_MIN_CONTAINERS",
@@ -377,7 +396,7 @@ def run_anisora_generation(request_dict: dict, task_id: str) -> dict:
 
 @app.function(
     image=video_image,
-    gpu=os.environ.get("VIDEO_GPU", "A10G"),
+    gpu=VIDEO_GPU_CLASS,
     min_containers=int(
         os.environ.get(
             "VIDEO_PHR00T_MIN_CONTAINERS",
