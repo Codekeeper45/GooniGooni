@@ -191,7 +191,7 @@ class TestResponseSchemas:
             progress=0,
         )
         assert resp.progress == 0
-        assert resp.error is None
+        assert resp.error_msg is None
 
     def test_status_response_done(self):
         resp = StatusResponse(

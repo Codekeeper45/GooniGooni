@@ -228,7 +228,7 @@ class StatusResponse(BaseModel):
     diagnostics: Optional[dict[str, Any]] = None
     result_url: Optional[str] = None
     preview_url: Optional[str] = None
-    error: Optional[str] = None
+    error_msg: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
@@ -267,9 +267,7 @@ class DeleteResponse(BaseModel):
 
 
 class HealthResponse(BaseModel):
-    status: Literal["ok"] = "ok"
-    version: str = "1.0.0"
-    app: str = "gooni-gooni-backend"
+    ok: Literal[True] = True
 
 
 class GenerationSessionResponse(BaseModel):
@@ -278,6 +276,7 @@ class GenerationSessionResponse(BaseModel):
 
 
 class GenerationSessionStateResponse(BaseModel):
+    valid: bool
     active: bool
     expires_at: Optional[datetime] = None
 

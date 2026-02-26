@@ -8,16 +8,56 @@ function getApiUrl(): string {
   return base;
 }
 
-async function readErrorMessage(response: Response, fallback: string): Promise<string> {
+export interface ApiErrorPayload {
+  status: number;
+  code: string;
+  detail: string;
+  userAction: string;
+  metadata?: Record<string, unknown>;
+}
+
+export async function readApiError(response: Response, fallback: string): Promise<ApiErrorPayload> {
+  const base: ApiErrorPayload = {
+    status: response.status,
+    code: "request_failed",
+    detail: fallback,
+    userAction: "Retry later.",
+  };
   try {
     const payload = await response.json();
-    if (payload?.detail?.detail) return payload.detail.detail as string;
-    if (typeof payload?.detail === "string") return payload.detail;
-    if (typeof payload?.message === "string") return payload.message;
+    const direct = payload && typeof payload === "object" ? payload : null;
+    const nested = direct && typeof direct.detail === "object" ? (direct.detail as any) : null;
+
+    if (direct?.code && direct?.detail) {
+      return {
+        ...base,
+        code: String(direct.code),
+        detail: String(direct.detail),
+        userAction: String(direct.user_action ?? base.userAction),
+        metadata: (direct.metadata as Record<string, unknown>) ?? undefined,
+      };
+    }
+
+    if (nested?.code && nested?.detail) {
+      return {
+        ...base,
+        code: String(nested.code),
+        detail: String(nested.detail),
+        userAction: String(nested.user_action ?? base.userAction),
+        metadata: (nested.metadata as Record<string, unknown>) ?? undefined,
+      };
+    }
+
+    if (typeof direct?.detail === "string") {
+      return { ...base, detail: direct.detail };
+    }
+    if (typeof direct?.message === "string") {
+      return { ...base, detail: direct.message };
+    }
   } catch {
     // ignore parse errors
   }
-  return fallback;
+  return base;
 }
 
 export async function createGenerationSession(): Promise<void> {
@@ -26,8 +66,8 @@ export async function createGenerationSession(): Promise<void> {
     credentials: "include",
   });
   if (!response.ok) {
-    const detail = await readErrorMessage(response, "Failed to create generation session.");
-    throw new Error(detail);
+    const err = await readApiError(response, "Failed to create generation session.");
+    throw new Error(`${err.detail} ${err.userAction}`.trim());
   }
 }
 
@@ -38,8 +78,8 @@ export async function ensureGenerationSession(): Promise<void> {
   });
   if (response.ok) return;
   if (response.status !== 401) {
-    const detail = await readErrorMessage(response, "Failed to check generation session.");
-    throw new Error(detail);
+    const err = await readApiError(response, "Failed to check generation session.");
+    throw new Error(`${err.detail} ${err.userAction}`.trim());
   }
   await createGenerationSession();
 }
@@ -70,4 +110,3 @@ export async function sessionFetch(
   }
   return response;
 }
-

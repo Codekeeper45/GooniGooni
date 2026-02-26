@@ -210,9 +210,20 @@ def _execute_video_generation(
     import storage
     from models.base import BasePipeline
 
+    def _commit_after_write() -> None:
+        results_vol.commit()
+
+    def _update_status(*args, **kwargs) -> None:
+        storage.update_task_status(*args, **kwargs)
+        _commit_after_write()
+
+    def _record_event(*args, **kwargs) -> None:
+        storage.record_operational_event(*args, **kwargs)
+        _commit_after_write()
+
     results_vol.reload()
     storage.init_db()
-    storage.update_task_status(
+    _update_status(
         task_id,
         "processing",
         progress=5,
@@ -229,7 +240,7 @@ def _execute_video_generation(
         with _degraded_state_lock:
             cross_switch = _degraded_active_model not in (None, model_id_key)
         request_dict["_cross_model_switch"] = cross_switch
-        storage.record_operational_event(
+        _record_event(
             "fallback_activated",
             task_id=task_id,
             model=model_id_key,
@@ -238,7 +249,7 @@ def _execute_video_generation(
         )
 
     try:
-        storage.update_task_status(
+        _update_status(
             task_id,
             "processing",
             progress=10,
@@ -251,7 +262,7 @@ def _execute_video_generation(
             model_id_key,
             degraded_mode=(lane_mode == "degraded_shared"),
         )
-        storage.update_task_status(
+        _update_status(
             task_id,
             "processing",
             progress=25,
@@ -262,7 +273,7 @@ def _execute_video_generation(
         )
 
         result_path, preview_path = pipeline.generate(request_dict, task_id, RESULTS_PATH)
-        storage.update_task_status(
+        _update_status(
             task_id,
             "done",
             progress=100,
@@ -275,7 +286,7 @@ def _execute_video_generation(
         )
         return {"result_path": result_path, "preview_path": preview_path}
     except Exception as exc:
-        storage.update_task_status(
+        _update_status(
             task_id,
             "failed",
             error_msg=str(exc),
@@ -297,14 +308,14 @@ def _execute_video_generation(
             pass
 
         BasePipeline.clear_gpu_memory(sync=False)
-        storage.record_operational_event(
+        _record_event(
             "memory_cleanup",
             task_id=task_id,
             model=model_id_key,
             lane_mode=lane_mode,
         )
         if allocated_gib is not None:
-            storage.record_operational_event(
+            _record_event(
                 "memory_post_generation",
                 task_id=task_id,
                 model=model_id_key,
@@ -313,7 +324,7 @@ def _execute_video_generation(
             )
         if lane_mode == "degraded_shared":
             storage.release_degraded_task(task_id)
-        results_vol.commit()
+            _commit_after_write()
 
 
 @app.function(
@@ -415,13 +426,16 @@ def run_image_generation(request_dict: dict, task_id: str) -> dict:
     results_vol.reload()
     storage.init_db()
     storage.update_task_status(task_id, "processing", progress=5)
+    results_vol.commit()
 
     model_id_key = request_dict["model"]
 
     try:
         storage.update_task_status(task_id, "processing", progress=10)
+        results_vol.commit()
         pipeline = _get_image_pipeline(model_id_key)
         storage.update_task_status(task_id, "processing", progress=20)
+        results_vol.commit()
 
         result_path, preview_path = pipeline.generate(request_dict, task_id, RESULTS_PATH)
         storage.update_task_status(
@@ -473,7 +487,7 @@ def health():
         _sys.path.insert(0, "/root")
 
     from fastapi.responses import JSONResponse
-    return JSONResponse({"status": "ok", "version": "1.0.0", "app": "gooni-gooni-backend"})
+    return JSONResponse({"ok": True})
 
 
 @app.function(
@@ -500,6 +514,7 @@ def fastapi_app():
     import time
 
     from fastapi import Depends, FastAPI, HTTPException, Query, Request, status, Body
+    from fastapi.exceptions import RequestValidationError
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import FileResponse, JSONResponse, Response
 
@@ -521,7 +536,6 @@ def fastapi_app():
         GalleryResponse,
         GenerateRequest,
         GenerateResponse,
-        GenerationSessionResponse,
         GenerationSessionStateResponse,
         AdminSessionStateResponse,
         HealthResponse,
@@ -571,10 +585,9 @@ def fastapi_app():
     admin_idle_timeout_seconds = int(
         os.environ.get("ADMIN_SESSION_IDLE_TIMEOUT_SECONDS", str(12 * 3600))
     )
-    session_cookie_secure = os.environ.get("SESSION_COOKIE_SECURE", "1") != "0"
-    session_cookie_samesite = os.environ.get("SESSION_COOKIE_SAMESITE", "none").lower()
-    if session_cookie_samesite not in {"lax", "strict", "none"}:
-        session_cookie_samesite = "none"
+    # Cookie security attributes are fixed by project constitution.
+    session_cookie_secure = True
+    session_cookie_samesite = "none"
 
     def _set_session_cookie(response: Response, key: str, value: str, max_age: int) -> None:
         response.set_cookie(
@@ -598,6 +611,77 @@ def fastapi_app():
 
     def _error_payload(code: str, detail: str, user_action: str) -> dict:
         return ErrorResponse(code=code, detail=detail, user_action=user_action).model_dump()
+
+    _ERROR_CODE_BY_STATUS = {
+        400: "bad_request",
+        401: "unauthorized",
+        403: "forbidden",
+        404: "not_found",
+        409: "conflict",
+        410: "resource_gone",
+        422: "validation_error",
+        429: "rate_limited",
+        500: "internal_error",
+        502: "upstream_error",
+        503: "service_unavailable",
+    }
+
+    _USER_ACTION_BY_STATUS = {
+        400: "Check request parameters and retry.",
+        401: "Re-authenticate and retry.",
+        403: "Check credentials and retry.",
+        404: "Verify the identifier and retry.",
+        409: "Retry the operation.",
+        410: "Regenerate the asset and retry.",
+        422: "Fix request fields and retry.",
+        429: "Retry after a short delay.",
+        500: "Retry later.",
+        502: "Retry shortly.",
+        503: "Retry later.",
+    }
+
+    def _as_api_error(status_code: int, detail: object) -> dict:
+        if isinstance(detail, dict):
+            code = str(detail.get("code") or _ERROR_CODE_BY_STATUS.get(status_code, "request_failed"))
+            message = str(detail.get("detail") or "Request failed.")
+            action = str(detail.get("user_action") or _USER_ACTION_BY_STATUS.get(status_code, "Retry later."))
+            payload = _error_payload(code=code, detail=message, user_action=action)
+            metadata = detail.get("metadata")
+            if isinstance(metadata, dict):
+                payload["metadata"] = metadata
+            return payload
+        if isinstance(detail, str):
+            return _error_payload(
+                code=_ERROR_CODE_BY_STATUS.get(status_code, "request_failed"),
+                detail=detail,
+                user_action=_USER_ACTION_BY_STATUS.get(status_code, "Retry later."),
+            )
+        return _error_payload(
+            code=_ERROR_CODE_BY_STATUS.get(status_code, "request_failed"),
+            detail="Request failed.",
+            user_action=_USER_ACTION_BY_STATUS.get(status_code, "Retry later."),
+        )
+
+    @api.exception_handler(HTTPException)
+    async def _http_exception_handler(_: Request, exc: HTTPException):
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=_as_api_error(exc.status_code, exc.detail),
+        )
+
+    @api.exception_handler(RequestValidationError)
+    async def _validation_exception_handler(_: Request, exc: RequestValidationError):
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            content={
+                **_error_payload(
+                    code="validation_error",
+                    detail="Request validation failed.",
+                    user_action="Fix request fields and retry.",
+                ),
+                "metadata": {"errors": exc.errors()},
+            },
+        )
 
     def _normalize_request_dict(req: GenerateRequest) -> dict:
         req_dict = req.model_dump()
@@ -656,6 +740,8 @@ def fastapi_app():
         *,
         force_degraded_reason: Optional[str] = None,
     ) -> GenerateResponse:
+        import random
+
         params = req.model_dump(
             exclude={
                 "prompt",
@@ -674,6 +760,7 @@ def fastapi_app():
         )
         model_key = req.model.value
         lane_mode = "dedicated" if req.type.value == "video" else None
+        resolved_seed = req.seed if req.seed != -1 else random.randint(0, 2_147_483_647)
         task_id = storage.create_task(
             model=model_key,
             gen_type=req.type.value,
@@ -683,11 +770,12 @@ def fastapi_app():
             parameters=params,
             width=req.width,
             height=req.height,
-            seed=req.seed,
+            seed=resolved_seed,
             lane_mode=lane_mode,
             fallback_reason=force_degraded_reason,
         )
         req_dict = _normalize_request_dict(req)
+        req_dict["seed"] = resolved_seed
 
         if req.type.value != "video":
             try:
@@ -769,14 +857,21 @@ def fastapi_app():
             results_vol.commit()
             raise HTTPException(
                 status_code=503,
-                detail=_error_payload(
-                    code=DEGRADED_QUEUE_OVERLOAD_CODE,
-                    detail=(
-                        f"Generation queue is overloaded (depth={depth}, "
-                        f"max_depth={DEGRADED_QUEUE_MAX_DEPTH}, max_wait={DEGRADED_QUEUE_MAX_WAIT_SECONDS}s)."
+                detail={
+                    **_error_payload(
+                        code=DEGRADED_QUEUE_OVERLOAD_CODE,
+                        detail=(
+                            f"Generation queue is overloaded (depth={depth}, "
+                            f"max_depth={DEGRADED_QUEUE_MAX_DEPTH}, max_wait={DEGRADED_QUEUE_MAX_WAIT_SECONDS}s)."
+                        ),
+                        user_action="Retry later.",
                     ),
-                    user_action="Retry later.",
-                ),
+                    "metadata": {
+                        "depth": depth,
+                        "max_depth": DEGRADED_QUEUE_MAX_DEPTH,
+                        "max_wait_seconds": DEGRADED_QUEUE_MAX_WAIT_SECONDS,
+                    },
+                },
             )
 
         req_dict["_fallback_reason"] = fallback_reason or "capacity"
@@ -833,8 +928,7 @@ def fastapi_app():
 
     @api.post(
         "/auth/session",
-        response_model=GenerationSessionResponse,
-        status_code=status.HTTP_201_CREATED,
+        status_code=status.HTTP_204_NO_CONTENT,
         tags=["Auth"],
     )
     async def create_generation_session(response: Response, request: Request):
@@ -851,7 +945,7 @@ def fastapi_app():
             value=token,
             max_age=generation_ttl_seconds,
         )
-        return GenerationSessionResponse(expires_at=expires_at)
+        return None
 
     @api.get(
         "/auth/session",
@@ -881,7 +975,21 @@ def fastapi_app():
                     "user_action": "Create a new session and retry.",
                 },
             )
-        return GenerationSessionStateResponse(active=True, expires_at=expires_at)
+        return GenerationSessionStateResponse(valid=True, active=True, expires_at=expires_at)
+
+    @api.delete(
+        "/auth/session",
+        status_code=status.HTTP_204_NO_CONTENT,
+        tags=["Auth"],
+    )
+    async def delete_generation_session(response: Response, request: Request):
+        token = request.cookies.get(GENERATION_SESSION_COOKIE, "")
+        if token:
+            results_vol.reload()
+            storage.revoke_generation_session(token)
+            results_vol.commit()
+        _delete_session_cookie(response, GENERATION_SESSION_COOKIE)
+        return None
 
     # ── GET /models ────────────────────────────────────────────────────────────
     @api.get("/models", response_model=ModelsResponse, tags=["Info"])
@@ -892,7 +1000,7 @@ def fastapi_app():
     @api.post(
         "/generate_direct",
         response_model=GenerateResponse,
-        status_code=status.HTTP_202_ACCEPTED,
+        status_code=status.HTTP_200_OK,
         tags=["Generation"],
     )
     async def generate_direct(
@@ -907,7 +1015,7 @@ def fastapi_app():
     @api.post(
         "/generate",
         response_model=GenerateResponse,
-        status_code=status.HTTP_202_ACCEPTED,
+        status_code=status.HTTP_200_OK,
         tags=["Generation"],
     )
     async def generate(
@@ -942,8 +1050,24 @@ def fastapi_app():
                 ) as client:
                     resp = await client.post(remote_url, json=req_payload, headers=headers)
                     if resp.status_code == 422:
-                        detail = resp.json().get("detail", "Validation failed")
-                        raise HTTPException(status_code=422, detail=detail)
+                        payload = {}
+                        try:
+                            payload = resp.json()
+                        except Exception:
+                            payload = {}
+                        if isinstance(payload, dict) and {"code", "detail", "user_action"}.issubset(payload):
+                            raise HTTPException(status_code=422, detail=payload)
+                        detail = payload.get("detail", payload) if isinstance(payload, dict) else payload
+                        if isinstance(detail, dict) and {"code", "detail", "user_action"}.issubset(detail):
+                            raise HTTPException(status_code=422, detail=detail)
+                        raise HTTPException(
+                            status_code=422,
+                            detail=_error_payload(
+                                code="validation_error",
+                                detail="Validation failed.",
+                                user_action="Fix request fields and retry.",
+                            ),
+                        )
                     if resp.status_code >= 400:
                         raise Exception(f"remote_{resp.status_code}:{resp.text[:200]}")
                     data = resp.json()
@@ -994,17 +1118,38 @@ def fastapi_app():
                 async with httpx.AsyncClient(timeout=httpx.Timeout(connect=5.0, read=20.0, write=20.0, pool=5.0)) as client:
                     resp = await client.get(remote_url, headers={"X-API-Key": api_key})
                     if resp.status_code == 404:
-                        raise HTTPException(status_code=404, detail="Remote task not found")
+                        raise HTTPException(
+                            status_code=404,
+                            detail=_error_payload(
+                                code="task_not_found",
+                                detail="Remote task not found.",
+                                user_action="Verify task id and retry.",
+                            ),
+                        )
                     resp.raise_for_status()
                     return resp.json()
             except Exception as e:
                 # If remote is unreachable or failing, return 502 Bad Gateway
-                raise HTTPException(status_code=502, detail=f"Remote status fetch failed: {str(e)}")
+                raise HTTPException(
+                    status_code=502,
+                    detail=_error_payload(
+                        code="remote_status_unavailable",
+                        detail=f"Remote status fetch failed: {str(e)}",
+                        user_action="Retry shortly.",
+                    ),
+                )
 
         results_vol.reload()
         result = storage.get_task(task_id)
         if result is None:
-            raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
+            raise HTTPException(
+                status_code=404,
+                detail=_error_payload(
+                    code="task_not_found",
+                    detail=f"Task '{task_id}' not found.",
+                    user_action="Verify task id and retry.",
+                ),
+            )
         return result
 
     # ── GET /results/{task_id} ────────────────────────────────────────────────
@@ -1023,33 +1168,72 @@ def fastapi_app():
                 async with httpx.AsyncClient(timeout=httpx.Timeout(connect=5.0, read=120.0, write=30.0, pool=5.0)) as client:
                     resp = await client.get(remote_url, headers={"X-API-Key": api_key})
                     if resp.status_code == 404:
-                        raise HTTPException(status_code=404, detail="Remote result not found")
+                        raise HTTPException(
+                            status_code=404,
+                            detail=_error_payload(
+                                code="result_not_found",
+                                detail="Remote result not found.",
+                                user_action="Verify task id or regenerate.",
+                            ),
+                        )
                     resp.raise_for_status()
                     content_type = resp.headers.get("content-type", "application/octet-stream")
                     return Response(content=resp.content, media_type=content_type)
             except HTTPException:
                 raise
             except Exception as exc:
-                raise HTTPException(status_code=502, detail=f"Remote result fetch failed: {exc}")
+                raise HTTPException(
+                    status_code=502,
+                    detail=_error_payload(
+                        code="remote_result_unavailable",
+                        detail=f"Remote result fetch failed: {exc}",
+                        user_action="Retry shortly.",
+                    ),
+                )
 
         results_vol.reload()
         task = storage.get_task(task_id)
         if task is None:
-            raise HTTPException(status_code=404, detail="Task not found")
+            raise HTTPException(
+                status_code=404,
+                detail=_error_payload(
+                    code="task_not_found",
+                    detail="Task not found.",
+                    user_action="Verify task id and retry.",
+                ),
+            )
         if task.status != TaskStatus.done:
             raise HTTPException(
-                status_code=425,
-                detail=f"Task is not done yet (status: {task.status})",
+                status_code=404,
+                detail=_error_payload(
+                    code="result_not_ready",
+                    detail=f"Task is not done yet (status: {task.status}).",
+                    user_action="Wait for completion and retry.",
+                ),
             )
 
         # Derive the actual file path from the volume
         task_row = _get_raw_task(task_id)
         if not task_row or not task_row.get("result_path"):
-            raise HTTPException(status_code=404, detail="Result file not found")
+            raise HTTPException(
+                status_code=404,
+                detail=_error_payload(
+                    code="result_not_found",
+                    detail="Result file not found.",
+                    user_action="Regenerate the asset.",
+                ),
+            )
 
         fpath = task_row["result_path"]
         if not os.path.exists(fpath):
-            raise HTTPException(status_code=404, detail="Result file missing from volume")
+            raise HTTPException(
+                status_code=410,
+                detail=_error_payload(
+                    code="result_file_missing",
+                    detail="Result file missing from volume.",
+                    user_action="Regenerate the asset.",
+                ),
+            )
 
         ext = Path(fpath).suffix.lstrip(".")
         media_types = {
@@ -1227,10 +1411,22 @@ def fastapi_app():
     # ── GET /admin/health — fast probe (also validates key) ─────────────────
     @api.get("/admin/health", tags=["Admin"])
     async def admin_health(_ip: str = Depends(get_admin_auth("health"))):
+        import sqlite3 as _sql
+        from config import DB_PATH as _db
+
         results_vol.reload()
         ready = [a for a in acc_store.list_accounts() if a["status"] == "ready"]
+        storage_ok = False
+        try:
+            conn = _sql.connect(_db)
+            conn.execute("SELECT 1")
+            conn.close()
+            storage_ok = True
+        except Exception:
+            storage_ok = False
         return {
             "ok": True,
+            "storage_ok": storage_ok,
             "ready_accounts": len(ready),
             "diagnostics": storage.get_operational_snapshot(),
         }
@@ -1315,7 +1511,7 @@ def fastapi_app():
         conn = _sql.connect(_db)
         conn.row_factory = _sql.Row
         rows = conn.execute(
-            "SELECT * FROM admin_audit_log ORDER BY id DESC LIMIT ?", (limit,)
+            "SELECT * FROM admin_audit_log ORDER BY ts DESC LIMIT ?", (limit,)
         ).fetchall()
         conn.close()
         return {"logs": [dict(r) for r in rows]}

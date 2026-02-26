@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { useGallery, type GalleryItem } from "../context/GalleryContext";
 import { VideoPlayer } from "../components/VideoPlayer";
+import { readApiError, sessionFetch } from "../utils/sessionClient";
 
 type FilterType = "all" | "image" | "video";
 type SortMode = "newest" | "oldest";
@@ -32,6 +33,22 @@ export function GalleryPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedItem, setSelectedItem] = useState<GalleryItem | null>(null);
   const [showConfirmClear, setShowConfirmClear] = useState(false);
+
+  const handleDeleteItem = async (id: string) => {
+    const response = await sessionFetch(
+      `/gallery/${id}`,
+      { method: "DELETE" },
+      { retryOn401: true },
+    );
+    if (!response.ok) {
+      const err = await readApiError(response, "Failed to delete gallery item.");
+      throw new Error(`${err.detail} ${err.userAction}`.trim());
+    }
+    removeFromGallery(id);
+    if (selectedItem?.id === id) {
+      setSelectedItem(null);
+    }
+  };
 
   const filtered = useMemo(() => {
     let items = [...gallery];
@@ -336,7 +353,11 @@ export function GalleryPage() {
                   index={idx}
                   gridSize={gridSize}
                   onClick={() => setSelectedItem(item)}
-                  onDelete={() => removeFromGallery(item.id)}
+                  onDelete={() => {
+                    void handleDeleteItem(item.id).catch((err) => {
+                      console.error("Delete failed", err);
+                    });
+                  }}
                 />
               ))}
             </AnimatePresence>

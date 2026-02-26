@@ -38,7 +38,7 @@ function getStatusText(progress: number, type: GenerationType): string {
 
 import { configManager } from "../utils/configManager";
 import type { ModelId } from "../utils/configManager";
-import { ensureGenerationSession, sessionFetch } from "../utils/sessionClient";
+import { ensureGenerationSession, readApiError, sessionFetch } from "../utils/sessionClient";
 
 // ─── API Integration ─────────────────────────────────────────────────────────
 async function generateMediaAPI(
@@ -93,25 +93,17 @@ async function generateMediaAPI(
   );
 
   if (!genRes.ok) {
-    let body: any = null;
-    try {
-      body = await genRes.json();
-    } catch {
-      body = null;
-    }
-    const code = body?.detail?.code || body?.code;
-    const detail =
-      body?.detail?.detail ||
-      body?.detail?.message ||
-      body?.detail ||
-      (await genRes.text().catch(() => ""));
+    const err = await readApiError(genRes, "Generate request failed.");
+    const detail = err.detail;
+    const code = err.code;
+    const userAction = err.userAction;
     if (genRes.status === 503 && code === "queue_overloaded") {
       throw new Error("Queue overloaded: all safe video workers are busy. Retry in 30s.");
     }
     if (genRes.status === 422) {
-      throw new Error(`Validation error: ${detail}`);
+      throw new Error(`Validation error: ${detail} ${userAction}`.trim());
     }
-    throw new Error(`Generate failed (${genRes.status}): ${detail}`);
+    throw new Error(`Generate failed (${genRes.status}): ${detail} ${userAction}`.trim());
   }
 
   const { task_id } = await genRes.json() as { task_id: string };
@@ -164,11 +156,14 @@ async function pollTask(
   for (let poll = 0; poll < MAX_POLLS; poll++) {
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
     const statusRes = await sessionFetch(`/status/${task_id}`, {}, { retryOn401: true });
-    if (!statusRes.ok) throw new Error(`Status check failed (${statusRes.status})`);
-    const { status, progress, error, stage, stage_detail, result_url, preview_url } = await statusRes.json() as {
+    if (!statusRes.ok) {
+      const err = await readApiError(statusRes, "Status check failed.");
+      throw new Error(`Status check failed (${statusRes.status}): ${err.detail} ${err.userAction}`.trim());
+    }
+    const { status, progress, error_msg, stage, stage_detail, result_url, preview_url } = await statusRes.json() as {
       status: string;
       progress: number;
-      error?: string;
+      error_msg?: string;
       stage?: string;
       stage_detail?: string;
       result_url?: string;
@@ -176,7 +171,7 @@ async function pollTask(
     };
     onProgress(status === "done" ? 100 : Math.max(5, Math.min(99, progress ?? 0)));
     
-    if (status === "failed") throw new Error(error ?? "Generation failed on the server");
+    if (status === "failed") throw new Error(error_msg ?? "Generation failed on the server");
     
     const stageText = stage_detail || stage;
     onStatusText(stageText || (status === "pending" ? "Pending in queue..." : getStatusText(progress ?? 0, type)));

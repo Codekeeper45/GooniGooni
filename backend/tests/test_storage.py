@@ -111,7 +111,7 @@ class TestUpdateTaskStatus:
         storage.update_task_status(tid, "failed", error_msg="CUDA OOM")
         result = storage.get_task(tid)
         assert result.status.value == "failed"
-        assert result.error == "CUDA OOM"
+        assert result.error_msg == "CUDA OOM"
 
     def test_idempotent_update(self):
         tid = self._make_task()

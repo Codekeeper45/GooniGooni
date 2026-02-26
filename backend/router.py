@@ -68,9 +68,23 @@ class AccountRouter:
         # list_ready_accounts already returns sorted by use_count ASC, last_used ASC
         return candidates[0]
 
+    def pick_account(self) -> Optional[dict]:
+        """
+        Compatibility helper for contract-based call-sites.
+        Returns None instead of raising when no ready accounts are available.
+        """
+        try:
+            return self.pick()
+        except NoReadyAccountError:
+            return None
+
     def mark_success(self, account_id: str) -> None:
         """Record a successful dispatch."""
         acc_store.mark_account_used(account_id)
+
+    def mark_used(self, account_id: str) -> None:
+        """Alias kept for compatibility with older call-sites/tests."""
+        self.mark_success(account_id)
 
     def mark_failed(self, account_id: str, error: str) -> None:
         """

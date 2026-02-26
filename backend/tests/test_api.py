@@ -31,15 +31,14 @@ QUEUE_OVERLOAD_SUBMIT_INTERVAL_SECONDS = float(
 
 
 
-# ─── Tests ────────────────────────────────────────────────────────────────────
+# --- Tests -------------------------------------------------------------------
 
 class TestHealth:
     def test_health_returns_ok(self, client):
         r = client.get("/health")
         assert r.status_code == 200
         data = r.json()
-        assert data["status"] == "ok"
-        assert "version" in data
+        assert data["ok"] is True
 
 
 class TestAuth:
@@ -104,12 +103,13 @@ class TestGallery:
 class TestGenerationSessionContracts:
     def test_auth_session_create_and_read(self, raw_client):
         create_r = raw_client.post("/auth/session")
-        assert create_r.status_code == 201, create_r.text
+        assert create_r.status_code == 204, create_r.text
         assert "gg_session" in raw_client.cookies
 
         state_r = raw_client.get("/auth/session")
         assert state_r.status_code == 200, state_r.text
         payload = state_r.json()
+        assert payload["valid"] is True
         assert payload["active"] is True
         assert "expires_at" in payload
 
@@ -118,13 +118,13 @@ class TestGenerationSessionContracts:
         assert no_auth_r.status_code in (401, 403)
 
         session_r = raw_client.post("/auth/session")
-        assert session_r.status_code == 201
+        assert session_r.status_code == 204
         with_auth_r = raw_client.get("/gallery")
         assert with_auth_r.status_code == 200, with_auth_r.text
 
     def test_generate_without_manual_key_when_session_exists(self, raw_client):
         session_r = raw_client.post("/auth/session")
-        assert session_r.status_code == 201
+        assert session_r.status_code == 204
 
         payload = {
             "model": "pony",
@@ -137,12 +137,12 @@ class TestGenerationSessionContracts:
             "seed": 1,
         }
         generate_r = raw_client.post("/generate", json=payload)
-        # 202 accepted is expected; 422 is also acceptable if backend schema changes.
-        assert generate_r.status_code in (202, 422), generate_r.text
+        # 200 accepted is expected; 422 is also acceptable if backend schema changes.
+        assert generate_r.status_code in (200, 422), generate_r.text
 
     def test_fixed_video_parameter_validation_422(self, raw_client):
         session_r = raw_client.post("/auth/session")
-        assert session_r.status_code == 201
+        assert session_r.status_code == 204
 
         payload = {
             "model": "anisora",
@@ -166,7 +166,7 @@ class TestGenerationSessionContracts:
             pytest.skip("Set TEST_QUEUE_OVERLOAD_STORM_REQUESTS>0 to run overload contract test")
 
         session_r = raw_client.post("/auth/session")
-        assert session_r.status_code == 201
+        assert session_r.status_code == 204
 
         payload = {
             "model": "anisora",
@@ -183,9 +183,9 @@ class TestGenerationSessionContracts:
         overloaded = False
         for _ in range(QUEUE_OVERLOAD_STORM_REQUESTS):
             r = raw_client.post("/generate", json=payload)
-            assert r.status_code in (202, 503), r.text
+            assert r.status_code in (200, 503), r.text
             if r.status_code == 503:
-                detail = r.json().get("detail", {})
+                detail = r.json()
                 assert detail.get("code") == "queue_overloaded"
                 assert detail.get("metadata", {}).get("max_depth") is not None
                 overloaded = True
@@ -199,7 +199,7 @@ class TestAdminSessionContracts:
     @pytest.fixture(autouse=True)
     def skip_without_admin_key(self, admin_key):
         if not admin_key:
-            pytest.skip("ADMIN_KEY not set — skipping admin session tests")
+            pytest.skip("ADMIN_KEY not set - skipping admin session tests")
 
     def test_admin_session_post_get_delete_flow(self, raw_client, create_admin_session):
         create_r = create_admin_session()
@@ -311,7 +311,7 @@ class TestCors:
 
 class TestGenerateFlow:
     """
-    Integration test: POST /generate → poll /status → check /results.
+    Integration test: POST /generate -> poll /status -> check /results.
     Requires a running GPU backend. Skipped if no API_KEY is set
     (because that usually means we're in CI without Modal access).
     """
@@ -319,7 +319,7 @@ class TestGenerateFlow:
     @pytest.fixture(autouse=True)
     def skip_without_key(self, api_key):
         if not api_key:
-            pytest.skip("API_KEY not set — skipping live generation test")
+            pytest.skip("API_KEY not set - skipping live generation test")
 
     def test_text_to_video_flow_status_transitions(self, client):
         """Submit a minimal t2v job and verify it transitions through expected states."""
@@ -335,7 +335,7 @@ class TestGenerateFlow:
             "seed": 42,
         }
         gen_r = client.post("/generate", json=payload)
-        assert gen_r.status_code == 202, gen_r.text
+        assert gen_r.status_code == 200, gen_r.text
 
         data = gen_r.json()
         assert "task_id" in data
@@ -387,7 +387,7 @@ class TestGenerateFlow:
             "seed": 1,
         }
         gen_r = client.post("/generate", json=payload)
-        assert gen_r.status_code == 202
+        assert gen_r.status_code == 200
         task_id = gen_r.json()["task_id"]
 
         # Poll until done
@@ -424,7 +424,7 @@ class TestGenerateFlow:
             "seed": 2,
         }
         gen_r = client.post("/generate", json=payload)
-        assert gen_r.status_code == 202, gen_r.text
+        assert gen_r.status_code == 200, gen_r.text
         task_id = gen_r.json()["task_id"]
 
         allowed = {"pending", "processing", "done", "failed"}
@@ -446,3 +446,4 @@ class TestGenerateFlow:
         assert seen and seen[0] == "pending", f"Unexpected initial status sequence: {seen}"
         assert "processing" in seen, f"Expected status transition to include 'processing': {seen}"
         assert final_status in {"done", "failed"}, f"No terminal status reached: {seen}"
+

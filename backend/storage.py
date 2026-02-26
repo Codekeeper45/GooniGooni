@@ -208,6 +208,31 @@ def revoke_generation_session(token: str) -> None:
         )
 
 
+# Backward-compatible aliases used by legacy contracts/tests.
+def create_session(
+    ttl_seconds: int = 24 * 3600,
+    client_context: Optional[str] = None,
+) -> tuple[str, datetime]:
+    return create_generation_session(ttl_seconds=ttl_seconds, client_context=client_context)
+
+
+def get_session(token: str) -> Optional[dict[str, Any]]:
+    with _db() as conn:
+        row = conn.execute(
+            """
+            SELECT token, issued_at, expires_at, status, client_context
+            FROM generation_sessions
+            WHERE token=?
+            """,
+            (token,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def revoke_session(token: str) -> None:
+    revoke_generation_session(token)
+
+
 def create_admin_session(idle_timeout_seconds: int = 12 * 3600) -> tuple[str, datetime]:
     token = _new_token()
     now = datetime.now(timezone.utc)
@@ -410,7 +435,7 @@ def get_task(task_id: str) -> Optional[StatusResponse]:
         diagnostics=diagnostics,
         result_url=f"{base_url}/results/{row['id']}" if row["result_path"] else None,
         preview_url=f"{base_url}/preview/{row['id']}" if row["preview_path"] else None,
-        error=row["error_msg"],
+        error_msg=row["error_msg"],
         created_at=datetime.fromisoformat(row["created_at"]),
         updated_at=datetime.fromisoformat(row["updated_at"]),
     )
@@ -544,6 +569,34 @@ def mark_stale_tasks_failed(max_age_hours: int = 2) -> int:
                 )
                 updated += 1
     return updated
+
+
+def list_tasks(status: Optional[str] = None, limit: int = 50) -> list[dict[str, Any]]:
+    with _db() as conn:
+        if status:
+            rows = conn.execute(
+                """
+                SELECT * FROM tasks
+                WHERE status=?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (status, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM tasks
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def delete_task(task_id: str) -> bool:
+    return delete_gallery_item(task_id)
 
 
 def degraded_queue_size() -> int:

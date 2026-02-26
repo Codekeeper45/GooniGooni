@@ -168,7 +168,7 @@ def _wait_for_workspace_health(
                 response = client.get(url)
             if response.status_code == 200:
                 payload = response.json()
-                if payload.get("status") == "ok":
+                if payload.get("ok") is True:
                     logger.info("workspace health check passed: %s", workspace)
                     return True, None
             last_error = f"health-check status={response.status_code}"

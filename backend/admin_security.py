@@ -27,6 +27,16 @@ ADMIN_SESSION_COOKIE = "gg_admin_session"
 ADMIN_IDLE_TIMEOUT_SECONDS = 12 * 3600
 
 
+def _reload_results_volume() -> None:
+    """Best-effort volume reload before SQLite reads."""
+    try:
+        import modal
+
+        modal.Volume.from_name("results").reload()
+    except Exception:
+        pass
+
+
 def _admin_error(
     *,
     code: str,
@@ -46,7 +56,12 @@ def _rate_check(ip: str) -> None:
         buckets = _rate_windows[ip]
         _rate_windows[ip] = [t for t in buckets if now - t < RATE_WINDOW]
         if len(_rate_windows[ip]) >= RATE_LIMIT:
-            raise HTTPException(status_code=429, detail="Too many admin requests. Try again later.")
+            raise _admin_error(
+                code="admin_rate_limited",
+                detail="Too many admin requests. Try again later.",
+                user_action="Wait a minute and retry.",
+                status_code=429,
+            )
         _rate_windows[ip].append(now)
 
 
@@ -161,6 +176,7 @@ def get_admin_auth(action: str = "unknown"):
 
         import storage
 
+        _reload_results_volume()
         active, reason, _ = storage.validate_admin_session(token, touch=True)
         if not active:
             _log_action(ip, action, f"invalid_admin_session:{reason}", success=False)

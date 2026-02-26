@@ -12,6 +12,17 @@ _API_KEY_HEADER = APIKeyHeader(name="X-API-Key", auto_error=False)
 GENERATION_SESSION_COOKIE = "gg_session"
 
 
+def _reload_results_volume() -> None:
+    """Best-effort volume reload before SQLite reads."""
+    try:
+        import modal
+
+        modal.Volume.from_name("results").reload()
+    except Exception:
+        # Local/unit-test mode or non-Modal runtime.
+        pass
+
+
 def _auth_error(
     *,
     code: str,
@@ -83,6 +94,7 @@ def verify_generation_session(
 
     import storage
 
+    _reload_results_volume()
     active, reason, _ = storage.validate_generation_session(token)
     if not active:
         reason_code = "generation_session_expired" if reason == "expired" else "generation_session_invalid"
