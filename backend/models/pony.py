@@ -24,6 +24,7 @@ class PonyPipeline(BasePipeline):
 
     def __init__(self, hf_model_id: str):
         self.hf_model_id = hf_model_id
+        self.vae_model_id = os.environ.get("PONY_VAE_MODEL_ID", "madebyollin/sdxl-vae-fp16-fix")
         self._loaded = False
         self._txt2img = None
         self._img2img = None
@@ -32,7 +33,13 @@ class PonyPipeline(BasePipeline):
         if self._loaded:
             return
 
-        from diffusers import StableDiffusionXLPipeline, StableDiffusionXLImg2ImgPipeline
+        from diffusers import AutoencoderKL, StableDiffusionXLPipeline, StableDiffusionXLImg2ImgPipeline
+
+        vae = AutoencoderKL.from_pretrained(
+            self.vae_model_id,
+            cache_dir=cache_path,
+            torch_dtype=torch.float16,
+        )
 
         self._txt2img = StableDiffusionXLPipeline.from_pretrained(
             self.hf_model_id,
@@ -40,6 +47,7 @@ class PonyPipeline(BasePipeline):
             torch_dtype=torch.float16,
             use_safetensors=True,
             low_cpu_mem_usage=False,
+            vae=vae,
         )
         # Fix for NaN fp16 VAE outputs (SDXL VAE bug on float16)
         if hasattr(self._txt2img, "vae") and self._txt2img.vae is not None:
