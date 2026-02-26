@@ -4,14 +4,18 @@ import type { GenerationType } from "./ControlPanel";
 
 export interface HistoryItem {
   id: string;
+  taskId?: string;
   prompt: string;
   type: GenerationType;
   model: string;
-  thumbnailUrl: string;
+  thumbnailUrl?: string;
   width: number;
   height: number;
   seed: number;
   createdAt: Date;
+  updatedAt?: Date;
+  status?: "pending" | "done" | "failed";
+  error?: string;
 }
 
 interface HistoryPanelProps {
@@ -178,6 +182,7 @@ function HistoryCard({
   onReuse: (item: HistoryItem) => void;
 }) {
   const Icon = item.type === "video" ? Video : ImageLucide;
+  const status = item.status ?? "done";
   
   return (
     <motion.div
@@ -201,11 +206,17 @@ function HistoryCard({
     >
       {/* Thumbnail */}
       <div className="relative aspect-video overflow-hidden">
-        <img
-          src={item.thumbnailUrl}
-          alt={item.prompt}
-          className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
-        />
+        {item.thumbnailUrl ? (
+          <img
+            src={item.thumbnailUrl}
+            alt={item.prompt}
+            className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
+          />
+        ) : (
+          <div className="w-full h-full flex items-center justify-center" style={{ background: "#111827" }}>
+            <Icon className="w-6 h-6" style={{ color: "#4B5563" }} />
+          </div>
+        )}
         <div className="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent" />
 
         {/* Type badge */}
@@ -220,6 +231,32 @@ function HistoryCard({
         >
           <Icon className="w-3 h-3" />
           {item.type === "video" ? "Video" : "Image"}
+        </span>
+
+        <span
+          className="absolute top-2 right-2 text-[10px] px-1.5 py-0.5 rounded"
+          style={{
+            background:
+              status === "pending"
+                ? "rgba(245,158,11,0.18)"
+                : status === "failed"
+                  ? "rgba(239,68,68,0.18)"
+                  : "rgba(16,185,129,0.18)",
+            border:
+              status === "pending"
+                ? "1px solid rgba(245,158,11,0.35)"
+                : status === "failed"
+                  ? "1px solid rgba(239,68,68,0.35)"
+                  : "1px solid rgba(16,185,129,0.35)",
+            color:
+              status === "pending"
+                ? "#F59E0B"
+                : status === "failed"
+                  ? "#EF4444"
+                  : "#10B981",
+          }}
+        >
+          {status}
         </span>
 
         {/* Hover reuse button */}

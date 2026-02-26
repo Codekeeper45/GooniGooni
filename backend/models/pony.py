@@ -123,6 +123,38 @@ class PonyPipeline(BasePipeline):
             or "unstable pixel values" in msg
         )
 
+    @staticmethod
+    def _clamp(value: float, low: float, high: float) -> float:
+        return max(low, min(high, value))
+
+    @classmethod
+    def _attempt_parameters(
+        cls,
+        *,
+        attempt: int,
+        max_attempts: int,
+        base_seed: int,
+        sampler: str,
+        steps: int,
+        cfg_scale: float,
+        denoising_strength: float,
+    ) -> tuple[int, str, int, float, float]:
+        """Derive per-attempt generation parameters for robust retry behavior."""
+        attempt_seed = base_seed + attempt
+        attempt_sampler = sampler
+        attempt_steps = int(steps)
+        attempt_cfg = float(cfg_scale)
+        attempt_denoise = float(denoising_strength)
+
+        # On the final attempt use a safer preset to reduce SDXL decode instability.
+        if attempt == max_attempts - 1:
+            attempt_sampler = "Euler a"
+            attempt_steps = int(cls._clamp(float(attempt_steps), 24.0, 30.0))
+            attempt_cfg = cls._clamp(attempt_cfg, 4.5, 6.5)
+            attempt_denoise = cls._clamp(attempt_denoise, 0.45, 0.7)
+
+        return attempt_seed, attempt_sampler, attempt_steps, attempt_cfg, attempt_denoise
+
     def generate(self, request: dict, task_id: str, results_path: str) -> tuple[str, str]:
         if not self._loaded:
             raise RuntimeError("Pipeline not initialized. Call load() first.")
@@ -148,37 +180,45 @@ class PonyPipeline(BasePipeline):
 
         image = None
         last_exc: Exception | None = None
-        for attempt in (0, 1):
-            # One guarded retry with a nearby seed helps bypass occasional unstable SDXL decodes.
-            attempt_seed = seed + attempt
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            attempt_seed, attempt_sampler, attempt_steps, attempt_cfg, attempt_denoise = self._attempt_parameters(
+                attempt=attempt,
+                max_attempts=max_attempts,
+                base_seed=seed,
+                sampler=sampler,
+                steps=steps,
+                cfg_scale=cfg_scale,
+                denoising_strength=denoising_strength,
+            )
             generator = torch.Generator(device="cuda").manual_seed(attempt_seed)
             try:
                 with torch.inference_mode():
                     if mode == "txt2img":
-                        self._apply_sampler(self._txt2img, sampler)
+                        self._apply_sampler(self._txt2img, attempt_sampler)
                         image = self._run_pipe_checked(
                             self._txt2img,
                             prompt=prompt,
                             negative_prompt=negative_prompt or None,
                             width=width,
                             height=height,
-                            num_inference_steps=steps,
-                            guidance_scale=cfg_scale,
+                            num_inference_steps=attempt_steps,
+                            guidance_scale=attempt_cfg,
                             clip_skip=clip_skip,
                             generator=generator,
                         )
 
                     elif mode == "img2img":
                         ref_img = self.decode_image(request["reference_image"]).resize((width, height), Image.LANCZOS)
-                        self._apply_sampler(self._img2img, sampler)
+                        self._apply_sampler(self._img2img, attempt_sampler)
                         image = self._run_pipe_checked(
                             self._img2img,
                             prompt=prompt,
                             negative_prompt=negative_prompt or None,
                             image=ref_img,
-                            strength=denoising_strength,
-                            num_inference_steps=steps,
-                            guidance_scale=cfg_scale,
+                            strength=attempt_denoise,
+                            num_inference_steps=attempt_steps,
+                            guidance_scale=attempt_cfg,
                             clip_skip=clip_skip,
                             generator=generator,
                         )
@@ -187,9 +227,15 @@ class PonyPipeline(BasePipeline):
                 break
             except RuntimeError as exc:
                 last_exc = exc
-                if attempt == 0 and self._is_retryable_decode_error(exc):
+                if self._is_retryable_decode_error(exc) and attempt < max_attempts - 1:
                     self.clear_gpu_memory(sync=False)
                     continue
+                if self._is_retryable_decode_error(exc) and attempt == max_attempts - 1:
+                    raise RuntimeError(
+                        "Pony decode failed after 3 attempts "
+                        "(including safe preset fallback). "
+                        f"Last error: {exc}"
+                    ) from exc
                 raise
 
         if image is None and last_exc is not None:

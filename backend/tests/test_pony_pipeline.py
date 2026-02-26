@@ -103,3 +103,37 @@ def test_run_pipe_checked_raises_when_warning_and_low_detail_coexist():
         PonyPipeline._run_pipe_checked(pipe, prompt="unstable")
     message = str(exc.value).lower()
     assert ("unstable pixel values" in message) or ("near-uniform image" in message)
+
+
+def test_attempt_parameters_default_attempt_keeps_original_values():
+    seed, sampler, steps, cfg, denoise = PonyPipeline._attempt_parameters(
+        attempt=0,
+        max_attempts=3,
+        base_seed=123,
+        sampler="DPM++ 2M Karras",
+        steps=40,
+        cfg_scale=8.0,
+        denoising_strength=0.9,
+    )
+    assert seed == 123
+    assert sampler == "DPM++ 2M Karras"
+    assert steps == 40
+    assert cfg == 8.0
+    assert denoise == 0.9
+
+
+def test_attempt_parameters_final_attempt_uses_safe_preset():
+    seed, sampler, steps, cfg, denoise = PonyPipeline._attempt_parameters(
+        attempt=2,
+        max_attempts=3,
+        base_seed=123,
+        sampler="DPM++ SDE Karras",
+        steps=60,
+        cfg_scale=10.0,
+        denoising_strength=1.0,
+    )
+    assert seed == 125
+    assert sampler == "Euler a"
+    assert steps == 30
+    assert cfg == 6.5
+    assert denoise == 0.7
