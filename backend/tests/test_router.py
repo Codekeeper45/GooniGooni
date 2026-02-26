@@ -29,6 +29,12 @@ def _make_account(id_: str, use_count: int = 0) -> dict:
     }
 
 
+@pytest.fixture(autouse=True)
+def _stub_recovery():
+    with patch("router.acc_store.recover_failed_accounts", return_value=0):
+        yield
+
+
 class TestRouterPick:
     def test_raises_when_no_ready_accounts(self):
         r = AccountRouter()
@@ -69,9 +75,13 @@ class TestRouterMarkSuccess:
 class TestRouterMarkFailed:
     def test_updates_status_to_failed(self):
         r = AccountRouter()
-        with patch("router.acc_store.update_account_status") as mock_update:
+        with patch("router.acc_store.mark_account_failed") as mock_mark_failed:
             r.mark_failed("acct-2", "CUDA OOM")
-            mock_update.assert_called_once_with("acct-2", "failed", error="CUDA OOM")
+            mock_mark_failed.assert_called_once()
+            args, kwargs = mock_mark_failed.call_args
+            assert args[0] == "acct-2"
+            assert args[1] == "CUDA OOM"
+            assert kwargs["max_fail_count"] > 0
 
 
 class TestPickWithFallback:
@@ -126,7 +136,7 @@ class TestFallbackSimulation:
 
         with patch("router.acc_store.list_ready_accounts", side_effect=mock_list_ready), \
              patch("router.acc_store.mark_account_used") as mock_used, \
-             patch("router.acc_store.update_account_status") as mock_status:
+             patch("router.acc_store.mark_account_failed") as _mock_failed:
 
             # First pick → A
             acct = r.pick_with_fallback(tried=tried)

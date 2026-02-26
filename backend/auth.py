@@ -36,6 +36,14 @@ def _auth_error(
     )
 
 
+def _is_local_unsecured_mode() -> bool:
+    """Allow unauthenticated mode only in local/dev/test runtime."""
+    app_env = (os.environ.get("APP_ENV") or "").strip().lower()
+    if app_env in {"local", "dev", "development", "test"}:
+        return True
+    return False
+
+
 def verify_api_key(
     header_key: str = Security(_API_KEY_HEADER),
     query_key: str = Query(None, alias="api_key"),
@@ -51,6 +59,13 @@ def verify_api_key(
     if not expected:
         # Fail-closed by default. Local bypass must be explicit.
         if os.environ.get("ALLOW_UNAUTHENTICATED") == "1":
+            if not _is_local_unsecured_mode():
+                raise _auth_error(
+                    code="server_misconfigured",
+                    detail="ALLOW_UNAUTHENTICATED is restricted to local/test environments.",
+                    user_action="Disable ALLOW_UNAUTHENTICATED and set API_KEY.",
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
             return ""
         raise _auth_error(
             code="server_misconfigured",

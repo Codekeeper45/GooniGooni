@@ -40,7 +40,6 @@ class Phr00tPipeline(BasePipeline):
         self._pipeline = WanPipeline.from_single_file(
             ckpt_path,
             torch_dtype=torch.bfloat16,
-            low_cpu_mem_usage=False,
         )
         self._pipeline.enable_model_cpu_offload()
         if hasattr(self._pipeline, "vae"):

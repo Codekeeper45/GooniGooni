@@ -53,9 +53,22 @@ def test_verify_api_key_rejects_missing(monkeypatch):
 def test_verify_api_key_allow_unauthenticated_opt_in(monkeypatch):
     monkeypatch.setenv("API_KEY", "")
     monkeypatch.setenv("ALLOW_UNAUTHENTICATED", "1")
+    monkeypatch.setenv("APP_ENV", "development")
     from auth import verify_api_key
 
     assert verify_api_key(header_key=None, query_key=None) == ""
+
+
+def test_verify_api_key_blocks_allow_unauthenticated_in_prod(monkeypatch):
+    monkeypatch.setenv("API_KEY", "")
+    monkeypatch.setenv("ALLOW_UNAUTHENTICATED", "1")
+    monkeypatch.setenv("APP_ENV", "production")
+    from auth import verify_api_key
+
+    with pytest.raises(HTTPException) as exc:
+        verify_api_key(header_key=None, query_key=None)
+    assert exc.value.status_code == 500
+    assert exc.value.detail["code"] == "server_misconfigured"
 
 
 def test_verify_generation_session_cookie_success(monkeypatch):

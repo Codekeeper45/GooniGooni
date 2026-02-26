@@ -31,7 +31,6 @@ class AnisoraPipeline(BasePipeline):
             "pretrained_model_name_or_path": self.hf_model_id,
             "cache_dir": self._cache_path,
             "torch_dtype": torch.bfloat16,
-            "low_cpu_mem_usage": False,
         }
         if self.subfolder:
             kwargs["subfolder"] = self.subfolder

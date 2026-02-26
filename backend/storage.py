@@ -141,6 +141,17 @@ def init_db() -> None:
                 pass
 
 
+def _public_base_url() -> Optional[str]:
+    """
+    Return configured absolute base URL without trailing slash.
+    If not configured, return None so callers avoid emitting relative URLs.
+    """
+    raw = (os.environ.get("PUBLIC_BASE_URL") or "").strip()
+    if not raw:
+        return None
+    return raw.rstrip("/")
+
+
 # ─── Task CRUD ────────────────────────────────────────────────────────────────
 
 def _now_iso() -> str:
@@ -412,7 +423,7 @@ def get_task(task_id: str) -> Optional[StatusResponse]:
     if row is None:
         return None
 
-    base_url = os.environ.get("PUBLIC_BASE_URL", "")
+    base_url = _public_base_url()
     diagnostics = {
         "events": [
             {
@@ -433,8 +444,8 @@ def get_task(task_id: str) -> Optional[StatusResponse]:
         lane_mode=row["lane_mode"],
         fallback_reason=row["fallback_reason"],
         diagnostics=diagnostics,
-        result_url=f"{base_url}/results/{row['id']}" if row["result_path"] else None,
-        preview_url=f"{base_url}/preview/{row['id']}" if row["preview_path"] else None,
+        result_url=f"{base_url}/results/{row['id']}" if row["result_path"] and base_url else None,
+        preview_url=f"{base_url}/preview/{row['id']}" if row["preview_path"] and base_url else None,
         error_msg=row["error_msg"],
         created_at=datetime.fromisoformat(row["created_at"]),
         updated_at=datetime.fromisoformat(row["updated_at"]),
@@ -474,7 +485,7 @@ def list_gallery(
         params.append(type_filter)
 
     where_sql = " AND ".join(where_clauses)
-    base_url = os.environ.get("PUBLIC_BASE_URL", "")
+    base_url = _public_base_url()
 
     with _db() as conn:
         total = conn.execute(
@@ -503,8 +514,8 @@ def list_gallery(
             height=row["height"],
             seed=row["seed"],
             created_at=datetime.fromisoformat(row["created_at"]),
-            preview_url=f"{base_url}/preview/{row['id']}",
-            result_url=f"{base_url}/results/{row['id']}",
+            preview_url=f"{base_url}/preview/{row['id']}" if base_url else None,
+            result_url=f"{base_url}/results/{row['id']}" if base_url else None,
         )
         for row in rows
     ]

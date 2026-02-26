@@ -144,6 +144,38 @@ class TestGetTask:
         assert r1.task_id == tid1
         assert r2.task_id == tid2
 
+    def test_urls_are_none_without_public_base_url(self, monkeypatch):
+        monkeypatch.delenv("PUBLIC_BASE_URL", raising=False)
+        tid = storage.create_task(
+            model="pony", gen_type="image", mode="txt2img",
+            prompt="url test", negative_prompt="", parameters={},
+            width=512, height=512, seed=1,
+        )
+        storage.update_task_status(
+            tid, "done", progress=100,
+            result_path=f"/results/{tid}/result.png",
+            preview_path=f"/results/{tid}/preview.jpg",
+        )
+        row = storage.get_task(tid)
+        assert row.result_url is None
+        assert row.preview_url is None
+
+    def test_urls_are_absolute_with_public_base_url(self, monkeypatch):
+        monkeypatch.setenv("PUBLIC_BASE_URL", "https://example.com/")
+        tid = storage.create_task(
+            model="pony", gen_type="image", mode="txt2img",
+            prompt="url test", negative_prompt="", parameters={},
+            width=512, height=512, seed=1,
+        )
+        storage.update_task_status(
+            tid, "done", progress=100,
+            result_path=f"/results/{tid}/result.png",
+            preview_path=f"/results/{tid}/preview.jpg",
+        )
+        row = storage.get_task(tid)
+        assert row.result_url == f"https://example.com/results/{tid}"
+        assert row.preview_url == f"https://example.com/preview/{tid}"
+
 
 # ─── list_gallery ─────────────────────────────────────────────────────────────
 
@@ -204,6 +236,13 @@ class TestListGallery:
         items, total = storage.list_gallery(type_filter="video")
         assert total == 1
         assert items[0].type == "video"
+
+    def test_gallery_urls_none_without_public_base_url(self, monkeypatch):
+        monkeypatch.delenv("PUBLIC_BASE_URL", raising=False)
+        self._add_done_task()
+        items, _ = storage.list_gallery()
+        assert items[0].result_url is None
+        assert items[0].preview_url is None
 
 
 # ─── delete_gallery_item ──────────────────────────────────────────────────────

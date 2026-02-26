@@ -17,7 +17,6 @@ import {
 } from "lucide-react";
 import { useGallery, type GalleryItem } from "../context/GalleryContext";
 import { VideoPlayer } from "../components/VideoPlayer";
-import { readApiError, sessionFetch } from "../utils/sessionClient";
 
 type FilterType = "all" | "image" | "video";
 type SortMode = "newest" | "oldest";
@@ -35,15 +34,6 @@ export function GalleryPage() {
   const [showConfirmClear, setShowConfirmClear] = useState(false);
 
   const handleDeleteItem = async (id: string) => {
-    const response = await sessionFetch(
-      `/gallery/${id}`,
-      { method: "DELETE" },
-      { retryOn401: true },
-    );
-    if (!response.ok) {
-      const err = await readApiError(response, "Failed to delete gallery item.");
-      throw new Error(`${err.detail} ${err.userAction}`.trim());
-    }
     removeFromGallery(id);
     if (selectedItem?.id === id) {
       setSelectedItem(null);

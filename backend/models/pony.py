@@ -39,7 +39,12 @@ class PonyPipeline(BasePipeline):
             torch_dtype=torch.float16,
             use_safetensors=True,
             low_cpu_mem_usage=False,
-        ).to("cuda")
+        )
+        # Fix for NaN fp16 VAE outputs (SDXL VAE bug on float16)
+        if hasattr(self._txt2img, "vae") and self._txt2img.vae is not None:
+            self._txt2img.vae = self._txt2img.vae.to(dtype=torch.float32)
+
+        self._txt2img.enable_model_cpu_offload()
         self._img2img = StableDiffusionXLImg2ImgPipeline.from_pipe(self._txt2img)
 
         for pipe in (self._txt2img, self._img2img):

@@ -32,6 +32,8 @@ Thumbs.db
 npm-debug.log*
 coverage/
 *.tmp
+.tmp_*
+.tmp_*/
 
 # IDE
 .vscode/
@@ -40,3 +42,6 @@ coverage/
 # Modal volumes / cache
 modal_volumes/
 *.swp
+
+# Local specification artifacts
+specs/

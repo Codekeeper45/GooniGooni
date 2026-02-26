@@ -13,6 +13,7 @@ admin disables an account) are picked up without restart.
 """
 from __future__ import annotations
 
+import os
 import threading
 from typing import Optional
 
@@ -21,6 +22,8 @@ import accounts as acc_store
 
 # Maximum number of fallback attempts if an account fails mid-inference
 MAX_FALLBACKS = 3
+FAILED_ACCOUNT_COOLDOWN_SECONDS = int(os.environ.get("ACCOUNT_FAILED_COOLDOWN_SECONDS", "300"))
+MAX_ACCOUNT_FAIL_COUNT = int(os.environ.get("ACCOUNT_MAX_FAIL_COUNT", "6"))
 
 _router_lock = threading.Lock()
 
@@ -61,6 +64,7 @@ class AccountRouter:
         Return the most appropriate ready account (least-used / least-recently-used).
         Raises NoReadyAccountError if no ready accounts exist.
         """
+        acc_store.recover_failed_accounts(cooldown_seconds=FAILED_ACCOUNT_COOLDOWN_SECONDS)
         with _router_lock:
             candidates = acc_store.list_ready_accounts()
         if not candidates:
@@ -89,10 +93,14 @@ class AccountRouter:
     def mark_failed(self, account_id: str, error: str) -> None:
         """
         Record an account failure.
-        The account stays in 'failed' status and is excluded from rotation
-        until an admin manually re-deploys it.
+        Account is temporarily excluded and auto-recovers after cooldown.
+        Repeated failures can auto-disable account when threshold is reached.
         """
-        acc_store.update_account_status(account_id, "failed", error=error)
+        acc_store.mark_account_failed(
+            account_id,
+            error,
+            max_fail_count=MAX_ACCOUNT_FAIL_COUNT,
+        )
 
     def pick_with_fallback(self, tried: Optional[list[str]] = None) -> dict:
         """
@@ -100,6 +108,7 @@ class AccountRouter:
         Raises NoReadyAccountError if all candidates are exhausted.
         """
         tried = tried or []
+        acc_store.recover_failed_accounts(cooldown_seconds=FAILED_ACCOUNT_COOLDOWN_SECONDS)
         with _router_lock:
             candidates = acc_store.list_ready_accounts()
         # Exclude already-tried accounts

@@ -74,9 +74,6 @@ async function generateMediaAPI(
     throw new Error(`Validation failed: ${validation.errors.join(", ")}`);
   }
 
-  console.log("🚀 Payload for inference:", payload);
-  console.log("📋 Advanced settings:", params.useAdvancedSettings ? "ON" : "OFF");
-
   if (!API_URL) {
     throw new Error("Backend not configured. Set VITE_API_URL in .env and rebuild the app.");
   }
@@ -107,7 +104,6 @@ async function generateMediaAPI(
   }
 
   const { task_id } = await genRes.json() as { task_id: string };
-  console.log(`📦 Task created: ${task_id}`);
   onTaskCreated?.(task_id);
   onProgress(5);
 
@@ -229,7 +225,6 @@ export function MediaGenApp() {
   const [width, setWidth] = useState(512);
   const [height, setHeight] = useState(512);
   const [seed, setSeed] = useState<number>(-1);
-  const [batchSize, setBatchSize] = useState(1);
   const [outputFormat, setOutputFormat] = useState("mp4");
 
   // ── Reference images (multiple modes) ─────────────────────────────────────────
@@ -622,8 +617,6 @@ export function MediaGenApp() {
           setHeight={setHeight}
           seed={seed}
           setSeed={setSeed}
-          batchSize={batchSize}
-          setBatchSize={setBatchSize}
           outputFormat={outputFormat}
           setOutputFormat={setOutputFormat}
           

@@ -3,7 +3,7 @@ Gooni Gooni Backend — Modal Application
 ========================================
 Deploys a FastAPI server on Modal with:
   • Async video generation (A10G) — anisora, phr00t
-  • Async image generation (T4)   — pony, flux
+  • Async image generation (A10G) — pony, flux
   • REST API with API-key auth
   • SQLite gallery in the results Volume
 
@@ -100,7 +100,7 @@ video_image = (
     .add_local_dir(str(Path(__file__).parent), remote_path="/root")  # backend/ .py files
 )
 
-# Image generation image (T4 — 16 GB, includes bitsandbytes for NF4)
+# Image generation image (A10G default, includes bitsandbytes for NF4)
 image_gen_image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install(
@@ -427,7 +427,7 @@ def run_phr00t_generation(request_dict: dict, task_id: str) -> dict:
 
 @app.function(
     image=image_gen_image,
-    gpu=os.environ.get("IMAGE_GPU", "T4"),
+    gpu=os.environ.get("IMAGE_GPU", "A10G"),
     min_containers=int(os.environ.get("IMAGE_MIN_CONTAINERS", "1")),
     max_containers=int(os.environ.get("IMAGE_CONCURRENCY", "2")),
     timeout=300,
@@ -436,7 +436,7 @@ def run_phr00t_generation(request_dict: dict, task_id: str) -> dict:
 )
 def run_image_generation(request_dict: dict, task_id: str) -> dict:
     """
-    Modal function that runs on T4.
+    Modal function that runs on A10G by default.
     Supports pony (SDXL) and flux (NF4) models.
     """
     sys.path.insert(0, "/root")
@@ -569,12 +569,18 @@ def fastapi_app():
     storage.init_db()
     acc_store.init_accounts_table()
 
+    enable_docs = (os.environ.get("ENABLE_DOCS", "0").strip().lower() in {"1", "true", "yes", "on"})
+    if not (os.environ.get("PUBLIC_BASE_URL", "").strip()):
+        print(
+            "[CONFIG] PUBLIC_BASE_URL is not set; /status links may be null until caller applies request-base fallback."
+        )
+
     api = FastAPI(
         title="Gooni Gooni Backend",
         description="AI content generation API (images & videos)",
         version="1.0.0",
-        docs_url="/docs",
-        redoc_url="/redoc",
+        docs_url="/docs" if enable_docs else None,
+        redoc_url="/redoc" if enable_docs else None,
     )
 
     env_origins = [
@@ -1338,6 +1344,7 @@ def fastapi_app():
     # ── GET /gallery ──────────────────────────────────────────────────────────
     @api.get("/gallery", response_model=GalleryResponse, tags=["Gallery"])
     async def gallery(
+        request: Request,
         page: int = Query(1, ge=1),
         per_page: int = Query(DEFAULT_PAGE_SIZE, ge=1, le=100),
         sort: str = Query("created_at"),
@@ -1353,8 +1360,22 @@ def fastapi_app():
             model_filter=model,
             type_filter=type,
         )
+        request_base_url = str(request.base_url).rstrip("/")
+        normalized_items = []
+        for item in items:
+            if item.result_url and item.preview_url:
+                normalized_items.append(item)
+                continue
+            normalized_items.append(
+                item.model_copy(
+                    update={
+                        "result_url": item.result_url or f"{request_base_url}/results/{item.id}",
+                        "preview_url": item.preview_url or f"{request_base_url}/preview/{item.id}",
+                    }
+                )
+            )
         return GalleryResponse(
-            items=items,
+            items=normalized_items,
             total=total,
             page=page,
             per_page=per_page,

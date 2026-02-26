@@ -55,9 +55,18 @@ export function GalleryProvider({ children }: { children: React.ReactNode }) {
   };
 
   const removeFromGallery = (id: string) => {
-    setGallery((prev) => prev.filter((item) => item.id !== id));
-    // Best-effort server cleanup — don't block UI on failure
-    sessionFetch(`/gallery/${id}`, { method: "DELETE" }).catch(() => {});
+    let removed: GalleryItem | undefined;
+    setGallery((prev) => {
+      removed = prev.find((item) => item.id === id);
+      return prev.filter((item) => item.id !== id);
+    });
+    sessionFetch(`/gallery/${id}`, { method: "DELETE" }).catch((error) => {
+      console.error("Failed to delete gallery item on server", error);
+      if (!removed) {
+        return;
+      }
+      setGallery((prev) => (prev.some((item) => item.id === id) ? prev : [removed!, ...prev]));
+    });
   };
 
   return (

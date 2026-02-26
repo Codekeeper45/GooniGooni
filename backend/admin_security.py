@@ -1,6 +1,6 @@
 """
 Security helpers for admin endpoints:
-- Rate-limiting with in-memory sliding window
+- Rate-limiting with SQLite-backed sliding window (shared across workers)
 - Audit log writes to SQLite
 - Constant-time key comparison
 - Minimum key length enforcement
@@ -12,14 +12,12 @@ import logging
 import sqlite3
 import threading
 import time
-from collections import defaultdict
 from datetime import datetime, timezone
 
 from fastapi import HTTPException, Header, Request, status
 
 logger = logging.getLogger("admin_security")
 
-_rate_windows: dict[str, list[float]] = defaultdict(list)
 _rate_lock = threading.Lock()
 RATE_LIMIT = 30
 RATE_WINDOW = 60.0
@@ -50,19 +48,61 @@ def _admin_error(
     )
 
 
+def _ensure_rate_limit_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS admin_rate_limits (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ip TEXT NOT NULL,
+            ts REAL NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_admin_rate_limits_ip_ts ON admin_rate_limits(ip, ts)"
+    )
+
+
+def _clear_rate_limit_state_for_tests() -> None:
+    """
+    Test-only helper for deterministic rate-limit assertions.
+    Production code does not call this function.
+    """
+    try:
+        conn = sqlite3.connect(_get_db_path())
+        conn.execute("DELETE FROM admin_rate_limits")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
 def _rate_check(ip: str) -> None:
-    now = time.monotonic()
+    now = time.time()
+    threshold = now - RATE_WINDOW
     with _rate_lock:
-        buckets = _rate_windows[ip]
-        _rate_windows[ip] = [t for t in buckets if now - t < RATE_WINDOW]
-        if len(_rate_windows[ip]) >= RATE_LIMIT:
-            raise _admin_error(
-                code="admin_rate_limited",
-                detail="Too many admin requests. Try again later.",
-                user_action="Wait a minute and retry.",
-                status_code=429,
-            )
-        _rate_windows[ip].append(now)
+        conn = sqlite3.connect(_get_db_path(), timeout=5.0)
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("BEGIN IMMEDIATE")
+            _ensure_rate_limit_table(conn)
+            conn.execute("DELETE FROM admin_rate_limits WHERE ts < ?", (threshold,))
+            current_hits = conn.execute(
+                "SELECT COUNT(*) FROM admin_rate_limits WHERE ip=? AND ts>=?",
+                (ip, threshold),
+            ).fetchone()[0]
+            if current_hits >= RATE_LIMIT:
+                conn.commit()
+                raise _admin_error(
+                    code="admin_rate_limited",
+                    detail="Too many admin requests. Try again later.",
+                    user_action="Wait a minute and retry.",
+                    status_code=429,
+                )
+            conn.execute("INSERT INTO admin_rate_limits(ip, ts) VALUES(?, ?)", (ip, now))
+            conn.commit()
+        finally:
+            conn.close()
 
 
 def _get_db_path() -> str:

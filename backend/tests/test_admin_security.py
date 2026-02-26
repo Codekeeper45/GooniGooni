@@ -46,7 +46,7 @@ def _reset_rate_limiter(monkeypatch, tmp_path):
     monkeypatch.setattr(storage, "RESULTS_PATH", str(tmp_path))
     storage.init_db()
 
-    admin_security._rate_windows.clear()
+    admin_security._clear_rate_limit_state_for_tests()
     monkeypatch.setattr(admin_security, "_log_action", lambda *args, **kwargs: None)
 
 

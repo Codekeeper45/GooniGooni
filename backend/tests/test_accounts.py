@@ -115,3 +115,39 @@ def test_status_transition_logging(caplog):
     messages = [rec.getMessage() for rec in caplog.records if rec.name == "accounts"]
     assert any("prev=pending new=checking" in msg for msg in messages)
     assert any("prev=checking new=ready" in msg for msg in messages)
+
+
+def test_mark_account_failed_increments_counter_and_sets_failed_at():
+    account_id = accounts.add_account("Test", "tok_id", "tok_secret")
+    accounts.mark_account_failed(account_id, "timeout", max_fail_count=6)
+    row = accounts.get_account(account_id)
+    assert row["status"] == "failed"
+    assert row["fail_count"] == 1
+    assert row["failed_at"] is not None
+
+
+def test_mark_account_failed_disables_after_threshold():
+    account_id = accounts.add_account("Test", "tok_id", "tok_secret")
+    accounts.mark_account_failed(account_id, "oom", max_fail_count=1)
+    row = accounts.get_account(account_id)
+    assert row["status"] == "disabled"
+    assert row["fail_count"] == 1
+
+
+def test_recover_failed_accounts_after_cooldown():
+    account_id = accounts.add_account("Test", "tok_id", "tok_secret")
+    accounts.mark_account_failed(account_id, "transient", max_fail_count=6)
+    recovered = accounts.recover_failed_accounts(cooldown_seconds=0)
+    assert recovered == 0
+
+    # Force old failed_at and recover.
+    with accounts._db() as conn:  # test-only direct setup
+        conn.execute(
+            "UPDATE modal_accounts SET failed_at=? WHERE id=?",
+            ("2000-01-01T00:00:00+00:00", account_id),
+        )
+    recovered = accounts.recover_failed_accounts(cooldown_seconds=60)
+    assert recovered == 1
+    row = accounts.get_account(account_id)
+    assert row["status"] == "ready"
+    assert row["failed_at"] is None

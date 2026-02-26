@@ -11,7 +11,7 @@ import sqlite3
 import threading
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -102,10 +102,21 @@ def init_accounts_table() -> None:
                 added_at     TEXT NOT NULL,
                 last_used    TEXT,
                 last_error   TEXT,
-                use_count    INTEGER NOT NULL DEFAULT 0
+                use_count    INTEGER NOT NULL DEFAULT 0,
+                failed_at    TEXT,
+                fail_count   INTEGER NOT NULL DEFAULT 0
             )
             """
         )
+        for ddl in (
+            "ALTER TABLE modal_accounts ADD COLUMN failed_at TEXT",
+            "ALTER TABLE modal_accounts ADD COLUMN fail_count INTEGER NOT NULL DEFAULT 0",
+        ):
+            try:
+                conn.execute(ddl)
+            except sqlite3.OperationalError:
+                # Column already exists on upgraded databases.
+                pass
 
 
 def add_account(
@@ -176,6 +187,10 @@ def update_account_status(
     if workspace is not None:
         fields.append("workspace = ?")
         values.append(workspace)
+    if status == "ready":
+        # Successful readiness clears failure metadata.
+        values[1] = None
+        fields.append("failed_at = NULL")
     values.append(account_id)
 
     with _lock, _db() as conn:
@@ -204,6 +219,89 @@ def update_account_status(
             workspace,
             error,
         )
+
+
+def mark_account_failed(account_id: str, error: str, max_fail_count: int = 6) -> None:
+    """
+    Mark account failed and increment failure counter.
+    If fail_count reaches max_fail_count, account is disabled automatically.
+    """
+    now = _now_iso()
+    with _lock, _db() as conn:
+        row = conn.execute(
+            "SELECT status, fail_count FROM modal_accounts WHERE id=?",
+            (account_id,),
+        ).fetchone()
+        if row is None:
+            return
+
+        prev_status = row["status"]
+        prev_fail_count = int(row["fail_count"] or 0)
+        new_fail_count = prev_fail_count + 1
+        next_status = "disabled" if new_fail_count >= max_fail_count else "failed"
+
+        conn.execute(
+            """
+            UPDATE modal_accounts
+            SET status=?, last_error=?, failed_at=?, fail_count=?
+            WHERE id=?
+            """,
+            (next_status, error, now, new_fail_count, account_id),
+        )
+        logger.warning(
+            "account_mark_failed account_id=%s prev=%s new=%s fail_count=%s error=%s",
+            account_id,
+            prev_status,
+            next_status,
+            new_fail_count,
+            error,
+        )
+
+
+def recover_failed_accounts(cooldown_seconds: int = 300) -> int:
+    """
+    Auto-recover failed accounts after cooldown to avoid permanent brick state.
+    Returns number of recovered accounts.
+    """
+    if cooldown_seconds <= 0:
+        return 0
+
+    threshold = datetime.now(timezone.utc) - timedelta(seconds=cooldown_seconds)
+    recovered = 0
+
+    with _lock, _db() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, failed_at
+            FROM modal_accounts
+            WHERE status='failed' AND failed_at IS NOT NULL
+            """
+        ).fetchall()
+
+        for row in rows:
+            failed_at_raw = row["failed_at"]
+            try:
+                failed_at = datetime.fromisoformat(failed_at_raw)
+                if failed_at.tzinfo is None:
+                    failed_at = failed_at.replace(tzinfo=timezone.utc)
+            except Exception:
+                # If timestamp is malformed, recover immediately.
+                failed_at = threshold - timedelta(seconds=1)
+
+            if failed_at <= threshold:
+                conn.execute(
+                    """
+                    UPDATE modal_accounts
+                    SET status='ready', last_error=NULL, failed_at=NULL
+                    WHERE id=?
+                    """,
+                    (row["id"],),
+                )
+                recovered += 1
+
+    if recovered:
+        logger.info("recovered_failed_accounts count=%s cooldown_seconds=%s", recovered, cooldown_seconds)
+    return recovered
 
 
 def mark_account_used(account_id: str) -> None:

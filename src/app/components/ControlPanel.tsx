@@ -60,8 +60,6 @@ export interface ControlPanelProps {
   setHeight: (h: number) => void;
   seed: number;
   setSeed: (s: number) => void;
-  batchSize: number;
-  setBatchSize: (b: number) => void;
   outputFormat: string;
   setOutputFormat: (f: string) => void;
   

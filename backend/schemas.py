@@ -245,8 +245,8 @@ class GalleryItemResponse(BaseModel):
     height: int
     seed: int
     created_at: datetime
-    preview_url: str
-    result_url: str
+    preview_url: Optional[str] = None
+    result_url: Optional[str] = None
 
 
 class GalleryResponse(BaseModel):
