@@ -265,7 +265,9 @@ async function pollTask(
   const MAX_POLLS = 400;
 
   for (let poll = 0; poll < MAX_POLLS; poll++) {
-    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+    if (poll > 0) {
+      await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+    }
     const statusRes = await sessionFetch(`/status/${task_id}`, {}, { retryOn401: true });
     if (!statusRes.ok) {
       const err = await readApiError(statusRes, "Status check failed.");
@@ -654,8 +656,9 @@ export function MediaGenApp() {
     }
 
     setStatus("generating");
-    setProgress(5);
-    setStatusText(getStatusText(5, saved.type));
+    const resumeProgress = Math.max(progress, persistedUi?.progress ?? 0, 5);
+    setProgress(resumeProgress);
+    setStatusText((prev) => prev || persistedUi?.statusText || getStatusText(resumeProgress, saved.type));
     setError(null);
     setResult(null);
 
