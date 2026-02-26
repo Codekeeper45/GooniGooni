@@ -1164,7 +1164,7 @@ def fastapi_app():
         if (
             result.status == TaskStatus.pending
             and (result.progress or 0) == 0
-            and not result.stage
+            and (result.stage is None or result.stage == "queued")
             and result.created_at is not None
         ):
             age_seconds = (datetime.now(result.created_at.tzinfo) - result.created_at).total_seconds()
