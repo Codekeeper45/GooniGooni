@@ -164,13 +164,14 @@ def list_accounts() -> list[dict]:
 def list_ready_accounts() -> list[dict]:
     """
     Return ready accounts for router usage.
-    Includes token_id/token_secret to support future direct dispatch paths.
+    Returns public data only — secrets are NOT included.
+    Credentials are fetched on-demand via get_account() when needed for deploy.
     """
     with _db() as conn:
         rows = conn.execute(
             "SELECT * FROM modal_accounts WHERE status='ready' ORDER BY use_count ASC, last_used ASC"
         ).fetchall()
-    return [_to_internal(r) for r in rows]
+    return [_to_public(r) for r in rows]
 
 
 def update_account_status(

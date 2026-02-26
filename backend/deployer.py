@@ -129,7 +129,7 @@ def deploy_all_accounts() -> list[threading.Thread]:
     all_accounts = acc_store.list_accounts()
     threads = []
     for account in all_accounts:
-        if account["status"] == "disabled":
+        if account["status"] in {"disabled", "checking"}:
             continue
         thread = deploy_account_async(account["id"])
         threads.append(thread)

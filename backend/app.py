@@ -1096,7 +1096,7 @@ def fastapi_app():
                 remote_url = f"https://{workspace}--gooni-api.modal.run/generate_direct"
 
                 async with httpx.AsyncClient(
-                    timeout=httpx.Timeout(connect=10.0, read=60.0, write=60.0, pool=5.0)
+                    timeout=httpx.Timeout(connect=4.0, read=60.0, write=60.0, pool=5.0)
                 ) as client:
                     resp = await client.post(remote_url, json=req_payload, headers=headers)
                     if resp.status_code == 422:
@@ -1124,7 +1124,8 @@ def fastapi_app():
                     remote_task_id = data["task_id"]
 
                 account_router.mark_success(account["id"])
-                
+                results_vol.commit()
+
                 # Format task ID to encode the remote workspace
                 return GenerateResponse(
                     task_id=f"{workspace}::{remote_task_id}",
@@ -1582,9 +1583,18 @@ def fastapi_app():
     @api.post("/admin/accounts/{account_id}/enable", tags=["Admin"])
     async def admin_enable_account(account_id: str, _ip: str = Depends(get_admin_auth("enable_account"))):
         results_vol.reload()
-        acc_store.enable_account(account_id)
+        if acc_store.get_account(account_id) is None:
+            raise HTTPException(
+                status_code=404,
+                detail=_error_payload(
+                    code="not_found",
+                    detail="Account not found.",
+                    user_action="Verify account id and retry.",
+                ),
+            )
+        deploy_account_async(account_id)
         results_vol.commit()
-        return {"id": account_id, "status": "ready"}
+        return {"id": account_id, "status": "checking", "message": "Deploying before enabling..."}
 
     # ── POST /admin/accounts/{id}/deploy ─────────────────────────────────────
     @api.post("/admin/accounts/{account_id}/deploy", tags=["Admin"])
