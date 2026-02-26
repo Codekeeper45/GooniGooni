@@ -26,6 +26,7 @@ FROM nginx:1.27-alpine AS production
 
 # Remove default nginx static content
 RUN rm -rf /usr/share/nginx/html/*
+RUN apk add --no-cache wget
 
 # Copy built app
 COPY --from=builder /app/dist /usr/share/nginx/html
