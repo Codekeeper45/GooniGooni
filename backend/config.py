@@ -58,6 +58,25 @@ IMAGE_CONCURRENCY = int(os.environ.get("IMAGE_CONCURRENCY", "2"))
 VIDEO_TIMEOUT = int(os.environ.get("VIDEO_TIMEOUT", "900"))   # 15 min
 IMAGE_TIMEOUT = int(os.environ.get("IMAGE_TIMEOUT", "300"))   # 5 min
 
+# Dedicated video lane policy (AniSora / Phr00t keep warm independently)
+VIDEO_LANE_WARM_MIN_CONTAINERS = int(os.environ.get("VIDEO_LANE_WARM_MIN_CONTAINERS", "1"))
+VIDEO_LANE_WARM_MAX_CONTAINERS = int(os.environ.get("VIDEO_LANE_WARM_MAX_CONTAINERS", "1"))
+
+# Degraded shared-worker queue policy
+DEGRADED_QUEUE_MAX_DEPTH = int(os.environ.get("VIDEO_DEGRADED_QUEUE_MAX_DEPTH", "25"))
+DEGRADED_QUEUE_MAX_WAIT_SECONDS = int(os.environ.get("VIDEO_DEGRADED_QUEUE_MAX_WAIT_SECONDS", "30"))
+DEGRADED_QUEUE_OVERLOAD_CODE = "queue_overloaded"
+
+# Dedicated-lane readiness/fallback policy
+VIDEO_LANE_HEALTH_GRACE_SECONDS = int(os.environ.get("VIDEO_LANE_HEALTH_GRACE_SECONDS", "60"))
+VIDEO_LANE_ASSIGNMENT_TIMEOUT_SECONDS = int(os.environ.get("VIDEO_LANE_ASSIGNMENT_TIMEOUT_SECONDS", "30"))
+
+# Fixed video generation constraints (source-of-truth for backend validation/tests)
+VIDEO_FIXED_CONSTRAINTS = {
+    "anisora": {"steps": 8, "cfg_scale": None},
+    "phr00t": {"steps": 4, "cfg_scale": 1.0},
+}
+
 # ─── Gallery defaults ──────────────────────────────────────────────────────────
 DEFAULT_PAGE_SIZE = 20
 MAX_PAGE_SIZE = 100

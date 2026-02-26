@@ -117,6 +117,43 @@ class TestGPUConfig:
         assert cfg.VIDEO_GPU == "A100"
 
 
+class TestLaneAndQueuePolicy:
+    def test_degraded_queue_defaults(self):
+        import config
+
+        assert config.DEGRADED_QUEUE_MAX_DEPTH == 25
+        assert config.DEGRADED_QUEUE_MAX_WAIT_SECONDS == 30
+        assert config.DEGRADED_QUEUE_OVERLOAD_CODE == "queue_overloaded"
+
+    def test_fixed_video_constraints(self):
+        import config
+
+        assert config.VIDEO_FIXED_CONSTRAINTS["anisora"]["steps"] == 8
+        assert config.VIDEO_FIXED_CONSTRAINTS["phr00t"]["steps"] == 4
+        assert config.VIDEO_FIXED_CONSTRAINTS["phr00t"]["cfg_scale"] == 1.0
+
+    def test_modes_schema_parity_for_fixed_constraints(self):
+        import config
+
+        schema_by_id = {m["id"]: m for m in config.MODELS_SCHEMA}
+        anisora = schema_by_id["anisora"]["fixed_parameters"]
+        phr00t = schema_by_id["phr00t"]["fixed_parameters"]
+        assert anisora["steps"]["value"] == config.VIDEO_FIXED_CONSTRAINTS["anisora"]["steps"]
+        assert phr00t["steps"]["value"] == config.VIDEO_FIXED_CONSTRAINTS["phr00t"]["steps"]
+        assert phr00t["cfg_scale"]["value"] == config.VIDEO_FIXED_CONSTRAINTS["phr00t"]["cfg_scale"]
+
+    def test_secret_surface_does_not_expand(self):
+        import config
+
+        env_keys = set(config.os.environ.keys())
+        forbidden_new_runtime_secret_keys = {
+            "X_API_KEY",
+            "VIDEO_MODEL_PASSWORD",
+            "RAW_TOKEN",
+        }
+        assert forbidden_new_runtime_secret_keys.isdisjoint(env_keys)
+
+
 class TestTimeouts:
     def test_video_timeout_default(self):
         import config

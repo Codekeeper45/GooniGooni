@@ -15,6 +15,7 @@ import {
   RotateCcw,
   Settings,
 } from "lucide-react";
+import { configManager } from "../utils/configManager";
 
 export type GenerationType = "image" | "video";
 export type VideoModel = "anisora" | "phr00t";
@@ -424,6 +425,12 @@ export function ControlPanel(props: ControlPanelProps) {
   const [newArbitraryFrameIndex, setNewArbitraryFrameIndex] = useState(40);
 
   const isGenerating = status === "generating";
+  const anisoraFixed = configManager.getFixedParameters("anisora");
+  const phr00tFixed = configManager.getFixedParameters("phr00t");
+  const anisoraStepsDefault = Number(anisoraFixed.steps?.value ?? 8);
+  const anisoraGuidanceDefault = Number(anisoraFixed.guidance_scale?.value ?? 1.0);
+  const phr00tStepsDefault = Number(phr00tFixed.steps?.value ?? 4);
+  const phr00tCfgDefault = Number(phr00tFixed.cfg_scale?.value ?? 1.0);
 
   // ─── Quick preset data ───────────────────────────────────────────────────────
   const DURATION_PRESETS = [
@@ -469,15 +476,19 @@ export function ControlPanel(props: ControlPanelProps) {
     setOutputFormat("mp4");
     
     if (generationType === "video") {
+      const anisoraSteps = Number(anisoraFixed.steps?.value ?? 8);
+      const anisoraGuidance = Number(anisoraFixed.guidance_scale?.value ?? 1.0);
+      const phr00tSteps = Number(phr00tFixed.steps?.value ?? 4);
+      const phr00tCfg = Number(phr00tFixed.cfg_scale?.value ?? 1.0);
       // Reset video advanced params
       setNumFrames(81);
       setFps(16);
-      setGuidanceScale(1.0);
-      setVideoSteps(videoModel === "anisora" ? 8 : 4);
+      setGuidanceScale(anisoraGuidance);
+      setVideoSteps(videoModel === "anisora" ? anisoraSteps : phr00tSteps);
       setMotionScore(3.0);
       setReferenceStrength(videoModel === "anisora" ? 0.85 : 1.0);
       setDenoisingStrength(0.7);
-      setCfgScaleVideo(1.0);
+      setCfgScaleVideo(phr00tCfg);
       setLightingVariant("low_noise");
       setWidth(720);
       setHeight(1280);

@@ -9,7 +9,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, List, Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 
 
 # ─── Enums ────────────────────────────────────────────────────────────────────
@@ -98,6 +98,26 @@ class GenerateRequest(BaseModel):
     first_strength: Optional[float] = Field(default=1.0, ge=0.5, le=1.0)
     last_strength: Optional[float] = Field(default=1.0, ge=0.5, le=1.0)
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_video_aliases(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        normalized = dict(data)
+        model = normalized.get("model")
+        if isinstance(model, ModelId):
+            model = model.value
+        if "cfg" in normalized and "cfg_scale" not in normalized:
+            normalized["cfg_scale"] = normalized["cfg"]
+        # Legacy callers may send guidance_scale for phr00t; normalize to cfg_scale.
+        if model == "phr00t" and "guidance_scale" in normalized and "cfg_scale" not in normalized:
+            normalized["cfg_scale"] = normalized["guidance_scale"]
+        if model == "anisora" and normalized.get("steps") is None:
+            normalized["steps"] = 8
+        if model == "phr00t" and normalized.get("steps") is None:
+            normalized["steps"] = 4
+        return normalized
+
     @field_validator("mode")
     @classmethod
     def validate_mode(cls, v: str, info: Any) -> str:
@@ -130,6 +150,34 @@ class GenerateRequest(BaseModel):
         if not v.strip():
             raise ValueError("prompt must not be empty")
         return v
+
+    @field_validator("steps")
+    @classmethod
+    def enforce_fixed_video_steps(cls, v: Optional[int], info: ValidationInfo) -> Optional[int]:
+        if v is None:
+            return v
+        model = info.data.get("model")
+        if isinstance(model, ModelId):
+            model = model.value
+        if model == "anisora" and v != 8:
+            raise ValueError("For anisora, steps must be exactly 8")
+        if model == "phr00t" and v != 4:
+            raise ValueError("For phr00t, steps must be exactly 4")
+        return v
+
+    @field_validator("cfg_scale")
+    @classmethod
+    def enforce_fixed_phr00t_cfg(cls, v: Optional[float], info: ValidationInfo) -> Optional[float]:
+        model = info.data.get("model")
+        if isinstance(model, ModelId):
+            model = model.value
+        if model != "phr00t":
+            return v
+        if v is None:
+            raise ValueError("For phr00t, cfg_scale must be exactly 1.0")
+        if float(v) != 1.0:
+            raise ValueError("For phr00t, cfg_scale must be exactly 1.0")
+        return float(v)
 
     @staticmethod
     def _approx_bytes_from_data_uri(value: Optional[str]) -> int:
@@ -175,6 +223,9 @@ class StatusResponse(BaseModel):
     progress: int = Field(default=0, ge=0, le=100)
     stage: Optional[str] = None
     stage_detail: Optional[str] = None
+    lane_mode: Optional[Literal["dedicated", "degraded_shared"]] = None
+    fallback_reason: Optional[str] = None
+    diagnostics: Optional[dict[str, Any]] = None
     result_url: Optional[str] = None
     preview_url: Optional[str] = None
     error: Optional[str] = None
@@ -241,6 +292,10 @@ class ErrorResponse(BaseModel):
     code: str
     detail: str
     user_action: str
+
+
+class ApiErrorEnvelope(BaseModel):
+    detail: ErrorResponse
 
 
 class AddAccountRequest(BaseModel):

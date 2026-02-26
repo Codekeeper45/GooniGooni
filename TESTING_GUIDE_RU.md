@@ -207,3 +207,24 @@ pytest backend/tests/test_api.py -v --request-timeout 15
 - `TEST_VIDEO_FLOW_TIMEOUT_SECONDS` (по умолчанию 300)
 - `TEST_IMAGE_FLOW_TIMEOUT_SECONDS` (по умолчанию 180)
 - `TEST_POLL_INTERVAL_SECONDS` (по умолчанию 5)
+
+## Дополнительно: сценарии lane/queue (2026-02-26)
+
+1. Dedicated lane переключение:
+   - Отправьте подряд запросы `anisora`, затем `phr00t`, затем снова `anisora`.
+   - Убедитесь, что нет CUDA OOM и задачи завершаются штатно.
+
+2. Fixed parameters contract:
+   - `anisora` + `steps=20` -> ожидается `422`.
+   - `phr00t` + `steps=8` или `cfg_scale=1.5` -> ожидается `422`.
+
+3. Queue overload contract:
+   - В degraded режиме заполните очередь до лимита.
+   - Следующие запросы должны получать `503` с кодом `queue_overloaded`.
+
+4. Diagnostics visibility:
+   - В `/admin/accounts` и `/admin/health` проверьте блок diagnostics:
+     - `queue_depth`
+     - `queue_overloaded_count`
+     - `queue_timeout_count`
+     - `fallback_count`

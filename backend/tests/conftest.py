@@ -95,3 +95,16 @@ def create_admin_session(raw_client, admin_key):
         return raw_client.post("/admin/session", headers=headers)
 
     return _create
+
+
+@pytest.fixture
+def lane_policy():
+    return {
+        "max_depth": int(os.environ.get("VIDEO_DEGRADED_QUEUE_MAX_DEPTH", "25")),
+        "max_wait_seconds": int(os.environ.get("VIDEO_DEGRADED_QUEUE_MAX_WAIT_SECONDS", "30")),
+    }
+
+
+@pytest.fixture
+def queue_scenario_task_ids():
+    return [f"test-task-{i}" for i in range(1, 6)]

@@ -702,3 +702,36 @@ interface GenerationResponse {
   - `DELETE /admin/session`
 - Статусы аккаунтов server-authoritative: `pending|checking|ready|failed|disabled`.
 - `ready` выставляется только после успешного health-check; переход `failed -> ready` без `checking` запрещён.
+
+---
+
+## VRAM Stability Contract Update (2026-02-26)
+
+For video models, the backend now enforces strict fixed parameters before enqueue:
+
+- `anisora`: `steps` must be `8`
+- `phr00t`: `steps` must be `4` and `cfg_scale` must be `1.0`
+
+If request payload violates these rules, backend returns `422`.
+
+When dedicated video lanes are unavailable, backend routes requests to degraded shared-worker mode with bounded admission:
+
+- max queue depth: `25`
+- max queue wait: `30s`
+
+If limits are exceeded, backend returns:
+
+```json
+{
+  "detail": {
+    "code": "queue_overloaded",
+    "detail": "Generation queue is overloaded ...",
+    "user_action": "Retry later."
+  }
+}
+```
+
+Client-side handling recommendation:
+
+1. Show validation guidance on `422`.
+2. Show retry/backoff UX on `503` with `code=queue_overloaded`.

@@ -149,6 +149,35 @@ class TestFieldConstraints:
         assert req.output_format == "mp4"
 
 
+class TestFixedVideoParameters:
+    def test_anisora_steps_must_be_8(self):
+        with pytest.raises(ValidationError):
+            make_req(model="anisora", type="video", mode="t2v", steps=20)
+
+    def test_anisora_steps_defaults_to_8(self):
+        req = make_req(model="anisora", type="video", mode="t2v", steps=None)
+        assert req.steps == 8
+
+    def test_phr00t_steps_must_be_4(self):
+        with pytest.raises(ValidationError):
+            make_req(model="phr00t", type="video", mode="t2v", steps=8)
+
+    def test_phr00t_cfg_must_be_1(self):
+        with pytest.raises(ValidationError):
+            make_req(model="phr00t", type="video", mode="t2v", cfg_scale=1.5, steps=4)
+
+    def test_phr00t_alias_cfg_is_normalized(self):
+        req = GenerateRequest(
+            model="phr00t",
+            type="video",
+            mode="t2v",
+            prompt="test prompt",
+            steps=4,
+            cfg=1.0,
+        )
+        assert req.cfg_scale == 1.0
+
+
 class TestResponseSchemas:
     def test_generate_response(self):
         resp = GenerateResponse(task_id="abc-123", status=TaskStatus.pending)

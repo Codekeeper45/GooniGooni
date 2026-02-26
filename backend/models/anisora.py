@@ -27,12 +27,14 @@ class AnisoraPipeline(BasePipeline):
         self._loaded = True
 
     def _common_kwargs(self) -> dict:
-        return {
+        kwargs = {
             "pretrained_model_name_or_path": self.hf_model_id,
-            "subfolder": self.subfolder or None,
             "cache_dir": self._cache_path,
             "torch_dtype": torch.bfloat16,
         }
+        if self.subfolder:
+            kwargs["subfolder"] = self.subfolder
+        return kwargs
 
     def _ensure_t2v(self) -> None:
         if self._t2v is not None:
@@ -63,6 +65,10 @@ class AnisoraPipeline(BasePipeline):
         if not self._loaded:
             raise RuntimeError("Pipeline not initialized. Call load() first.")
 
+        if request.get("_lane_mode") == "degraded_shared" and request.get("_cross_model_switch"):
+            # Degraded cross-model switches prioritize memory safety over cache reuse.
+            self.clear_gpu_memory(sync=True)
+
         mode = request.get("mode", "t2v")
         seed = self.resolve_seed(request.get("seed", -1))
         generator = torch.Generator(device="cpu").manual_seed(seed)
@@ -72,7 +78,7 @@ class AnisoraPipeline(BasePipeline):
         width = request.get("width", 720)
         height = request.get("height", 1280)
         num_frames = request.get("num_frames", 81)
-        steps = request.get("steps", 8)
+        steps = request.get("steps", 8) or 8
         fps = request.get("fps", 16)
         guidance_scale = request.get("guidance_scale", 1.0)
 

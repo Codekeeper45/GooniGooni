@@ -239,6 +239,15 @@ export class InferenceConfigManager {
   ): { valid: boolean; errors: string[] } {
     const errors: string[] = [];
     const params = this.getParameters(modelId);
+    const fixedParams = this.getFixedParameters(modelId);
+
+    Object.entries(fixedParams).forEach(([key, fixed]) => {
+      const value = values[key];
+      if (!fixed.locked || value === undefined || value === null || value === "") return;
+      if (value !== fixed.value) {
+        errors.push(`${key} must be ${fixed.value}`);
+      }
+    });
 
     Object.entries(params).forEach(([key, param]) => {
       const value = values[key];

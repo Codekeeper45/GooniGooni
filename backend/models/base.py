@@ -87,3 +87,37 @@ class BasePipeline(abc.ABC):
         with imageio.get_writer(out_path, fps=fps, codec=codec, quality=8) as writer:
             for frame in frames:
                 writer.append_data(np.array(frame) if isinstance(frame, Image.Image) else frame)
+
+    @staticmethod
+    def clear_gpu_memory(sync: bool = False) -> None:
+        """Best-effort GPU cleanup to reduce allocator fragmentation."""
+        import gc
+
+        gc.collect()
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.reset_peak_memory_stats()
+                if sync:
+                    torch.cuda.synchronize()
+        except Exception:
+            # Cleanup must never break request lifecycle.
+            pass
+
+    @staticmethod
+    def clear_all_pipelines(cache: Optional[dict[str, object]] = None) -> None:
+        """Unload pipeline objects and force GPU memory cleanup."""
+        if cache:
+            for key in list(cache.keys()):
+                pipe = cache.pop(key, None)
+                if pipe is None:
+                    continue
+                if hasattr(pipe, "to"):
+                    try:
+                        pipe.to("cpu")
+                    except Exception:
+                        pass
+                del pipe
+        BasePipeline.clear_gpu_memory(sync=True)

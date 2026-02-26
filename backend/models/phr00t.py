@@ -60,6 +60,10 @@ class Phr00tPipeline(BasePipeline):
         if not self._loaded:
             raise RuntimeError("Pipeline not initialized. Call load() first.")
 
+        if request.get("_lane_mode") == "degraded_shared" and request.get("_cross_model_switch"):
+            # Degraded cross-model switches prioritize memory safety over cache reuse.
+            self.clear_gpu_memory(sync=True)
+
         mode = request.get("mode", "t2v")
         seed = self.resolve_seed(request.get("seed", -1))
         generator = torch.Generator(device="cpu").manual_seed(seed)

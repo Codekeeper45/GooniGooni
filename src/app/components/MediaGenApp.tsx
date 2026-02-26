@@ -69,6 +69,10 @@ async function generateMediaAPI(
   };
 
   const payload = configManager.buildPayload(modelId, mode, values);
+  const validation = configManager.validateValues(modelId, mode, payload);
+  if (!validation.valid) {
+    throw new Error(`Validation failed: ${validation.errors.join(", ")}`);
+  }
 
   console.log("🚀 Payload for inference:", payload);
   console.log("📋 Advanced settings:", params.useAdvancedSettings ? "ON" : "OFF");
@@ -89,7 +93,24 @@ async function generateMediaAPI(
   );
 
   if (!genRes.ok) {
-    const detail = await genRes.text();
+    let body: any = null;
+    try {
+      body = await genRes.json();
+    } catch {
+      body = null;
+    }
+    const code = body?.detail?.code || body?.code;
+    const detail =
+      body?.detail?.detail ||
+      body?.detail?.message ||
+      body?.detail ||
+      (await genRes.text().catch(() => ""));
+    if (genRes.status === 503 && code === "queue_overloaded") {
+      throw new Error("Queue overloaded: all safe video workers are busy. Retry in 30s.");
+    }
+    if (genRes.status === 422) {
+      throw new Error(`Validation error: ${detail}`);
+    }
     throw new Error(`Generate failed (${genRes.status}): ${detail}`);
   }
 
@@ -265,6 +286,12 @@ export function MediaGenApp() {
   // ── History & Gallery ─────────────────────────────────────────────────────────
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [showHistory, setShowHistory] = useState(false);
+  const anisoraFixed = configManager.getFixedParameters("anisora");
+  const phr00tFixed = configManager.getFixedParameters("phr00t");
+  const anisoraStepsDefault = Number(anisoraFixed.steps?.value ?? 8);
+  const anisoraGuidanceDefault = Number(anisoraFixed.guidance_scale?.value ?? 1.0);
+  const phr00tStepsDefault = Number(phr00tFixed.steps?.value ?? 4);
+  const phr00tCfgDefault = Number(phr00tFixed.cfg_scale?.value ?? 1.0);
 
   // Update status text as progress changes
   useEffect(() => {
@@ -277,13 +304,13 @@ export function MediaGenApp() {
   useEffect(() => {
     if (generationType === "video") {
       if (videoModel === "anisora") {
-        setVideoSteps(8);
-        setGuidanceScale(1.0);
+        setVideoSteps(anisoraStepsDefault);
+        setGuidanceScale(anisoraGuidanceDefault);
         setFps(16);
         setMotionScore(3.0);
       } else if (videoModel === "phr00t") {
-        setVideoSteps(4);
-        setCfgScaleVideo(1.0);
+        setVideoSteps(phr00tStepsDefault);
+        setCfgScaleVideo(phr00tCfgDefault);
         setFps(16);
       }
     } else {
@@ -298,7 +325,15 @@ export function MediaGenApp() {
         setSampler("Euler");
       }
     }
-  }, [generationType, videoModel, imageModel]);
+  }, [
+    generationType,
+    videoModel,
+    imageModel,
+    anisoraStepsDefault,
+    anisoraGuidanceDefault,
+    phr00tStepsDefault,
+    phr00tCfgDefault,
+  ]);
 
   // ── Resume generation from localStorage on page load ─────────────────────────
   useEffect(() => {

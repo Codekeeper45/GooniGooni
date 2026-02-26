@@ -17,6 +17,7 @@ transformers>=4.43.0
 accelerate>=0.32.0
 safetensors>=0.4
 sentencepiece
+ftfy>=6.2.0
 
 # ─── Quantization (Flux NF4) ────────────────────────────────────────────────
 bitsandbytes>=0.43.0

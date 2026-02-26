@@ -29,6 +29,13 @@ interface AuditEntry {
   success: number;
 }
 
+interface OperationalDiagnostics {
+  queue_depth: number;
+  queue_overloaded_count: number;
+  queue_timeout_count: number;
+  fallback_count: number;
+}
+
 type Tab = "accounts" | "logs";
 
 const statusColors: Record<string, string> = {
@@ -72,6 +79,7 @@ export function AdminDashboard() {
   const [tab, setTab] = useState<Tab>("accounts");
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [logs, setLogs] = useState<AuditEntry[]>([]);
+  const [ops, setOps] = useState<OperationalDiagnostics | null>(null);
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null);
 
@@ -107,6 +115,7 @@ export function AdminDashboard() {
       }
       const data = await res.json();
       setAccounts(data.accounts ?? []);
+      setOps(data.diagnostics ?? null);
     } catch {
       // network error
     }
@@ -406,8 +415,36 @@ export function AdminDashboard() {
                 Нет аккаунтов. Добавьте первый выше.
               </div>
             ) : (
-              <div style={card}>
-                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <div style={card}>
+              {ops && (
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+                    gap: 8,
+                    marginBottom: 16,
+                  }}
+                >
+                  <div style={{ ...card, marginBottom: 0, padding: 12 }}>
+                    <div style={{ fontSize: 11, color: "rgba(255,255,255,0.5)" }}>Queue depth</div>
+                    <div style={{ fontSize: 20, fontWeight: 700 }}>{ops.queue_depth}</div>
+                  </div>
+                  <div style={{ ...card, marginBottom: 0, padding: 12 }}>
+                    <div style={{ fontSize: 11, color: "rgba(255,255,255,0.5)" }}>Overloaded</div>
+                    <div style={{ fontSize: 20, fontWeight: 700 }}>{ops.queue_overloaded_count}</div>
+                  </div>
+                  <div style={{ ...card, marginBottom: 0, padding: 12 }}>
+                    <div style={{ fontSize: 11, color: "rgba(255,255,255,0.5)" }}>Queue timeout</div>
+                    <div style={{ fontSize: 20, fontWeight: 700 }}>{ops.queue_timeout_count}</div>
+                  </div>
+                  <div style={{ ...card, marginBottom: 0, padding: 12 }}>
+                    <div style={{ fontSize: 11, color: "rgba(255,255,255,0.5)" }}>Fallbacks</div>
+                    <div style={{ fontSize: 20, fontWeight: 700 }}>{ops.fallback_count}</div>
+                  </div>
+                </div>
+              )}
+
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
                   <thead>
                     <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.1)" }}>
                       {["Имя", "Workspace", "Статус", "Запросов", "Последний", "Действия"].map((h) => (

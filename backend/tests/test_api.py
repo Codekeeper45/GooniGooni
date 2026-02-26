@@ -15,13 +15,18 @@ Or set env vars:
 """
 import os
 import time
+import json
 
 import httpx
 import pytest
 
 POLL_INTERVAL_SECONDS = int(os.environ.get("TEST_POLL_INTERVAL_SECONDS", "5"))
-VIDEO_FLOW_TIMEOUT_SECONDS = int(os.environ.get("TEST_VIDEO_FLOW_TIMEOUT_SECONDS", "300"))
-IMAGE_FLOW_TIMEOUT_SECONDS = int(os.environ.get("TEST_IMAGE_FLOW_TIMEOUT_SECONDS", "180"))
+VIDEO_FLOW_TIMEOUT_SECONDS = int(os.environ.get("TEST_VIDEO_FLOW_TIMEOUT_SECONDS", "180"))
+IMAGE_FLOW_TIMEOUT_SECONDS = int(os.environ.get("TEST_IMAGE_FLOW_TIMEOUT_SECONDS", "120"))
+QUEUE_OVERLOAD_STORM_REQUESTS = int(os.environ.get("TEST_QUEUE_OVERLOAD_STORM_REQUESTS", "0"))
+QUEUE_OVERLOAD_SUBMIT_INTERVAL_SECONDS = float(
+    os.environ.get("TEST_QUEUE_OVERLOAD_SUBMIT_INTERVAL_SECONDS", "0.1")
+)
 
 
 
@@ -135,6 +140,60 @@ class TestGenerationSessionContracts:
         # 202 accepted is expected; 422 is also acceptable if backend schema changes.
         assert generate_r.status_code in (202, 422), generate_r.text
 
+    def test_fixed_video_parameter_validation_422(self, raw_client):
+        session_r = raw_client.post("/auth/session")
+        assert session_r.status_code == 201
+
+        payload = {
+            "model": "anisora",
+            "type": "video",
+            "mode": "t2v",
+            "prompt": "contract validation",
+            "steps": 20,
+            "width": 512,
+            "height": 512,
+            "seed": 1,
+        }
+        generate_r = raw_client.post("/generate", json=payload)
+        assert generate_r.status_code == 422, generate_r.text
+
+    def test_queue_overloaded_contract_503(self, raw_client):
+        """
+        Optional pressure test.
+        Enable with TEST_QUEUE_OVERLOAD_STORM_REQUESTS>0.
+        """
+        if QUEUE_OVERLOAD_STORM_REQUESTS <= 0:
+            pytest.skip("Set TEST_QUEUE_OVERLOAD_STORM_REQUESTS>0 to run overload contract test")
+
+        session_r = raw_client.post("/auth/session")
+        assert session_r.status_code == 201
+
+        payload = {
+            "model": "anisora",
+            "type": "video",
+            "mode": "t2v",
+            "prompt": "queue overload contract",
+            "width": 512,
+            "height": 512,
+            "num_frames": 17,
+            "fps": 8,
+            "seed": 1,
+        }
+
+        overloaded = False
+        for _ in range(QUEUE_OVERLOAD_STORM_REQUESTS):
+            r = raw_client.post("/generate", json=payload)
+            assert r.status_code in (202, 503), r.text
+            if r.status_code == 503:
+                detail = r.json().get("detail", {})
+                assert detail.get("code") == "queue_overloaded"
+                assert detail.get("metadata", {}).get("max_depth") is not None
+                overloaded = True
+                break
+            time.sleep(QUEUE_OVERLOAD_SUBMIT_INTERVAL_SECONDS)
+
+        assert overloaded, "Expected at least one deterministic 503 queue_overloaded response"
+
 
 class TestAdminSessionContracts:
     @pytest.fixture(autouse=True)
@@ -170,6 +229,33 @@ class TestAdminSessionContracts:
         allowed_statuses = {"pending", "checking", "ready", "failed", "disabled"}
         for row in payload["accounts"]:
             assert row.get("status") in allowed_statuses
+
+    def test_admin_accounts_exposes_operational_diagnostics(self, raw_client, create_admin_session):
+        create_r = create_admin_session()
+        assert create_r.status_code == 204
+
+        list_r = raw_client.get("/admin/accounts")
+        assert list_r.status_code == 200, list_r.text
+        payload = list_r.json()
+        diagnostics = payload.get("diagnostics", {})
+        assert isinstance(diagnostics, dict)
+        assert "queue_depth" in diagnostics
+        assert "queue_overloaded_count" in diagnostics
+        assert "fallback_count" in diagnostics
+
+    def test_admin_accounts_diagnostics_do_not_leak_keys(
+        self, raw_client, create_admin_session, api_key, admin_key
+    ):
+        create_r = create_admin_session()
+        assert create_r.status_code == 204
+
+        list_r = raw_client.get("/admin/accounts")
+        assert list_r.status_code == 200, list_r.text
+        serialized = json.dumps(list_r.json(), ensure_ascii=False)
+        if api_key:
+            assert api_key not in serialized
+        if admin_key:
+            assert admin_key not in serialized
 
     def test_admin_session_actions_are_audited(self, raw_client, admin_key, create_admin_session):
         create_r = create_admin_session()
@@ -324,3 +410,39 @@ class TestGenerateFlow:
         # Should be gone now
         st_r = client.get(f"/status/{task_id}")
         assert st_r.status_code == 404
+
+    def test_status_lifecycle_visibility(self, client):
+        """Status endpoint should expose stable lifecycle states for active tasks."""
+        payload = {
+            "model": "pony",
+            "type": "image",
+            "mode": "txt2img",
+            "prompt": "lifecycle visibility",
+            "width": 512,
+            "height": 512,
+            "steps": 8,
+            "seed": 2,
+        }
+        gen_r = client.post("/generate", json=payload)
+        assert gen_r.status_code == 202, gen_r.text
+        task_id = gen_r.json()["task_id"]
+
+        allowed = {"pending", "processing", "done", "failed"}
+        seen = []
+
+        deadline = time.time() + IMAGE_FLOW_TIMEOUT_SECONDS
+        final_status = None
+        while time.time() < deadline:
+            st_r = client.get(f"/status/{task_id}", timeout=15)
+            assert st_r.status_code == 200, st_r.text
+            status_value = st_r.json().get("status")
+            assert status_value in allowed
+            seen.append(status_value)
+            if status_value in {"done", "failed"}:
+                final_status = status_value
+                break
+            time.sleep(POLL_INTERVAL_SECONDS)
+
+        assert seen and seen[0] == "pending", f"Unexpected initial status sequence: {seen}"
+        assert "processing" in seen, f"Expected status transition to include 'processing': {seen}"
+        assert final_status in {"done", "failed"}, f"No terminal status reached: {seen}"

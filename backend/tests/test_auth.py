@@ -77,6 +77,20 @@ def test_verify_generation_session_fallback_to_api_key(monkeypatch):
     assert verify_generation_session(req, header_key="secret-key", query_key=None) == "secret-key"
 
 
+def test_verify_generation_session_prefers_header_over_cookie(monkeypatch):
+    monkeypatch.setenv("API_KEY", "secret-key")
+    import storage
+    from auth import verify_generation_session, GENERATION_SESSION_COOKIE
+
+    token, _ = storage.create_generation_session(ttl_seconds=3600)
+    req = DummyRequest(cookies={GENERATION_SESSION_COOKIE: token})
+    # Header/query auth has higher priority than cookie session.
+    with pytest.raises(HTTPException) as exc:
+        verify_generation_session(req, header_key="wrong", query_key=None)
+    assert exc.value.status_code == 403
+    assert exc.value.detail["code"] == "invalid_api_key"
+
+
 def test_verify_generation_session_missing_cookie(monkeypatch):
     monkeypatch.setenv("API_KEY", "secret-key")
     from auth import verify_generation_session
@@ -86,6 +100,17 @@ def test_verify_generation_session_missing_cookie(monkeypatch):
         verify_generation_session(req, header_key=None, query_key=None)
     assert exc.value.status_code == 401
     assert exc.value.detail["code"] == "generation_session_missing"
+
+
+def test_verify_generation_session_invalid_key_when_no_cookie(monkeypatch):
+    monkeypatch.setenv("API_KEY", "secret-key")
+    from auth import verify_generation_session
+
+    req = DummyRequest()
+    with pytest.raises(HTTPException) as exc:
+        verify_generation_session(req, header_key="bad-key", query_key=None)
+    assert exc.value.status_code == 403
+    assert exc.value.detail["code"] == "invalid_api_key"
 
 
 def test_admin_session_expires_after_idle_timeout():

@@ -55,6 +55,7 @@ _base_pkgs = [
     "huggingface_hub",
     "httpx",
     "cryptography>=42.0.0",
+    "ftfy>=6.2.0",
 ]
 
 # Video generation image (A10G — 24 GB)
@@ -71,7 +72,18 @@ video_image = (
         "safetensors",
         "numpy",
     )
-    .env({"HF_HOME": MODEL_CACHE_PATH, "TRANSFORMERS_CACHE": MODEL_CACHE_PATH})
+    .env(
+        {
+            "HF_HOME": MODEL_CACHE_PATH,
+            "TRANSFORMERS_CACHE": MODEL_CACHE_PATH,
+            "PYTORCH_CUDA_ALLOC_CONF": os.environ.get(
+                "PYTORCH_CUDA_ALLOC_CONF",
+                "expandable_segments:True",
+            ),
+            "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES", "0"),
+            "TORCH_CUDA_ARCH_LIST": os.environ.get("TORCH_CUDA_ARCH_LIST", "8.6"),
+        }
+    )
     .add_local_dir(str(Path(__file__).parent), remote_path="/root")  # backend/ .py files
 )
 
@@ -111,11 +123,25 @@ _video_pipeline_cache: dict[str, object] = {}
 _image_pipeline_cache: dict[str, object] = {}
 _video_lock = threading.Lock()
 _image_lock = threading.Lock()
+_degraded_state_lock = threading.Lock()
+_degraded_active_model: Optional[str] = None
 
 
-def _get_video_pipeline(model_id_key: str):
+def _get_video_pipeline(model_id_key: str, *, degraded_mode: bool = False):
+    """
+    Return video pipeline instance.
+    In degraded mode, enforce single-active heavy pipeline residency.
+    """
+    global _degraded_active_model
     with _video_lock:
+        if degraded_mode and _degraded_active_model and _degraded_active_model != model_id_key:
+            from models.base import BasePipeline
+
+            BasePipeline.clear_all_pipelines(_video_pipeline_cache)
+            _degraded_active_model = None
         if model_id_key in _video_pipeline_cache:
+            if degraded_mode:
+                _degraded_active_model = model_id_key
             return _video_pipeline_cache[model_id_key]
 
         if model_id_key == "anisora":
@@ -139,6 +165,8 @@ def _get_video_pipeline(model_id_key: str):
 
         pipeline.load(MODEL_CACHE_PATH)
         _video_pipeline_cache[model_id_key] = pipeline
+        if degraded_mode:
+            _degraded_active_model = model_id_key
         return pipeline
 
 
@@ -166,47 +194,203 @@ def _get_image_pipeline(model_id_key: str):
 
 # ─── Video Generation Function ────────────────────────────────────────────────
 
+def _execute_video_generation(
+    request_dict: dict,
+    task_id: str,
+    *,
+    lane_mode: str,
+    fallback_reason: Optional[str] = None,
+) -> dict:
+    """
+    Shared worker execution for heavy video pipelines.
+    `lane_mode` can be `dedicated` or `degraded_shared`.
+    """
+    sys.path.insert(0, "/root")  # backend/ files are copied to /root
+
+    import storage
+    from models.base import BasePipeline
+
+    results_vol.reload()
+    storage.init_db()
+    storage.update_task_status(
+        task_id,
+        "processing",
+        progress=5,
+        stage="dispatch",
+        stage_detail=f"video_{lane_mode}",
+        lane_mode=lane_mode,
+        fallback_reason=fallback_reason,
+    )
+
+    model_id_key = request_dict["model"]
+    request_dict["_lane_mode"] = lane_mode
+
+    if lane_mode == "degraded_shared":
+        with _degraded_state_lock:
+            cross_switch = _degraded_active_model not in (None, model_id_key)
+        request_dict["_cross_model_switch"] = cross_switch
+        storage.record_operational_event(
+            "fallback_activated",
+            task_id=task_id,
+            model=model_id_key,
+            lane_mode=lane_mode,
+            reason=fallback_reason or "capacity",
+        )
+
+    try:
+        storage.update_task_status(
+            task_id,
+            "processing",
+            progress=10,
+            stage="loading_pipeline",
+            stage_detail=f"model={model_id_key}",
+            lane_mode=lane_mode,
+            fallback_reason=fallback_reason,
+        )
+        pipeline = _get_video_pipeline(
+            model_id_key,
+            degraded_mode=(lane_mode == "degraded_shared"),
+        )
+        storage.update_task_status(
+            task_id,
+            "processing",
+            progress=25,
+            stage="inference",
+            stage_detail=f"model={model_id_key}",
+            lane_mode=lane_mode,
+            fallback_reason=fallback_reason,
+        )
+
+        result_path, preview_path = pipeline.generate(request_dict, task_id, RESULTS_PATH)
+        storage.update_task_status(
+            task_id,
+            "done",
+            progress=100,
+            result_path=result_path,
+            preview_path=preview_path,
+            stage="completed",
+            stage_detail="ok",
+            lane_mode=lane_mode,
+            fallback_reason=fallback_reason,
+        )
+        return {"result_path": result_path, "preview_path": preview_path}
+    except Exception as exc:
+        storage.update_task_status(
+            task_id,
+            "failed",
+            error_msg=str(exc),
+            stage="failed",
+            stage_detail=f"{type(exc).__name__}",
+            lane_mode=lane_mode,
+            fallback_reason=fallback_reason,
+        )
+        raise
+    finally:
+        allocated_gib = None
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                allocated_gib = torch.cuda.memory_allocated() / (1024 ** 3)
+                print(f"[VRAM] After generation: {allocated_gib:.2f} GiB (lane={lane_mode}, model={model_id_key})")
+        except Exception:
+            pass
+
+        BasePipeline.clear_gpu_memory(sync=False)
+        storage.record_operational_event(
+            "memory_cleanup",
+            task_id=task_id,
+            model=model_id_key,
+            lane_mode=lane_mode,
+        )
+        if allocated_gib is not None:
+            storage.record_operational_event(
+                "memory_post_generation",
+                task_id=task_id,
+                model=model_id_key,
+                lane_mode=lane_mode,
+                value=round(allocated_gib, 3),
+            )
+        if lane_mode == "degraded_shared":
+            storage.release_degraded_task(task_id)
+        results_vol.commit()
+
+
 @app.function(
     image=video_image,
     gpu=os.environ.get("VIDEO_GPU", "A10G"),
-    min_containers=int(os.environ.get("VIDEO_MIN_CONTAINERS", "1")),
+    min_containers=int(os.environ.get("VIDEO_DEGRADED_MIN_CONTAINERS", "0")),
     max_containers=int(os.environ.get("VIDEO_CONCURRENCY", "1")),
     timeout=900,
     volumes=_volumes,
     secrets=[api_secret, hf_secret],
 )
 def run_video_generation(request_dict: dict, task_id: str) -> dict:
-    """
-    Modal function that runs on A10G.
-    Picks the correct pipeline from request_dict["model"] and executes inference.
-    Returns {"result_path": ..., "preview_path": ...} or raises on failure.
-    """
-    sys.path.insert(0, "/root")  # backend/ files are copied to /root
+    """Degraded shared-worker video lane."""
+    return _execute_video_generation(
+        request_dict=request_dict,
+        task_id=task_id,
+        lane_mode="degraded_shared",
+        fallback_reason=request_dict.get("_fallback_reason"),
+    )
 
-    import storage
-    results_vol.reload()
-    storage.init_db()
-    storage.update_task_status(task_id, "processing", progress=5)
 
-    model_id_key = request_dict["model"]
-
-    try:
-        storage.update_task_status(task_id, "processing", progress=10)
-        pipeline = _get_video_pipeline(model_id_key)
-        storage.update_task_status(task_id, "processing", progress=20)
-
-        result_path, preview_path = pipeline.generate(request_dict, task_id, RESULTS_PATH)
-        storage.update_task_status(
-            task_id, "done", progress=100,
-            result_path=result_path,
-            preview_path=preview_path,
+@app.function(
+    image=video_image,
+    gpu=os.environ.get("VIDEO_GPU", "A10G"),
+    min_containers=int(
+        os.environ.get(
+            "VIDEO_ANISORA_MIN_CONTAINERS",
+            os.environ.get("VIDEO_LANE_WARM_MIN_CONTAINERS", "1"),
         )
-        results_vol.commit()
-        return {"result_path": result_path, "preview_path": preview_path}
-    except Exception as exc:
-        storage.update_task_status(task_id, "failed", error_msg=str(exc))
-        results_vol.commit()
-        raise
+    ),
+    max_containers=int(
+        os.environ.get(
+            "VIDEO_ANISORA_MAX_CONTAINERS",
+            os.environ.get("VIDEO_LANE_WARM_MAX_CONTAINERS", "1"),
+        )
+    ),
+    timeout=900,
+    volumes=_volumes,
+    secrets=[api_secret, hf_secret],
+)
+def run_anisora_generation(request_dict: dict, task_id: str) -> dict:
+    """Dedicated warm lane for AniSora."""
+    request_dict["model"] = "anisora"
+    return _execute_video_generation(
+        request_dict=request_dict,
+        task_id=task_id,
+        lane_mode="dedicated",
+    )
+
+
+@app.function(
+    image=video_image,
+    gpu=os.environ.get("VIDEO_GPU", "A10G"),
+    min_containers=int(
+        os.environ.get(
+            "VIDEO_PHR00T_MIN_CONTAINERS",
+            os.environ.get("VIDEO_LANE_WARM_MIN_CONTAINERS", "1"),
+        )
+    ),
+    max_containers=int(
+        os.environ.get(
+            "VIDEO_PHR00T_MAX_CONTAINERS",
+            os.environ.get("VIDEO_LANE_WARM_MAX_CONTAINERS", "1"),
+        )
+    ),
+    timeout=900,
+    volumes=_volumes,
+    secrets=[api_secret, hf_secret],
+)
+def run_phr00t_generation(request_dict: dict, task_id: str) -> dict:
+    """Dedicated warm lane for Phr00t."""
+    request_dict["model"] = "phr00t"
+    return _execute_video_generation(
+        request_dict=request_dict,
+        task_id=task_id,
+        lane_mode="dedicated",
+    )
 
 
 # ─── Image Generation Function ────────────────────────────────────────────────
@@ -312,6 +496,9 @@ def fastapi_app():
         if _p not in _sys.path:
             _sys.path.insert(0, _p)
 
+    import asyncio
+    import time
+
     from fastapi import Depends, FastAPI, HTTPException, Query, Request, status, Body
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import FileResponse, JSONResponse, Response
@@ -319,7 +506,14 @@ def fastapi_app():
     import storage
     import accounts as acc_store
     from auth import verify_api_key, verify_generation_session, GENERATION_SESSION_COOKIE
-    from config import MODELS_SCHEMA, DEFAULT_PAGE_SIZE, DB_PATH
+    from config import (
+        MODELS_SCHEMA,
+        DEFAULT_PAGE_SIZE,
+        DB_PATH,
+        DEGRADED_QUEUE_MAX_DEPTH,
+        DEGRADED_QUEUE_MAX_WAIT_SECONDS,
+        DEGRADED_QUEUE_OVERLOAD_CODE,
+    )
     from router import router as account_router, NoReadyAccountError, MAX_FALLBACKS
     from deployer import deploy_account_async, deploy_all_accounts
     from schemas import (
@@ -335,6 +529,7 @@ def fastapi_app():
         StatusResponse,
         TaskStatus,
         AccountResponse,
+        ErrorResponse,
     )
 
     # ── Init DB on cold start ─────────────────────────────────────────────────
@@ -400,6 +595,236 @@ def fastapi_app():
             samesite=session_cookie_samesite,
             path="/",
         )
+
+    def _error_payload(code: str, detail: str, user_action: str) -> dict:
+        return ErrorResponse(code=code, detail=detail, user_action=user_action).model_dump()
+
+    def _normalize_request_dict(req: GenerateRequest) -> dict:
+        req_dict = req.model_dump()
+        req_dict["model"] = req.model.value
+        req_dict["type"] = req.type.value
+        model_key = req_dict["model"]
+        if model_key == "anisora" and req_dict.get("steps") is None:
+            req_dict["steps"] = 8
+        if model_key == "phr00t":
+            if req_dict.get("steps") is None:
+                req_dict["steps"] = 4
+            if req_dict.get("cfg_scale") is None and req_dict.get("guidance_scale") is not None:
+                req_dict["cfg_scale"] = req_dict["guidance_scale"]
+            if req_dict.get("cfg_scale") is None:
+                req_dict["cfg_scale"] = 1.0
+        return req_dict
+
+    def _fallback_reason_from_error(exc: Exception) -> str:
+        text = str(exc).lower()
+        if "quota" in text:
+            return "quota"
+        if "manual" in text:
+            return "manual"
+        return "capacity"
+
+    async def _admit_degraded_queue(task_id: str, model_key: str) -> tuple[bool, float, int]:
+        started = time.monotonic()
+        while True:
+            admitted, depth = storage.try_admit_degraded_task(
+                task_id,
+                max_depth=DEGRADED_QUEUE_MAX_DEPTH,
+            )
+            waited_seconds = time.monotonic() - started
+            if admitted:
+                storage.record_operational_event(
+                    "queue_admitted",
+                    task_id=task_id,
+                    model=model_key,
+                    lane_mode="degraded_shared",
+                    value=depth,
+                )
+                return True, waited_seconds, depth
+            if waited_seconds >= DEGRADED_QUEUE_MAX_WAIT_SECONDS:
+                storage.record_operational_event(
+                    "queue_timeout",
+                    task_id=task_id,
+                    model=model_key,
+                    lane_mode="degraded_shared",
+                    value=round(waited_seconds, 3),
+                )
+                return False, waited_seconds, depth
+            await asyncio.sleep(0.5)
+
+    async def _spawn_local_generation(
+        req: GenerateRequest,
+        *,
+        force_degraded_reason: Optional[str] = None,
+    ) -> GenerateResponse:
+        params = req.model_dump(
+            exclude={
+                "prompt",
+                "negative_prompt",
+                "model",
+                "type",
+                "mode",
+                "width",
+                "height",
+                "seed",
+                "reference_image",
+                "first_frame_image",
+                "last_frame_image",
+                "arbitrary_frames",
+            },
+        )
+        model_key = req.model.value
+        lane_mode = "dedicated" if req.type.value == "video" else None
+        task_id = storage.create_task(
+            model=model_key,
+            gen_type=req.type.value,
+            mode=req.mode,
+            prompt=req.prompt,
+            negative_prompt=req.negative_prompt,
+            parameters=params,
+            width=req.width,
+            height=req.height,
+            seed=req.seed,
+            lane_mode=lane_mode,
+            fallback_reason=force_degraded_reason,
+        )
+        req_dict = _normalize_request_dict(req)
+
+        if req.type.value != "video":
+            try:
+                run_image_generation.spawn(req_dict, task_id)
+            except Exception as exc:
+                storage.update_task_status(
+                    task_id,
+                    "failed",
+                    error_msg=f"Spawn failed: {exc}",
+                    stage="failed",
+                    stage_detail="spawn_failed",
+                )
+                results_vol.commit()
+                raise HTTPException(
+                    status_code=503,
+                    detail=_error_payload(
+                        code="enqueue_failed",
+                        detail="Failed to enqueue image generation task.",
+                        user_action="Retry later.",
+                    ),
+                )
+            results_vol.commit()
+            return GenerateResponse(task_id=task_id, status=TaskStatus.pending)
+
+        fallback_reason = force_degraded_reason
+        if fallback_reason is None:
+            try:
+                if model_key == "anisora":
+                    run_anisora_generation.spawn(req_dict, task_id)
+                elif model_key == "phr00t":
+                    run_phr00t_generation.spawn(req_dict, task_id)
+                else:
+                    raise ValueError(f"Unsupported video model: {model_key}")
+                storage.record_operational_event(
+                    "warm_lane_ready",
+                    task_id=task_id,
+                    model=model_key,
+                    lane_mode="dedicated",
+                )
+                storage.update_task_status(
+                    task_id,
+                    "pending",
+                    progress=0,
+                    stage="queued",
+                    stage_detail="dedicated_lane",
+                    lane_mode="dedicated",
+                )
+                results_vol.commit()
+                return GenerateResponse(task_id=task_id, status=TaskStatus.pending)
+            except Exception as exc:
+                fallback_reason = _fallback_reason_from_error(exc)
+                storage.record_operational_event(
+                    "fallback_activated",
+                    task_id=task_id,
+                    model=model_key,
+                    lane_mode="degraded_shared",
+                    reason=fallback_reason,
+                )
+
+        admitted, waited, depth = await _admit_degraded_queue(task_id, model_key)
+        if not admitted:
+            storage.update_task_status(
+                task_id,
+                "failed",
+                error_msg=DEGRADED_QUEUE_OVERLOAD_CODE,
+                stage="rejected",
+                stage_detail=DEGRADED_QUEUE_OVERLOAD_CODE,
+                lane_mode="degraded_shared",
+                fallback_reason=fallback_reason,
+            )
+            storage.record_operational_event(
+                "queue_overloaded",
+                task_id=task_id,
+                model=model_key,
+                lane_mode="degraded_shared",
+                value=depth,
+                reason=fallback_reason,
+            )
+            results_vol.commit()
+            raise HTTPException(
+                status_code=503,
+                detail=_error_payload(
+                    code=DEGRADED_QUEUE_OVERLOAD_CODE,
+                    detail=(
+                        f"Generation queue is overloaded (depth={depth}, "
+                        f"max_depth={DEGRADED_QUEUE_MAX_DEPTH}, max_wait={DEGRADED_QUEUE_MAX_WAIT_SECONDS}s)."
+                    ),
+                    user_action="Retry later.",
+                ),
+            )
+
+        req_dict["_fallback_reason"] = fallback_reason or "capacity"
+        req_dict["_degraded_wait_seconds"] = round(waited, 3)
+        req_dict["_degraded_queue_depth"] = depth
+
+        try:
+            run_video_generation.spawn(req_dict, task_id)
+        except Exception as exc:
+            storage.release_degraded_task(task_id)
+            storage.update_task_status(
+                task_id,
+                "failed",
+                error_msg=f"Spawn failed: {exc}",
+                stage="failed",
+                stage_detail="degraded_spawn_failed",
+                lane_mode="degraded_shared",
+                fallback_reason=fallback_reason,
+            )
+            results_vol.commit()
+            raise HTTPException(
+                status_code=503,
+                detail=_error_payload(
+                    code="enqueue_failed",
+                    detail="Failed to enqueue degraded video generation task.",
+                    user_action="Retry later.",
+                ),
+            )
+
+        storage.update_task_status(
+            task_id,
+            "pending",
+            progress=0,
+            stage="queued",
+            stage_detail=f"degraded_wait={round(waited, 3)}s",
+            lane_mode="degraded_shared",
+            fallback_reason=fallback_reason,
+        )
+        storage.record_operational_event(
+            "queue_depth",
+            task_id=task_id,
+            model=model_key,
+            lane_mode="degraded_shared",
+            value=depth,
+            reason=fallback_reason,
+        )
+        results_vol.commit()
+        return GenerateResponse(task_id=task_id, status=TaskStatus.pending)
 
     # ── GET /health ────────────────────────────────────────────────────────────
     @api.get("/health", response_model=HealthResponse, tags=["Info"])
@@ -476,40 +901,7 @@ def fastapi_app():
     ):
         """Internal endpoint for isolated Modal account execution."""
         results_vol.reload()
-        params = req.model_dump(
-            exclude={"prompt", "negative_prompt", "model", "type", "mode",
-                     "width", "height", "seed",
-                     "reference_image", "first_frame_image",
-                     "last_frame_image", "arbitrary_frames"},
-        )
-        task_id = storage.create_task(
-            model=req.model.value,
-            gen_type=req.type.value,
-            mode=req.mode,
-            prompt=req.prompt,
-            negative_prompt=req.negative_prompt,
-            parameters=params,
-            width=req.width,
-            height=req.height,
-            seed=req.seed,
-        )
-        results_vol.commit()
-
-        request_dict = req.model_dump()
-        request_dict["model"] = req.model.value
-        request_dict["type"] = req.type.value
-
-        try:
-            if req.type.value == "video":
-                run_video_generation.spawn(request_dict, task_id)
-            else:
-                run_image_generation.spawn(request_dict, task_id)
-        except Exception as exc:
-            storage.update_task_status(task_id, "failed", error_msg=f"Spawn failed: {exc}")
-            results_vol.commit()
-            raise HTTPException(status_code=503, detail="Failed to enqueue generation task")
-
-        return GenerateResponse(task_id=task_id, status=TaskStatus.pending)
+        return await _spawn_local_generation(req)
 
     # ── POST /generate ─────────────────────────────────────────────────────────
     @api.post(
@@ -526,44 +918,10 @@ def fastapi_app():
         tried_accounts: list[str] = []
         last_error = ""
 
-        # Default master behavior if no accounts or fallbacks fail
-        async def _fallback_dispatch():
-            # Persist local
-            params = req.model_dump(
-                exclude={"prompt", "negative_prompt", "model", "type", "mode",
-                         "width", "height", "seed",
-                         "reference_image", "first_frame_image",
-                         "last_frame_image", "arbitrary_frames"},
-            )
-            local_task = storage.create_task(
-                model=req.model.value,
-                gen_type=req.type.value,
-                mode=req.mode,
-                prompt=req.prompt,
-                negative_prompt=req.negative_prompt,
-                parameters=params,
-                width=req.width,
-                height=req.height,
-                seed=req.seed,
-            )
-            results_vol.commit()
-            req_dict = req.model_dump()
-            req_dict["model"] = req.model.value
-            req_dict["type"] = req.type.value
-            try:
-                if req.type.value == "video":
-                    run_video_generation.spawn(req_dict, local_task)
-                else:
-                    run_image_generation.spawn(req_dict, local_task)
-            except Exception as exc:
-                storage.update_task_status(local_task, "failed", error_msg=f"Spawn failed: {exc}")
-                results_vol.commit()
-                raise HTTPException(status_code=503, detail="Failed to enqueue local generation task")
-            return GenerateResponse(task_id=local_task, status=TaskStatus.pending)
-
         import httpx
         api_key_env = os.environ.get("API_KEY", "")
         headers = {"X-API-Key": api_key_env} if api_key_env else {}
+        req_payload = _normalize_request_dict(req)
 
         for attempt in range(MAX_FALLBACKS + 1):
             try:
@@ -578,12 +936,16 @@ def fastapi_app():
                     raise Exception("Account has no workspace configured.")
 
                 remote_url = f"https://{workspace}--gooni-api.modal.run/generate_direct"
-                
+
                 async with httpx.AsyncClient(
                     timeout=httpx.Timeout(connect=10.0, read=60.0, write=60.0, pool=5.0)
                 ) as client:
-                    resp = await client.post(remote_url, json=req.model_dump(), headers=headers)
-                    resp.raise_for_status()
+                    resp = await client.post(remote_url, json=req_payload, headers=headers)
+                    if resp.status_code == 422:
+                        detail = resp.json().get("detail", "Validation failed")
+                        raise HTTPException(status_code=422, detail=detail)
+                    if resp.status_code >= 400:
+                        raise Exception(f"remote_{resp.status_code}:{resp.text[:200]}")
                     data = resp.json()
                     remote_task_id = data["task_id"]
 
@@ -597,13 +959,21 @@ def fastapi_app():
 
             except NoReadyAccountError:
                 break
+            except HTTPException:
+                raise
             except Exception as exc:
                 last_error = str(exc)
                 if tried_accounts:
                     account_router.mark_failed(tried_accounts[-1], last_error)
 
-        # Fallback to local dispatch
-        return await _fallback_dispatch()
+        if last_error:
+            storage.record_operational_event(
+                "fallback_activated",
+                model=req.model.value,
+                lane_mode="degraded_shared" if req.type.value == "video" else None,
+                reason=_fallback_reason_from_error(Exception(last_error)),
+            )
+        return await _spawn_local_generation(req)
 
     # ── GET /status/{task_id} ──────────────────────────────────────────────────
     @api.get(
@@ -857,8 +1227,13 @@ def fastapi_app():
     # ── GET /admin/health — fast probe (also validates key) ─────────────────
     @api.get("/admin/health", tags=["Admin"])
     async def admin_health(_ip: str = Depends(get_admin_auth("health"))):
+        results_vol.reload()
         ready = [a for a in acc_store.list_accounts() if a["status"] == "ready"]
-        return {"ok": True, "ready_accounts": len(ready)}
+        return {
+            "ok": True,
+            "ready_accounts": len(ready),
+            "diagnostics": storage.get_operational_snapshot(),
+        }
 
     # ── POST /admin/accounts ─────────────────────────────────────────────────
     @api.post("/admin/accounts", tags=["Admin"], status_code=201)
@@ -883,7 +1258,11 @@ def fastapi_app():
     async def admin_list_accounts(_ip: str = Depends(get_admin_auth("list_accounts"))):
         results_vol.reload()
         rows = acc_store.list_accounts()
-        return {"accounts": rows}
+        return {
+            "accounts": rows,
+            "diagnostics": storage.get_operational_snapshot(),
+            "events": storage.list_operational_events(limit=30),
+        }
 
     # ── DELETE /admin/accounts/{id} ──────────────────────────────────────────
     @api.delete("/admin/accounts/{account_id}", tags=["Admin"])

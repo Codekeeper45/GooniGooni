@@ -37,6 +37,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     result_path TEXT,
     preview_path TEXT,
     error_msg   TEXT,
+    stage       TEXT,
+    stage_detail TEXT,
+    lane_mode   TEXT,
+    fallback_reason TEXT,
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL
 );
@@ -74,6 +78,28 @@ CREATE INDEX IF NOT EXISTS idx_admin_sessions_status
     ON admin_sessions(status);
 CREATE INDEX IF NOT EXISTS idx_admin_sessions_last_activity
     ON admin_sessions(last_activity_at);
+
+CREATE TABLE IF NOT EXISTS degraded_queue (
+    task_id      TEXT PRIMARY KEY,
+    admitted_at  TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_degraded_queue_admitted
+    ON degraded_queue(admitted_at);
+
+CREATE TABLE IF NOT EXISTS operational_events (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type   TEXT NOT NULL,
+    task_id      TEXT,
+    model        TEXT,
+    lane_mode    TEXT,
+    value        TEXT,
+    reason       TEXT,
+    created_at   TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_operational_events_created
+    ON operational_events(created_at DESC);
 """
 
 
@@ -102,6 +128,17 @@ def init_db() -> None:
     """Create tables and indexes if they don't exist. Call on startup."""
     with _db() as conn:
         conn.executescript(_CREATE_TASKS_SQL + _CREATE_IDX_SQL + _CREATE_SESSIONS_SQL)
+        for ddl in (
+            "ALTER TABLE tasks ADD COLUMN stage TEXT",
+            "ALTER TABLE tasks ADD COLUMN stage_detail TEXT",
+            "ALTER TABLE tasks ADD COLUMN lane_mode TEXT",
+            "ALTER TABLE tasks ADD COLUMN fallback_reason TEXT",
+        ):
+            try:
+                conn.execute(ddl)
+            except sqlite3.OperationalError:
+                # Column already exists on upgraded databases.
+                pass
 
 
 # ─── Task CRUD ────────────────────────────────────────────────────────────────
@@ -260,6 +297,8 @@ def create_task(
     width: int,
     height: int,
     seed: int,
+    lane_mode: Optional[str] = None,
+    fallback_reason: Optional[str] = None,
 ) -> str:
     """Insert a new task row and return the generated task_id."""
     task_id = str(uuid.uuid4())
@@ -269,14 +308,14 @@ def create_task(
             """
             INSERT INTO tasks
               (id, status, progress, model, type, mode, prompt, negative_prompt,
-               parameters, width, height, seed, created_at, updated_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+               parameters, width, height, seed, lane_mode, fallback_reason, created_at, updated_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 task_id, "pending", 0, model, gen_type, mode,
                 prompt, negative_prompt,
                 json.dumps(parameters),
-                width, height, seed, now, now,
+                width, height, seed, lane_mode, fallback_reason, now, now,
             ),
         )
     return task_id
@@ -289,6 +328,10 @@ def update_task_status(
     result_path: Optional[str] = None,
     preview_path: Optional[str] = None,
     error_msg: Optional[str] = None,
+    stage: Optional[str] = None,
+    stage_detail: Optional[str] = None,
+    lane_mode: Optional[str] = None,
+    fallback_reason: Optional[str] = None,
 ) -> None:
     """Update task status, progress, and optional result/preview paths.
     Only non-None optional fields are written — avoids overwriting
@@ -306,6 +349,18 @@ def update_task_status(
     if error_msg is not None:
         fields.append("error_msg=?")
         values.append(error_msg)
+    if stage is not None:
+        fields.append("stage=?")
+        values.append(stage)
+    if stage_detail is not None:
+        fields.append("stage_detail=?")
+        values.append(stage_detail)
+    if lane_mode is not None:
+        fields.append("lane_mode=?")
+        values.append(lane_mode)
+    if fallback_reason is not None:
+        fields.append("fallback_reason=?")
+        values.append(fallback_reason)
     values.append(task_id)
     with _db() as conn:
         conn.execute(
@@ -317,18 +372,42 @@ def update_task_status(
 def get_task(task_id: str) -> Optional[StatusResponse]:
     """Return a StatusResponse for a single task, or None if not found."""
     with _db() as conn:
-        row = conn.execute(
-            "SELECT * FROM tasks WHERE id=?", (task_id,)
-        ).fetchone()
+        row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+        diag_rows = conn.execute(
+            """
+            SELECT event_type, value, reason, created_at
+            FROM operational_events
+            WHERE task_id=?
+            ORDER BY id DESC
+            LIMIT 20
+            """,
+            (task_id,),
+        ).fetchall()
 
     if row is None:
         return None
 
     base_url = os.environ.get("PUBLIC_BASE_URL", "")
+    diagnostics = {
+        "events": [
+            {
+                "event_type": event["event_type"],
+                "value": event["value"],
+                "reason": event["reason"],
+                "created_at": event["created_at"],
+            }
+            for event in diag_rows
+        ]
+    } if diag_rows else None
     return StatusResponse(
         task_id=row["id"],
         status=TaskStatus(row["status"]),
         progress=row["progress"],
+        stage=row["stage"],
+        stage_detail=row["stage_detail"],
+        lane_mode=row["lane_mode"],
+        fallback_reason=row["fallback_reason"],
+        diagnostics=diagnostics,
         result_url=f"{base_url}/results/{row['id']}" if row["result_path"] else None,
         preview_url=f"{base_url}/preview/{row['id']}" if row["preview_path"] else None,
         error=row["error_msg"],
@@ -465,6 +544,101 @@ def mark_stale_tasks_failed(max_age_hours: int = 2) -> int:
                 )
                 updated += 1
     return updated
+
+
+def degraded_queue_size() -> int:
+    with _db() as conn:
+        return int(conn.execute("SELECT COUNT(*) FROM degraded_queue").fetchone()[0])
+
+
+def try_admit_degraded_task(task_id: str, max_depth: int) -> tuple[bool, int]:
+    """
+    Try to reserve one degraded-mode queue slot for a task.
+    Returns (admitted, current_depth_after_attempt).
+    """
+    now = _now_iso()
+    with _db() as conn:
+        current = int(conn.execute("SELECT COUNT(*) FROM degraded_queue").fetchone()[0])
+        if current >= max_depth:
+            return False, current
+        conn.execute(
+            "INSERT OR REPLACE INTO degraded_queue(task_id, admitted_at) VALUES (?, ?)",
+            (task_id, now),
+        )
+        depth = int(conn.execute("SELECT COUNT(*) FROM degraded_queue").fetchone()[0])
+        return True, depth
+
+
+def release_degraded_task(task_id: str) -> None:
+    with _db() as conn:
+        conn.execute("DELETE FROM degraded_queue WHERE task_id=?", (task_id,))
+
+
+def record_operational_event(
+    event_type: str,
+    *,
+    task_id: Optional[str] = None,
+    model: Optional[str] = None,
+    lane_mode: Optional[str] = None,
+    value: Optional[Any] = None,
+    reason: Optional[str] = None,
+) -> None:
+    with _db() as conn:
+        conn.execute(
+            """
+            INSERT INTO operational_events(event_type, task_id, model, lane_mode, value, reason, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event_type,
+                task_id,
+                model,
+                lane_mode,
+                None if value is None else str(value),
+                reason,
+                _now_iso(),
+            ),
+        )
+
+
+def list_operational_events(limit: int = 100) -> list[dict[str, Any]]:
+    with _db() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, event_type, task_id, model, lane_mode, value, reason, created_at
+            FROM operational_events
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_operational_snapshot() -> dict[str, Any]:
+    with _db() as conn:
+        queue_depth = int(conn.execute("SELECT COUNT(*) FROM degraded_queue").fetchone()[0])
+        overload_count = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM operational_events WHERE event_type='queue_overloaded'"
+            ).fetchone()[0]
+        )
+        timeout_count = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM operational_events WHERE event_type='queue_timeout'"
+            ).fetchone()[0]
+        )
+        fallback_count = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM operational_events WHERE event_type='fallback_activated'"
+            ).fetchone()[0]
+        )
+    return {
+        "queue_depth": queue_depth,
+        "queue_overloaded_count": overload_count,
+        "queue_timeout_count": timeout_count,
+        "fallback_count": fallback_count,
+    }
 
 
 # ─── File path helpers ────────────────────────────────────────────────────────

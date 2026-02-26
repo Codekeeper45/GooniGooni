@@ -80,10 +80,20 @@ class TestUpdateTaskStatus:
 
     def test_update_to_processing(self):
         tid = self._make_task()
-        storage.update_task_status(tid, "processing", progress=20)
+        storage.update_task_status(
+            tid,
+            "processing",
+            progress=20,
+            stage="loading_pipeline",
+            stage_detail="model=anisora",
+            lane_mode="dedicated",
+        )
         result = storage.get_task(tid)
         assert result.status.value == "processing"
         assert result.progress == 20
+        assert result.stage == "loading_pipeline"
+        assert result.stage_detail == "model=anisora"
+        assert result.lane_mode == "dedicated"
 
     def test_update_to_done_with_paths(self):
         tid = self._make_task()
@@ -216,3 +226,21 @@ class TestDeleteGalleryItem:
     def test_delete_nonexistent_task(self):
         deleted = storage.delete_gallery_item("does-not-exist")
         assert deleted is False
+
+
+class TestDegradedQueueHelpers:
+    def test_admit_and_release(self):
+        admitted, depth = storage.try_admit_degraded_task("q1", max_depth=1)
+        assert admitted is True
+        assert depth == 1
+        admitted, depth = storage.try_admit_degraded_task("q2", max_depth=1)
+        assert admitted is False
+        assert depth == 1
+        storage.release_degraded_task("q1")
+        assert storage.degraded_queue_size() == 0
+
+    def test_operational_events_are_stored(self):
+        storage.record_operational_event("queue_overloaded", task_id="q1", value=25)
+        events = storage.list_operational_events(limit=5)
+        assert len(events) == 1
+        assert events[0]["event_type"] == "queue_overloaded"
