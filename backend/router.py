@@ -32,6 +32,30 @@ class NoReadyAccountError(RuntimeError):
 class AccountRouter:
     """Thread-safe round-robin account picker with failure tracking."""
 
+    @staticmethod
+    def _no_ready_error() -> NoReadyAccountError:
+        try:
+            rows = acc_store.list_accounts()
+        except Exception:
+            # Fallback for bootstrap/unit-test scenarios where account storage
+            # is unavailable; callers still get a deterministic domain error.
+            rows = []
+        if not rows:
+            return NoReadyAccountError(
+                "No Modal accounts configured. Add an account in Admin and run deploy."
+            )
+
+        by_status: dict[str, int] = {}
+        for row in rows:
+            status = row.get("status", "unknown")
+            by_status[status] = by_status.get(status, 0) + 1
+        status_summary = ", ".join(f"{k}={v}" for k, v in sorted(by_status.items()))
+        return NoReadyAccountError(
+            "No ready Modal accounts available. "
+            f"Current statuses: {status_summary}. "
+            "Wait for checking→ready or redeploy failed accounts."
+        )
+
     def pick(self) -> dict:
         """
         Return the most appropriate ready account (least-used / least-recently-used).
@@ -40,10 +64,7 @@ class AccountRouter:
         with _router_lock:
             candidates = acc_store.list_ready_accounts()
         if not candidates:
-            raise NoReadyAccountError(
-                "No ready Modal accounts available. "
-                "Add an account via the Admin panel and wait for it to deploy."
-            )
+            raise self._no_ready_error()
         # list_ready_accounts already returns sorted by use_count ASC, last_used ASC
         return candidates[0]
 
@@ -70,9 +91,9 @@ class AccountRouter:
         # Exclude already-tried accounts
         remaining = [c for c in candidates if c["id"] not in tried]
         if not remaining:
-            raise NoReadyAccountError(
-                f"All {len(tried)} available account(s) failed for this request."
-            )
+            if not candidates:
+                raise self._no_ready_error()
+            raise NoReadyAccountError(f"All {len(tried)} ready account(s) failed for this request.")
         return remaining[0]
 
 

@@ -177,3 +177,33 @@
 - [ ] Консоль показывает правильный статус Advanced settings
 - [ ] Быстрые пресеты работают в обоих режимах
 - [ ] Advanced параметры можно редактировать в обоих режимах
+
+---
+
+## Проверки для Session Auth (2026-02)
+
+1. Очистить cookies/локальное хранилище и открыть UI.
+2. Запустить генерацию без ручного API key.
+3. Проверить, что сначала выполняется `POST /auth/session`, затем `POST /generate` без `X-API-Key`.
+4. Проверить polling: `GET /status/{task_id}` работает через cookie-сессию.
+5. Проверить выдачу медиа: `GET /results/{task_id}` и `GET /preview/{task_id}` доступны без query key.
+6. Проверить admin flow:
+   - логин через `POST /admin/session` с `x-admin-key`;
+   - повторный вход через `GET /admin/session` без повторного ввода ключа;
+   - выход через `DELETE /admin/session`.
+7. Проверить статусную модель аккаунтов:
+   - `pending -> checking -> ready|failed`;
+   - запрет `ready -> pending` без пересоздания аккаунта;
+   - запрет `failed -> ready` без `checking`.
+
+### Быстрый smoke-командный прогон
+
+```bash
+pytest backend/tests/test_api.py -v --request-timeout 15
+```
+
+Опциональные переменные таймаута:
+
+- `TEST_VIDEO_FLOW_TIMEOUT_SECONDS` (по умолчанию 300)
+- `TEST_IMAGE_FLOW_TIMEOUT_SECONDS` (по умолчанию 180)
+- `TEST_POLL_INTERVAL_SECONDS` (по умолчанию 5)

@@ -6,10 +6,11 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import sqlite3
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Generator, Optional
 
@@ -47,6 +48,34 @@ CREATE INDEX IF NOT EXISTS idx_tasks_model    ON tasks(model);
 CREATE INDEX IF NOT EXISTS idx_tasks_created  ON tasks(created_at DESC);
 """
 
+_CREATE_SESSIONS_SQL = """
+CREATE TABLE IF NOT EXISTS generation_sessions (
+    token         TEXT PRIMARY KEY,
+    issued_at     TEXT NOT NULL,
+    expires_at    TEXT NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'active',
+    client_context TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_generation_sessions_status
+    ON generation_sessions(status);
+CREATE INDEX IF NOT EXISTS idx_generation_sessions_expires
+    ON generation_sessions(expires_at);
+
+CREATE TABLE IF NOT EXISTS admin_sessions (
+    token                TEXT PRIMARY KEY,
+    issued_at            TEXT NOT NULL,
+    last_activity_at     TEXT NOT NULL,
+    idle_timeout_seconds INTEGER NOT NULL DEFAULT 43200,
+    status               TEXT NOT NULL DEFAULT 'active'
+);
+
+CREATE INDEX IF NOT EXISTS idx_admin_sessions_status
+    ON admin_sessions(status);
+CREATE INDEX IF NOT EXISTS idx_admin_sessions_last_activity
+    ON admin_sessions(last_activity_at);
+"""
+
 
 # ─── Connection helper ────────────────────────────────────────────────────────
 
@@ -72,13 +101,153 @@ def _db() -> Generator[sqlite3.Connection, None, None]:
 def init_db() -> None:
     """Create tables and indexes if they don't exist. Call on startup."""
     with _db() as conn:
-        conn.executescript(_CREATE_TASKS_SQL + _CREATE_IDX_SQL)
+        conn.executescript(_CREATE_TASKS_SQL + _CREATE_IDX_SQL + _CREATE_SESSIONS_SQL)
 
 
 # ─── Task CRUD ────────────────────────────────────────────────────────────────
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _new_token() -> str:
+    return secrets.token_urlsafe(48)
+
+
+def create_generation_session(
+    ttl_seconds: int = 24 * 3600,
+    client_context: Optional[str] = None,
+) -> tuple[str, datetime]:
+    token = _new_token()
+    issued_at = datetime.now(timezone.utc)
+    expires_at = issued_at + timedelta(seconds=ttl_seconds)
+    with _db() as conn:
+        conn.execute(
+            """
+            INSERT INTO generation_sessions(token, issued_at, expires_at, status, client_context)
+            VALUES (?, ?, ?, 'active', ?)
+            """,
+            (token, issued_at.isoformat(), expires_at.isoformat(), client_context),
+        )
+    return token, expires_at
+
+
+def validate_generation_session(token: str) -> tuple[bool, Optional[str], Optional[datetime]]:
+    with _db() as conn:
+        row = conn.execute(
+            """
+            SELECT token, expires_at, status
+            FROM generation_sessions
+            WHERE token=?
+            """,
+            (token,),
+        ).fetchone()
+        if row is None:
+            return False, "missing", None
+
+        status = row["status"]
+        expires_at = datetime.fromisoformat(row["expires_at"])
+        now = datetime.now(timezone.utc)
+
+        if status == "revoked":
+            return False, "revoked", expires_at
+        if status != "active":
+            return False, "expired", expires_at
+        if now >= expires_at:
+            conn.execute(
+                "UPDATE generation_sessions SET status='expired' WHERE token=?",
+                (token,),
+            )
+            return False, "expired", expires_at
+
+    return True, None, expires_at
+
+
+def revoke_generation_session(token: str) -> None:
+    with _db() as conn:
+        conn.execute(
+            "UPDATE generation_sessions SET status='revoked' WHERE token=?",
+            (token,),
+        )
+
+
+def create_admin_session(idle_timeout_seconds: int = 12 * 3600) -> tuple[str, datetime]:
+    token = _new_token()
+    now = datetime.now(timezone.utc)
+    with _db() as conn:
+        conn.execute(
+            """
+            INSERT INTO admin_sessions(token, issued_at, last_activity_at, idle_timeout_seconds, status)
+            VALUES (?, ?, ?, ?, 'active')
+            """,
+            (token, now.isoformat(), now.isoformat(), idle_timeout_seconds),
+        )
+    return token, now
+
+
+def validate_admin_session(
+    token: str,
+    *,
+    touch: bool = False,
+) -> tuple[bool, Optional[str], Optional[datetime]]:
+    with _db() as conn:
+        row = conn.execute(
+            """
+            SELECT token, status, last_activity_at, idle_timeout_seconds
+            FROM admin_sessions
+            WHERE token=?
+            """,
+            (token,),
+        ).fetchone()
+        if row is None:
+            return False, "missing", None
+
+        status = row["status"]
+        last_activity = datetime.fromisoformat(row["last_activity_at"])
+        idle_timeout = int(row["idle_timeout_seconds"])
+        expires_at = last_activity + timedelta(seconds=idle_timeout)
+        now = datetime.now(timezone.utc)
+
+        if status == "revoked":
+            return False, "revoked", expires_at
+        if status != "active":
+            return False, "expired", expires_at
+        if now >= expires_at:
+            conn.execute(
+                "UPDATE admin_sessions SET status='expired' WHERE token=?",
+                (token,),
+            )
+            return False, "expired", expires_at
+
+        if touch:
+            conn.execute(
+                "UPDATE admin_sessions SET last_activity_at=? WHERE token=?",
+                (now.isoformat(), token),
+            )
+            expires_at = now + timedelta(seconds=idle_timeout)
+
+    return True, None, expires_at
+
+
+def get_admin_session(token: str) -> Optional[dict[str, Any]]:
+    with _db() as conn:
+        row = conn.execute(
+            """
+            SELECT token, issued_at, last_activity_at, idle_timeout_seconds, status
+            FROM admin_sessions
+            WHERE token=?
+            """,
+            (token,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def revoke_admin_session(token: str) -> None:
+    with _db() as conn:
+        conn.execute(
+            "UPDATE admin_sessions SET status='revoked' WHERE token=?",
+            (token,),
+        )
 
 
 def create_task(
@@ -189,7 +358,7 @@ def list_gallery(
     if sort not in allowed_sorts:
         sort = "created_at"
 
-    where_clauses = ["status = 'done'"]
+    where_clauses = ["status = 'done'", "result_path IS NOT NULL"]
     params: list[Any] = []
 
     if model_filter:
@@ -234,7 +403,6 @@ def list_gallery(
             result_url=f"{base_url}/results/{row['id']}",
         )
         for row in rows
-        if row["result_path"]  # Skip rows without result files
     ]
 
     return items, total
@@ -249,21 +417,54 @@ def delete_gallery_item(task_id: str) -> bool:
         row = conn.execute(
             "SELECT result_path, preview_path FROM tasks WHERE id=?", (task_id,)
         ).fetchone()
-
         if row is None:
             return False
-
-        # Remove files from volume
-        for path in (row["result_path"], row["preview_path"]):
-            if path and os.path.exists(path):
-                try:
-                    os.remove(path)
-                except OSError:
-                    pass  # Best-effort cleanup
-
+        result_path = row["result_path"]
+        preview_path = row["preview_path"]
         conn.execute("DELETE FROM tasks WHERE id=?", (task_id,))
 
+    # Best-effort file cleanup after DB transaction has committed.
+    for path in (result_path, preview_path):
+        if path and os.path.exists(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
     return True
+
+
+def mark_stale_tasks_failed(max_age_hours: int = 2) -> int:
+    """
+    Mark stuck pending/processing tasks as failed.
+    Returns number of rows updated.
+    """
+    cutoff = datetime.now(timezone.utc).timestamp() - (max_age_hours * 3600)
+    updated = 0
+    with _db() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, updated_at
+            FROM tasks
+            WHERE status IN ('pending', 'processing')
+            """
+        ).fetchall()
+        for row in rows:
+            try:
+                updated_ts = datetime.fromisoformat(row["updated_at"]).timestamp()
+            except Exception:
+                continue
+            if updated_ts < cutoff:
+                conn.execute(
+                    """
+                    UPDATE tasks
+                    SET status='failed', error_msg=?, updated_at=?
+                    WHERE id=?
+                    """,
+                    ("Task expired due to timeout", _now_iso(), row["id"]),
+                )
+                updated += 1
+    return updated
 
 
 # ─── File path helpers ────────────────────────────────────────────────────────

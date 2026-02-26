@@ -40,7 +40,7 @@ class TestModelIDs:
 
     def test_anisora_default_id(self):
         import config
-        assert config.MODEL_IDS["anisora"] == "IndexTeam/Index-anisora"
+        assert config.MODEL_IDS["anisora"] == "Wan-AI/Wan2.1-T2V-14B-Diffusers"
 
     def test_phr00t_default_id(self):
         import config
@@ -85,7 +85,7 @@ class TestModelIDs:
 class TestAnisoraSubfolder:
     def test_default_subfolder(self):
         import config
-        assert config.ANISORA_SUBFOLDER == "V3.2"
+        assert config.ANISORA_SUBFOLDER == ""
 
     def test_env_override_subfolder(self):
         cfg = _reload_config({"ANISORA_SUBFOLDER": "V4.0"})

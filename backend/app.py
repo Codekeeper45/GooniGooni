@@ -14,10 +14,10 @@ Local serve (no GPU, for testing routes):
     modal serve backend/app.py
 """
 
-import json
-import mimetypes
 import os
 import sys
+import threading
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -41,6 +41,7 @@ RESULTS_PATH = "/results"
 api_secret = modal.Secret.from_name("gooni-api-key")
 admin_secret = modal.Secret.from_name("gooni-admin")
 hf_secret = modal.Secret.from_name("huggingface")
+accounts_secret = modal.Secret.from_name("gooni-accounts")
 
 
 # ─── Docker Images ────────────────────────────────────────────────────────────
@@ -53,6 +54,7 @@ _base_pkgs = [
     "imageio[ffmpeg]",
     "huggingface_hub",
     "httpx",
+    "cryptography>=42.0.0",
 ]
 
 # Video generation image (A10G — 24 GB)
@@ -105,11 +107,69 @@ _volumes = {
     RESULTS_PATH: results_vol,
 }
 
+_video_pipeline_cache: dict[str, object] = {}
+_image_pipeline_cache: dict[str, object] = {}
+_video_lock = threading.Lock()
+_image_lock = threading.Lock()
+
+
+def _get_video_pipeline(model_id_key: str):
+    with _video_lock:
+        if model_id_key in _video_pipeline_cache:
+            return _video_pipeline_cache[model_id_key]
+
+        if model_id_key == "anisora":
+            from models.anisora import AnisoraPipeline
+            from config import MODEL_IDS, ANISORA_SUBFOLDER
+
+            pipeline = AnisoraPipeline(
+                hf_model_id=MODEL_IDS["anisora"],
+                subfolder=ANISORA_SUBFOLDER,
+            )
+        elif model_id_key == "phr00t":
+            from models.phr00t import Phr00tPipeline
+            from config import MODEL_IDS, PHR00T_FILENAME
+
+            pipeline = Phr00tPipeline(
+                hf_repo_id=MODEL_IDS["phr00t"],
+                hf_filename=PHR00T_FILENAME,
+            )
+        else:
+            raise ValueError(f"Unknown video model: {model_id_key}")
+
+        pipeline.load(MODEL_CACHE_PATH)
+        _video_pipeline_cache[model_id_key] = pipeline
+        return pipeline
+
+
+def _get_image_pipeline(model_id_key: str):
+    with _image_lock:
+        if model_id_key in _image_pipeline_cache:
+            return _image_pipeline_cache[model_id_key]
+
+        if model_id_key == "pony":
+            from models.pony import PonyPipeline
+            from config import MODEL_IDS
+
+            pipeline = PonyPipeline(MODEL_IDS["pony"])
+        elif model_id_key == "flux":
+            from models.flux import FluxPipeline
+            from config import MODEL_IDS
+
+            pipeline = FluxPipeline(MODEL_IDS["flux"])
+        else:
+            raise ValueError(f"Unknown image model: {model_id_key}")
+
+        pipeline.load(MODEL_CACHE_PATH)
+        _image_pipeline_cache[model_id_key] = pipeline
+        return pipeline
+
 # ─── Video Generation Function ────────────────────────────────────────────────
 
 @app.function(
     image=video_image,
     gpu=os.environ.get("VIDEO_GPU", "A10G"),
+    min_containers=int(os.environ.get("VIDEO_MIN_CONTAINERS", "1")),
     max_containers=int(os.environ.get("VIDEO_CONCURRENCY", "1")),
     timeout=900,
     volumes=_volumes,
@@ -124,45 +184,28 @@ def run_video_generation(request_dict: dict, task_id: str) -> dict:
     sys.path.insert(0, "/root")  # backend/ files are copied to /root
 
     import storage
+    results_vol.reload()
     storage.init_db()
     storage.update_task_status(task_id, "processing", progress=5)
 
     model_id_key = request_dict["model"]
 
-    # Import the right pipeline
-    if model_id_key == "anisora":
-        from models.anisora import AnisoraPipeline
-        from config import MODEL_IDS, ANISORA_SUBFOLDER
-        pipeline = AnisoraPipeline(
-            hf_model_id=MODEL_IDS["anisora"],
-            subfolder=ANISORA_SUBFOLDER,
-        )
-    elif model_id_key == "phr00t":
-        from models.phr00t import Phr00tPipeline
-        from config import MODEL_IDS, PHR00T_FILENAME
-        pipeline = Phr00tPipeline(
-            hf_repo_id=MODEL_IDS["phr00t"],
-            hf_filename=PHR00T_FILENAME,
-        )
-    else:
-        raise ValueError(f"Unknown video model: {model_id_key}")
-
-    storage.update_task_status(task_id, "processing", progress=10)
-    pipeline.load(MODEL_CACHE_PATH)
-
-    storage.update_task_status(task_id, "processing", progress=20)
-
     try:
+        storage.update_task_status(task_id, "processing", progress=10)
+        pipeline = _get_video_pipeline(model_id_key)
+        storage.update_task_status(task_id, "processing", progress=20)
+
         result_path, preview_path = pipeline.generate(request_dict, task_id, RESULTS_PATH)
-        results_vol.commit()  # Flush to volume
         storage.update_task_status(
             task_id, "done", progress=100,
             result_path=result_path,
             preview_path=preview_path,
         )
+        results_vol.commit()
         return {"result_path": result_path, "preview_path": preview_path}
     except Exception as exc:
         storage.update_task_status(task_id, "failed", error_msg=str(exc))
+        results_vol.commit()
         raise
 
 
@@ -171,6 +214,7 @@ def run_video_generation(request_dict: dict, task_id: str) -> dict:
 @app.function(
     image=image_gen_image,
     gpu=os.environ.get("IMAGE_GPU", "T4"),
+    min_containers=int(os.environ.get("IMAGE_MIN_CONTAINERS", "1")),
     max_containers=int(os.environ.get("IMAGE_CONCURRENCY", "2")),
     timeout=300,
     volumes=_volumes,
@@ -184,38 +228,28 @@ def run_image_generation(request_dict: dict, task_id: str) -> dict:
     sys.path.insert(0, "/root")
 
     import storage
+    results_vol.reload()
     storage.init_db()
     storage.update_task_status(task_id, "processing", progress=5)
 
     model_id_key = request_dict["model"]
 
-    if model_id_key == "pony":
-        from models.pony import PonyPipeline
-        from config import MODEL_IDS
-        pipeline = PonyPipeline(MODEL_IDS["pony"])
-    elif model_id_key == "flux":
-        from models.flux import FluxPipeline
-        from config import MODEL_IDS
-        pipeline = FluxPipeline(MODEL_IDS["flux"])
-    else:
-        raise ValueError(f"Unknown image model: {model_id_key}")
-
-    storage.update_task_status(task_id, "processing", progress=10)
-    pipeline.load(MODEL_CACHE_PATH)
-
-    storage.update_task_status(task_id, "processing", progress=20)
-
     try:
+        storage.update_task_status(task_id, "processing", progress=10)
+        pipeline = _get_image_pipeline(model_id_key)
+        storage.update_task_status(task_id, "processing", progress=20)
+
         result_path, preview_path = pipeline.generate(request_dict, task_id, RESULTS_PATH)
-        results_vol.commit()
         storage.update_task_status(
             task_id, "done", progress=100,
             result_path=result_path,
             preview_path=preview_path,
         )
+        results_vol.commit()
         return {"result_path": result_path, "preview_path": preview_path}
     except Exception as exc:
         storage.update_task_status(task_id, "failed", error_msg=str(exc))
+        results_vol.commit()
         raise
 
 
@@ -224,8 +258,26 @@ def run_image_generation(request_dict: dict, task_id: str) -> dict:
 @app.function(
     image=api_image,
     volumes=_volumes,
+    schedule=modal.Period(hours=1),
+)
+def cleanup_stale_tasks() -> None:
+    """Periodic cleanup for tasks stuck in pending/processing states."""
+    sys.path.insert(0, "/root")
+    import storage
+
+    results_vol.reload()
+    storage.init_db()
+    max_age_hours = int(os.environ.get("STALE_TASK_HOURS", "2"))
+    updated = storage.mark_stale_tasks_failed(max_age_hours=max_age_hours)
+    if updated > 0:
+        results_vol.commit()
+
+
+@app.function(
+    image=api_image,
+    volumes=_volumes,
     secrets=[api_secret],
-    min_containers=0,
+    min_containers=int(os.environ.get("API_MIN_CONTAINERS", "1")),
     max_containers=3,
 )
 @modal.concurrent(max_inputs=50)
@@ -243,8 +295,8 @@ def health():
 @app.function(
     image=api_image,
     volumes=_volumes,
-    secrets=[api_secret, admin_secret],
-    min_containers=0,
+    secrets=[api_secret, admin_secret, accounts_secret],
+    min_containers=int(os.environ.get("API_MIN_CONTAINERS", "1")),
     max_containers=3,
 )
 @modal.concurrent(max_inputs=50)
@@ -260,14 +312,13 @@ def fastapi_app():
         if _p not in _sys.path:
             _sys.path.insert(0, _p)
 
-    from fastapi import Depends, FastAPI, HTTPException, Query, status, Body
+    from fastapi import Depends, FastAPI, HTTPException, Query, Request, status, Body
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import FileResponse, JSONResponse, Response
-    from pydantic import BaseModel as PydanticBase
 
     import storage
     import accounts as acc_store
-    from auth import verify_api_key
+    from auth import verify_api_key, verify_generation_session, GENERATION_SESSION_COOKIE
     from config import MODELS_SCHEMA, DEFAULT_PAGE_SIZE, DB_PATH
     from router import router as account_router, NoReadyAccountError, MAX_FALLBACKS
     from deployer import deploy_account_async, deploy_all_accounts
@@ -276,6 +327,9 @@ def fastapi_app():
         GalleryResponse,
         GenerateRequest,
         GenerateResponse,
+        GenerationSessionResponse,
+        GenerationSessionStateResponse,
+        AdminSessionStateResponse,
         HealthResponse,
         ModelsResponse,
         StatusResponse,
@@ -295,19 +349,114 @@ def fastapi_app():
         redoc_url="/redoc",
     )
 
-    # Allow the frontend dev server and any deployed UI origin
+    env_origins = [
+        origin.strip()
+        for origin in os.environ.get("FRONTEND_ORIGINS", "").split(",")
+        if origin.strip()
+    ]
+    default_origins = [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://34.73.173.191",
+        "https://34.73.173.191",
+    ]
+    allowed_origins = sorted(set(default_origins + env_origins))
+
     api.add_middleware(
         CORSMiddleware,
-        allow_origin_regex=".*",   # Tighten in production to your domain
+        allow_origins=allowed_origins,
+        # Keep explicit allowlist + regex fallback for same hosts with explicit ports.
+        allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|34\.73\.173\.191)(:\d+)?$",
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
 
+    generation_ttl_seconds = int(os.environ.get("GENERATION_SESSION_TTL_SECONDS", str(24 * 3600)))
+    admin_idle_timeout_seconds = int(
+        os.environ.get("ADMIN_SESSION_IDLE_TIMEOUT_SECONDS", str(12 * 3600))
+    )
+    session_cookie_secure = os.environ.get("SESSION_COOKIE_SECURE", "1") != "0"
+    session_cookie_samesite = os.environ.get("SESSION_COOKIE_SAMESITE", "none").lower()
+    if session_cookie_samesite not in {"lax", "strict", "none"}:
+        session_cookie_samesite = "none"
+
+    def _set_session_cookie(response: Response, key: str, value: str, max_age: int) -> None:
+        response.set_cookie(
+            key=key,
+            value=value,
+            max_age=max_age,
+            httponly=True,
+            secure=session_cookie_secure,
+            samesite=session_cookie_samesite,
+            path="/",
+        )
+
+    def _delete_session_cookie(response: Response, key: str) -> None:
+        response.delete_cookie(
+            key=key,
+            httponly=True,
+            secure=session_cookie_secure,
+            samesite=session_cookie_samesite,
+            path="/",
+        )
+
     # ── GET /health ────────────────────────────────────────────────────────────
     @api.get("/health", response_model=HealthResponse, tags=["Info"])
     async def health_check():
         return HealthResponse()
+
+    @api.post(
+        "/auth/session",
+        response_model=GenerationSessionResponse,
+        status_code=status.HTTP_201_CREATED,
+        tags=["Auth"],
+    )
+    async def create_generation_session(response: Response, request: Request):
+        results_vol.reload()
+        client_ip = request.client.host if request.client else "unknown"
+        token, expires_at = storage.create_generation_session(
+            ttl_seconds=generation_ttl_seconds,
+            client_context=client_ip,
+        )
+        results_vol.commit()
+        _set_session_cookie(
+            response=response,
+            key=GENERATION_SESSION_COOKIE,
+            value=token,
+            max_age=generation_ttl_seconds,
+        )
+        return GenerationSessionResponse(expires_at=expires_at)
+
+    @api.get(
+        "/auth/session",
+        response_model=GenerationSessionStateResponse,
+        tags=["Auth"],
+    )
+    async def get_generation_session_state(request: Request):
+        token = request.cookies.get(GENERATION_SESSION_COOKIE, "")
+        if not token:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={
+                    "code": "generation_session_missing",
+                    "detail": "Generation session is missing.",
+                    "user_action": "Create a new session and retry.",
+                },
+            )
+        results_vol.reload()
+        active, reason, expires_at = storage.validate_generation_session(token)
+        if not active:
+            code = "generation_session_expired" if reason == "expired" else "generation_session_invalid"
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={
+                    "code": code,
+                    "detail": "Generation session is invalid or expired.",
+                    "user_action": "Create a new session and retry.",
+                },
+            )
+        return GenerationSessionStateResponse(active=True, expires_at=expires_at)
 
     # ── GET /models ────────────────────────────────────────────────────────────
     @api.get("/models", response_model=ModelsResponse, tags=["Info"])
@@ -326,6 +475,7 @@ def fastapi_app():
         _: str = Depends(verify_api_key),
     ):
         """Internal endpoint for isolated Modal account execution."""
+        results_vol.reload()
         params = req.model_dump(
             exclude={"prompt", "negative_prompt", "model", "type", "mode",
                      "width", "height", "seed",
@@ -343,15 +493,21 @@ def fastapi_app():
             height=req.height,
             seed=req.seed,
         )
+        results_vol.commit()
 
         request_dict = req.model_dump()
         request_dict["model"] = req.model.value
         request_dict["type"] = req.type.value
 
-        if req.type.value == "video":
-            run_video_generation.spawn(request_dict, task_id)
-        else:
-            run_image_generation.spawn(request_dict, task_id)
+        try:
+            if req.type.value == "video":
+                run_video_generation.spawn(request_dict, task_id)
+            else:
+                run_image_generation.spawn(request_dict, task_id)
+        except Exception as exc:
+            storage.update_task_status(task_id, "failed", error_msg=f"Spawn failed: {exc}")
+            results_vol.commit()
+            raise HTTPException(status_code=503, detail="Failed to enqueue generation task")
 
         return GenerateResponse(task_id=task_id, status=TaskStatus.pending)
 
@@ -364,8 +520,9 @@ def fastapi_app():
     )
     async def generate(
         req: GenerateRequest,
-        _: str = Depends(verify_api_key),
+        _: str = Depends(verify_generation_session),
     ):
+        results_vol.reload()
         tried_accounts: list[str] = []
         last_error = ""
 
@@ -389,18 +546,24 @@ def fastapi_app():
                 height=req.height,
                 seed=req.seed,
             )
+            results_vol.commit()
             req_dict = req.model_dump()
             req_dict["model"] = req.model.value
             req_dict["type"] = req.type.value
-            if req.type.value == "video":
-                run_video_generation.spawn(req_dict, local_task)
-            else:
-                run_image_generation.spawn(req_dict, local_task)
+            try:
+                if req.type.value == "video":
+                    run_video_generation.spawn(req_dict, local_task)
+                else:
+                    run_image_generation.spawn(req_dict, local_task)
+            except Exception as exc:
+                storage.update_task_status(local_task, "failed", error_msg=f"Spawn failed: {exc}")
+                results_vol.commit()
+                raise HTTPException(status_code=503, detail="Failed to enqueue local generation task")
             return GenerateResponse(task_id=local_task, status=TaskStatus.pending)
 
         import httpx
         api_key_env = os.environ.get("API_KEY", "")
-        headers = {"X-API-Key": api_key_env}
+        headers = {"X-API-Key": api_key_env} if api_key_env else {}
 
         for attempt in range(MAX_FALLBACKS + 1):
             try:
@@ -416,7 +579,9 @@ def fastapi_app():
 
                 remote_url = f"https://{workspace}--gooni-api.modal.run/generate_direct"
                 
-                async with httpx.AsyncClient(timeout=30.0) as client:
+                async with httpx.AsyncClient(
+                    timeout=httpx.Timeout(connect=10.0, read=60.0, write=60.0, pool=5.0)
+                ) as client:
                     resp = await client.post(remote_url, json=req.model_dump(), headers=headers)
                     resp.raise_for_status()
                     data = resp.json()
@@ -448,7 +613,7 @@ def fastapi_app():
     )
     async def get_status(
         task_id: str,
-        _: str = Depends(verify_api_key),
+        _: str = Depends(verify_generation_session),
     ):
         if "::" in task_id:
             workspace, remote_task_id = task_id.split("::", 1)
@@ -456,7 +621,7 @@ def fastapi_app():
             api_key = os.environ.get("API_KEY", "")
             remote_url = f"https://{workspace}--gooni-api.modal.run/status/{remote_task_id}"
             try:
-                async with httpx.AsyncClient(timeout=10.0) as client:
+                async with httpx.AsyncClient(timeout=httpx.Timeout(connect=5.0, read=20.0, write=20.0, pool=5.0)) as client:
                     resp = await client.get(remote_url, headers={"X-API-Key": api_key})
                     if resp.status_code == 404:
                         raise HTTPException(status_code=404, detail="Remote task not found")
@@ -466,6 +631,7 @@ def fastapi_app():
                 # If remote is unreachable or failing, return 502 Bad Gateway
                 raise HTTPException(status_code=502, detail=f"Remote status fetch failed: {str(e)}")
 
+        results_vol.reload()
         result = storage.get_task(task_id)
         if result is None:
             raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
@@ -475,17 +641,28 @@ def fastapi_app():
     @api.get("/results/{task_id}", tags=["Generation"])
     async def get_result(
         task_id: str,
-        _: str = Depends(verify_api_key),
+        _: str = Depends(verify_generation_session),
     ):
         if "::" in task_id:
-            from fastapi.responses import RedirectResponse
             workspace, remote_task_id = task_id.split("::", 1)
-            api_key = os.environ.get("API_KEY", "")
-            import urllib.parse
-            qs = f"?api_key={urllib.parse.quote(api_key)}" if api_key else ""
-            remote_url = f"https://{workspace}--gooni-api.modal.run/results/{remote_task_id}{qs}"
-            return RedirectResponse(url=remote_url, status_code=307)
+            import httpx
 
+            api_key = os.environ.get("API_KEY", "")
+            remote_url = f"https://{workspace}--gooni-api.modal.run/results/{remote_task_id}"
+            try:
+                async with httpx.AsyncClient(timeout=httpx.Timeout(connect=5.0, read=120.0, write=30.0, pool=5.0)) as client:
+                    resp = await client.get(remote_url, headers={"X-API-Key": api_key})
+                    if resp.status_code == 404:
+                        raise HTTPException(status_code=404, detail="Remote result not found")
+                    resp.raise_for_status()
+                    content_type = resp.headers.get("content-type", "application/octet-stream")
+                    return Response(content=resp.content, media_type=content_type)
+            except HTTPException:
+                raise
+            except Exception as exc:
+                raise HTTPException(status_code=502, detail=f"Remote result fetch failed: {exc}")
+
+        results_vol.reload()
         task = storage.get_task(task_id)
         if task is None:
             raise HTTPException(status_code=404, detail="Task not found")
@@ -510,24 +687,34 @@ def fastapi_app():
             "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
         }
         media_type = media_types.get(ext, "application/octet-stream")
-        from fastapi.responses import FileResponse
         return FileResponse(fpath, media_type=media_type)
 
     # ── GET /preview/{task_id} ────────────────────────────────────────────────
     @api.get("/preview/{task_id}", tags=["Generation"])
     async def get_preview(
         task_id: str,
-        _: str = Depends(verify_api_key),
+        _: str = Depends(verify_generation_session),
     ):
         if "::" in task_id:
-            from fastapi.responses import RedirectResponse
             workspace, remote_task_id = task_id.split("::", 1)
-            api_key = os.environ.get("API_KEY", "")
-            import urllib.parse
-            qs = f"?api_key={urllib.parse.quote(api_key)}" if api_key else ""
-            remote_url = f"https://{workspace}--gooni-api.modal.run/preview/{remote_task_id}{qs}"
-            return RedirectResponse(url=remote_url, status_code=307)
+            import httpx
 
+            api_key = os.environ.get("API_KEY", "")
+            remote_url = f"https://{workspace}--gooni-api.modal.run/preview/{remote_task_id}"
+            try:
+                async with httpx.AsyncClient(timeout=httpx.Timeout(connect=5.0, read=60.0, write=20.0, pool=5.0)) as client:
+                    resp = await client.get(remote_url, headers={"X-API-Key": api_key})
+                    if resp.status_code == 404:
+                        raise HTTPException(status_code=404, detail="Remote preview not found")
+                    resp.raise_for_status()
+                    content_type = resp.headers.get("content-type", "image/jpeg")
+                    return Response(content=resp.content, media_type=content_type)
+            except HTTPException:
+                raise
+            except Exception as exc:
+                raise HTTPException(status_code=502, detail=f"Remote preview fetch failed: {exc}")
+
+        results_vol.reload()
         task_row = _get_raw_task(task_id)
         if not task_row:
             raise HTTPException(status_code=404, detail="Task not found")
@@ -536,7 +723,6 @@ def fastapi_app():
         if not preview_path or not os.path.exists(preview_path):
             raise HTTPException(status_code=404, detail="Preview not available yet")
 
-        from fastapi.responses import FileResponse
         return FileResponse(preview_path, media_type="image/jpeg")
 
     # ── GET /gallery ──────────────────────────────────────────────────────────
@@ -547,8 +733,9 @@ def fastapi_app():
         sort: str = Query("created_at"),
         model: Optional[str] = Query(None),
         type: Optional[str] = Query(None),
-        _: str = Depends(verify_api_key),
+        _: str = Depends(verify_generation_session),
     ):
+        results_vol.reload()
         items, total = storage.list_gallery(
             page=page,
             per_page=per_page,
@@ -572,8 +759,9 @@ def fastapi_app():
     )
     async def delete_gallery_item(
         task_id: str,
-        _: str = Depends(verify_api_key),
+        _: str = Depends(verify_generation_session),
     ):
+        results_vol.reload()
         deleted = storage.delete_gallery_item(task_id)
         if not deleted:
             raise HTTPException(status_code=404, detail="Item not found")
@@ -586,9 +774,85 @@ def fastapi_app():
 
     import os as _os
     from deployer import deploy_account_async, deploy_all_accounts
-    from admin_security import _ensure_audit_table, get_admin_auth
+    from admin_security import (
+        _ensure_audit_table,
+        get_admin_auth,
+        verify_admin_key_header,
+        ADMIN_SESSION_COOKIE,
+    )
 
     _ensure_audit_table()
+
+    @api.post("/admin/session", status_code=status.HTTP_204_NO_CONTENT, tags=["Admin"])
+    async def create_admin_session(
+        response: Response,
+        _ip: str = Depends(verify_admin_key_header("admin_session_create")),
+    ):
+        results_vol.reload()
+        token, _ = storage.create_admin_session(idle_timeout_seconds=admin_idle_timeout_seconds)
+        results_vol.commit()
+        _set_session_cookie(
+            response=response,
+            key=ADMIN_SESSION_COOKIE,
+            value=token,
+            max_age=admin_idle_timeout_seconds,
+        )
+        return None
+
+    @api.get("/admin/session", response_model=AdminSessionStateResponse, tags=["Admin"])
+    async def get_admin_session_state(
+        request: Request,
+        _ip: str = Depends(get_admin_auth("admin_session_get")),
+    ):
+        token = request.cookies.get(ADMIN_SESSION_COOKIE, "")
+        if not token:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={
+                    "code": "admin_session_missing",
+                    "detail": "Admin session is missing.",
+                    "user_action": "Login again to continue.",
+                },
+            )
+        results_vol.reload()
+        active, reason, _ = storage.validate_admin_session(token, touch=False)
+        if not active:
+            code = "admin_session_expired" if reason == "expired" else "admin_session_invalid"
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={
+                    "code": code,
+                    "detail": "Admin session is invalid or expired.",
+                    "user_action": "Login again to continue.",
+                },
+            )
+        session_row = storage.get_admin_session(token)
+        last_activity = None
+        if session_row and session_row.get("last_activity_at"):
+            try:
+                last_activity = datetime.fromisoformat(session_row["last_activity_at"])
+            except Exception:
+                last_activity = None
+
+        return AdminSessionStateResponse(
+            active=True,
+            idle_timeout_seconds=admin_idle_timeout_seconds,
+            last_activity_at=last_activity,
+        )
+
+    @api.delete("/admin/session", status_code=status.HTTP_204_NO_CONTENT, tags=["Admin"])
+    async def delete_admin_session(
+        response: Response,
+        request: Request,
+        _ip: str = Depends(get_admin_auth("admin_session_delete")),
+    ):
+        token = request.cookies.get(ADMIN_SESSION_COOKIE, "")
+        if token:
+            results_vol.reload()
+            storage.revoke_admin_session(token)
+            results_vol.commit()
+        _delete_session_cookie(response, ADMIN_SESSION_COOKIE)
+        return None
 
     # ── GET /admin/health — fast probe (also validates key) ─────────────────
     @api.get("/admin/health", tags=["Admin"])
@@ -604,38 +868,47 @@ def fastapi_app():
         token_secret: str = Body(...),
         _ip: str = Depends(get_admin_auth("add_account"))
     ):
+        results_vol.reload()
         account_id = acc_store.add_account(
             label=label,
             token_id=token_id,
             token_secret=token_secret,
         )
+        results_vol.commit()
         deploy_account_async(account_id)
         return {"id": account_id, "status": "pending", "message": "Deploying..."}
 
     # ── GET /admin/accounts ──────────────────────────────────────────────────
     @api.get("/admin/accounts", tags=["Admin"])
     async def admin_list_accounts(_ip: str = Depends(get_admin_auth("list_accounts"))):
+        results_vol.reload()
         rows = acc_store.list_accounts()
         return {"accounts": rows}
 
     # ── DELETE /admin/accounts/{id} ──────────────────────────────────────────
     @api.delete("/admin/accounts/{account_id}", tags=["Admin"])
     async def admin_delete_account(account_id: str, _ip: str = Depends(get_admin_auth("delete_account"))):
+        results_vol.reload()
         deleted = acc_store.delete_account(account_id)
         if not deleted:
             raise HTTPException(status_code=404, detail="Account not found")
+        results_vol.commit()
         return {"deleted": True, "id": account_id}
 
     # ── POST /admin/accounts/{id}/disable ────────────────────────────────────
     @api.post("/admin/accounts/{account_id}/disable", tags=["Admin"])
     async def admin_disable_account(account_id: str, _ip: str = Depends(get_admin_auth("disable_account"))):
+        results_vol.reload()
         acc_store.disable_account(account_id)
+        results_vol.commit()
         return {"id": account_id, "status": "disabled"}
 
     # ── POST /admin/accounts/{id}/enable ─────────────────────────────────────
     @api.post("/admin/accounts/{account_id}/enable", tags=["Admin"])
     async def admin_enable_account(account_id: str, _ip: str = Depends(get_admin_auth("enable_account"))):
+        results_vol.reload()
         acc_store.enable_account(account_id)
+        results_vol.commit()
         return {"id": account_id, "status": "ready"}
 
     # ── POST /admin/accounts/{id}/deploy ─────────────────────────────────────
@@ -644,7 +917,7 @@ def fastapi_app():
         if acc_store.get_account(account_id) is None:
             raise HTTPException(status_code=404, detail="Account not found")
         deploy_account_async(account_id)
-        return {"id": account_id, "status": "pending", "message": "Deploying..."}
+        return {"id": account_id, "status": "checking", "message": "Deploy started, health-check in progress."}
 
     # ── POST /admin/deploy-all ────────────────────────────────────────────────
     @api.post("/admin/deploy-all", tags=["Admin"])
@@ -657,6 +930,7 @@ def fastapi_app():
     async def admin_get_logs(limit: int = 100, _ip: str = Depends(get_admin_auth("read_logs"))):
         import sqlite3 as _sql
         from config import DB_PATH as _db
+        results_vol.reload()
         if not os.path.exists(_db):
             return {"logs": []}
         conn = _sql.connect(_db)

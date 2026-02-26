@@ -2,11 +2,13 @@
 node_modules/
 .pnp
 .pnp.js
+.git/
 
 # Build output
 dist/
 build/
 .vite/
+coverage/
 
 # Python / Backend (not needed for frontend Vite build)
 backend/
@@ -54,3 +56,9 @@ desktop.ini
 # Logs
 *.log
 npm-debug.log*
+
+# Docker context hygiene
+Dockerfile*
+.dockerignore
+*.log*
+.env*

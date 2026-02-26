@@ -10,7 +10,9 @@ build/
 # Environment / secrets
 .env
 .env.local
+.env.*
 .env.*.local
+!.env.example
 *.toml
 
 # Python
@@ -28,6 +30,8 @@ Thumbs.db
 # Logs
 *.log
 npm-debug.log*
+coverage/
+*.tmp
 
 # IDE
 .vscode/
@@ -35,3 +39,4 @@ npm-debug.log*
 
 # Modal volumes / cache
 modal_volumes/
+*.swp

@@ -13,11 +13,15 @@ Or set env vars:
     export API_KEY=...
     pytest backend/tests/test_api.py -v
 """
+import os
 import time
 
 import httpx
 import pytest
 
+POLL_INTERVAL_SECONDS = int(os.environ.get("TEST_POLL_INTERVAL_SECONDS", "5"))
+VIDEO_FLOW_TIMEOUT_SECONDS = int(os.environ.get("TEST_VIDEO_FLOW_TIMEOUT_SECONDS", "300"))
+IMAGE_FLOW_TIMEOUT_SECONDS = int(os.environ.get("TEST_IMAGE_FLOW_TIMEOUT_SECONDS", "180"))
 
 
 
@@ -34,14 +38,14 @@ class TestHealth:
 
 
 class TestAuth:
-    def test_gallery_without_key_returns_403(self, base_url):
-        """Endpoints should reject requests without X-API-Key."""
+    def test_gallery_without_key_returns_auth_error(self, base_url):
+        """Endpoints should reject unauthenticated requests."""
         r = httpx.get(f"{base_url}/gallery")
-        assert r.status_code == 403
+        assert r.status_code in (401, 403)
 
-    def test_models_without_key_returns_403(self, base_url):
+    def test_models_without_key_returns_auth_error(self, base_url):
         r = httpx.get(f"{base_url}/models")
-        assert r.status_code == 403
+        assert r.status_code in (401, 403)
 
 
 class TestModels:
@@ -92,6 +96,133 @@ class TestGallery:
             assert item["model"] == "anisora"
 
 
+class TestGenerationSessionContracts:
+    def test_auth_session_create_and_read(self, raw_client):
+        create_r = raw_client.post("/auth/session")
+        assert create_r.status_code == 201, create_r.text
+        assert "gg_session" in raw_client.cookies
+
+        state_r = raw_client.get("/auth/session")
+        assert state_r.status_code == 200, state_r.text
+        payload = state_r.json()
+        assert payload["active"] is True
+        assert "expires_at" in payload
+
+    def test_generation_auth_boundary_requires_session_or_api_key(self, raw_client):
+        no_auth_r = raw_client.get("/gallery")
+        assert no_auth_r.status_code in (401, 403)
+
+        session_r = raw_client.post("/auth/session")
+        assert session_r.status_code == 201
+        with_auth_r = raw_client.get("/gallery")
+        assert with_auth_r.status_code == 200, with_auth_r.text
+
+    def test_generate_without_manual_key_when_session_exists(self, raw_client):
+        session_r = raw_client.post("/auth/session")
+        assert session_r.status_code == 201
+
+        payload = {
+            "model": "pony",
+            "type": "image",
+            "mode": "txt2img",
+            "prompt": "smoke test session auth",
+            "width": 512,
+            "height": 512,
+            "steps": 5,
+            "seed": 1,
+        }
+        generate_r = raw_client.post("/generate", json=payload)
+        # 202 accepted is expected; 422 is also acceptable if backend schema changes.
+        assert generate_r.status_code in (202, 422), generate_r.text
+
+
+class TestAdminSessionContracts:
+    @pytest.fixture(autouse=True)
+    def skip_without_admin_key(self, admin_key):
+        if not admin_key:
+            pytest.skip("ADMIN_KEY not set — skipping admin session tests")
+
+    def test_admin_session_post_get_delete_flow(self, raw_client, create_admin_session):
+        create_r = create_admin_session()
+        assert create_r.status_code == 204, create_r.text
+        assert "gg_admin_session" in raw_client.cookies
+
+        get_r = raw_client.get("/admin/session")
+        assert get_r.status_code == 200, get_r.text
+        payload = get_r.json()
+        assert payload["active"] is True
+        assert "idle_timeout_seconds" in payload
+
+        delete_r = raw_client.delete("/admin/session")
+        assert delete_r.status_code == 204, delete_r.text
+
+        get_after_delete = raw_client.get("/admin/session")
+        assert get_after_delete.status_code in (401, 403)
+
+    def test_admin_accounts_server_authoritative_status(self, raw_client, create_admin_session):
+        create_r = create_admin_session()
+        assert create_r.status_code == 204
+
+        list_r = raw_client.get("/admin/accounts")
+        assert list_r.status_code == 200, list_r.text
+        payload = list_r.json()
+        assert "accounts" in payload
+        allowed_statuses = {"pending", "checking", "ready", "failed", "disabled"}
+        for row in payload["accounts"]:
+            assert row.get("status") in allowed_statuses
+
+    def test_admin_session_actions_are_audited(self, raw_client, admin_key, create_admin_session):
+        create_r = create_admin_session()
+        assert create_r.status_code == 204
+        _ = raw_client.get("/admin/session")
+        _ = raw_client.delete("/admin/session")
+
+        logs_r = raw_client.get("/admin/logs", headers={"x-admin-key": admin_key})
+        assert logs_r.status_code == 200, logs_r.text
+        logs = logs_r.json().get("logs", [])
+        actions = [entry.get("action", "") for entry in logs]
+        assert any(a == "admin_session_create" for a in actions)
+        assert any(a == "admin_session_get" for a in actions)
+        assert any(a == "admin_session_delete" for a in actions)
+
+    def test_admin_session_idle_timeout_probe(self, raw_client, create_admin_session):
+        probe_seconds = int(os.environ.get("TEST_ADMIN_IDLE_PROBE_SECONDS", "0"))
+        if probe_seconds <= 0:
+            pytest.skip("TEST_ADMIN_IDLE_PROBE_SECONDS is not set; idle-timeout probe skipped")
+
+        create_r = create_admin_session()
+        assert create_r.status_code == 204
+
+        pre_r = raw_client.get("/admin/session")
+        assert pre_r.status_code == 200
+        declared_timeout = int(pre_r.json().get("idle_timeout_seconds", 43200))
+        if declared_timeout > probe_seconds:
+            pytest.skip(
+                f"Server idle timeout ({declared_timeout}s) is greater than probe "
+                f"window ({probe_seconds}s)."
+            )
+
+        time.sleep(probe_seconds + 1)
+        post_r = raw_client.get("/admin/session")
+        assert post_r.status_code in (401, 403)
+
+
+class TestCors:
+    def test_preflight_allows_frontend_origin(self, base_url):
+        origin = os.environ.get("TEST_FRONTEND_ORIGIN", "http://34.73.173.191")
+        r = httpx.options(
+            f"{base_url}/admin/accounts",
+            headers={
+                "Origin": origin,
+                "Access-Control-Request-Method": "GET",
+            },
+            timeout=10.0,
+        )
+        assert r.status_code in (200, 204)
+        assert r.headers.get("access-control-allow-origin") == origin
+        assert r.headers.get("access-control-allow-credentials") == "true"
+
+
 class TestGenerateFlow:
     """
     Integration test: POST /generate → poll /status → check /results.
@@ -125,12 +256,13 @@ class TestGenerateFlow:
         assert data["status"] == "pending"
         task_id = data["task_id"]
 
-        # Poll for up to 15 minutes
-        deadline = time.time() + 900
+        # Poll for a bounded timeout (configurable via env)
+        deadline = time.time() + VIDEO_FLOW_TIMEOUT_SECONDS
         final_status = None
         while time.time() < deadline:
             st_r = client.get(f"/status/{task_id}", timeout=15)
-            assert st_r.status_code == 200
+            if st_r.status_code != 200:
+                pytest.fail(f"Status check failed: {st_r.status_code} {st_r.text}")
             st = st_r.json()
 
             assert "status" in st
@@ -141,7 +273,7 @@ class TestGenerateFlow:
                 final_status = st["status"]
                 break
 
-            time.sleep(10)
+            time.sleep(POLL_INTERVAL_SECONDS)
 
         assert final_status == "done", f"Job ended with status: {final_status}"
 
@@ -173,12 +305,15 @@ class TestGenerateFlow:
         task_id = gen_r.json()["task_id"]
 
         # Poll until done
-        deadline = time.time() + 300
+        deadline = time.time() + IMAGE_FLOW_TIMEOUT_SECONDS
         while time.time() < deadline:
-            st = client.get(f"/status/{task_id}").json()
+            st_r = client.get(f"/status/{task_id}")
+            if st_r.status_code != 200:
+                pytest.fail(f"Status check failed: {st_r.status_code} {st_r.text}")
+            st = st_r.json()
             if st["status"] in ("done", "failed"):
                 break
-            time.sleep(5)
+            time.sleep(POLL_INTERVAL_SECONDS)
 
         del_r = client.delete(f"/gallery/{task_id}")
         assert del_r.status_code == 200

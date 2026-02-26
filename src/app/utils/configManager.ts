@@ -68,6 +68,23 @@ export class InferenceConfigManager {
     this.config = inferenceSettings;
   }
 
+  private evaluateModeCondition(condition: string, mode: string): boolean {
+    const orParts = condition.split("||").map((p) => p.trim()).filter(Boolean);
+    if (orParts.length === 0) return true;
+
+    return orParts.some((orPart) => {
+      const andParts = orPart.split("&&").map((p) => p.trim()).filter(Boolean);
+      return andParts.every((part) => this.evaluateAtomicCondition(part, mode));
+    });
+  }
+
+  private evaluateAtomicCondition(part: string, mode: string): boolean {
+    const match = part.match(/^mode\s*(==|!=)\s*['"]?([a-zA-Z0-9_]+)['"]?$/);
+    if (!match) return false;
+    const [, op, value] = match;
+    return op === "==" ? mode === value : mode !== value;
+  }
+
   // ─── Get all models ─────────────────────────────────────────────────────────
   getAllModels(): ModelConfig[] {
     const imageModels = Object.values(this.config.image_models);
@@ -125,13 +142,7 @@ export class InferenceConfigManager {
 
       // Check visibility condition
       if (param.visible_if) {
-        const condition = param.visible_if.replace(/mode/g, `"${mode}"`);
-        try {
-          // eslint-disable-next-line no-eval
-          if (!eval(condition)) return;
-        } catch {
-          return;
-        }
+        if (!this.evaluateModeCondition(param.visible_if, mode)) return;
       }
 
       visible[key] = param;
@@ -152,13 +163,7 @@ export class InferenceConfigManager {
     if (!param) return false;
 
     if (param.required_if) {
-      const condition = param.required_if.replace(/mode/g, `"${mode}"`);
-      try {
-        // eslint-disable-next-line no-eval
-        return eval(condition);
-      } catch {
-        return false;
-      }
+      return this.evaluateModeCondition(param.required_if, mode);
     }
 
     return false;
@@ -211,13 +216,7 @@ export class InferenceConfigManager {
         // Check visibility
         const param = modelParams[key];
         if (param.visible_if) {
-          const condition = param.visible_if.replace(/mode/g, `"${mode}"`);
-          try {
-            // eslint-disable-next-line no-eval
-            if (!eval(condition)) return;
-          } catch {
-            return;
-          }
+          if (!this.evaluateModeCondition(param.visible_if, mode)) return;
         }
         payload[key] = values[key];
       }
@@ -245,12 +244,12 @@ export class InferenceConfigManager {
       const value = values[key];
 
       // Check required
-      if (this.isParameterRequired(modelId, key, mode) && !value) {
+      if (this.isParameterRequired(modelId, key, mode) && (value === undefined || value === null || value === "")) {
         errors.push(`${param.label} is required`);
       }
 
       // Check range
-      if (value !== undefined && param.type === "int" || param.type === "float") {
+      if (value !== undefined && (param.type === "int" || param.type === "float")) {
         if (param.min !== undefined && value < param.min) {
           errors.push(`${param.label} must be at least ${param.min}`);
         }

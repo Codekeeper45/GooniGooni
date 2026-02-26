@@ -9,7 +9,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, List, Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 # ─── Enums ────────────────────────────────────────────────────────────────────
@@ -31,6 +31,20 @@ class TaskStatus(str, Enum):
     processing = "processing"
     done = "done"
     failed = "failed"
+
+
+class SessionStatus(str, Enum):
+    active = "active"
+    expired = "expired"
+    revoked = "revoked"
+
+
+class AccountStatus(str, Enum):
+    pending = "pending"
+    checking = "checking"
+    ready = "ready"
+    failed = "failed"
+    disabled = "disabled"
 
 
 # ─── Nested models ────────────────────────────────────────────────────────────
@@ -65,7 +79,6 @@ class GenerateRequest(BaseModel):
     # ── Video parameters ──────────────────────────────────────────────────────
     num_frames: Optional[int] = Field(default=81, ge=1, le=241)
     fps: Optional[int] = Field(default=16)
-    motion_score: Optional[float] = Field(default=3.0, ge=0.0, le=5.0)
     guidance_scale: Optional[float] = Field(default=1.0, ge=0.0, le=20.0)
     cfg_scale: Optional[float] = Field(default=1.0, ge=0.0, le=20.0)
     steps: Optional[int] = Field(default=None, ge=1, le=150)
@@ -99,6 +112,12 @@ class GenerateRequest(BaseModel):
         if gen_type == GenerationType.image and v not in image_modes:
             raise ValueError(f"Invalid mode '{v}' for image model. Valid: {image_modes}")
 
+        # Enforce model/type pairing
+        if model in {ModelId.anisora, ModelId.phr00t} and gen_type != GenerationType.video:
+            raise ValueError(f"Model '{model.value}' requires type='video'")
+        if model in {ModelId.pony, ModelId.flux} and gen_type != GenerationType.image:
+            raise ValueError(f"Model '{model.value}' requires type='image'")
+
         # arbitrary_frame only for anisora
         if v == "arbitrary_frame" and model != ModelId.anisora:
             raise ValueError("arbitrary_frame mode is only supported by anisora")
@@ -112,6 +131,36 @@ class GenerateRequest(BaseModel):
             raise ValueError("prompt must not be empty")
         return v
 
+    @staticmethod
+    def _approx_bytes_from_data_uri(value: Optional[str]) -> int:
+        if not value:
+            return 0
+        payload = value.split(",", 1)[1] if "," in value else value
+        # base64 size approximation
+        return int(len(payload) * 3 / 4)
+
+    @model_validator(mode="after")
+    def validate_mode_requirements_and_sizes(self):
+        max_image_bytes = 12 * 1024 * 1024  # 12 MB decoded per image
+
+        if self.mode in {"i2v", "img2img"} and not self.reference_image:
+            raise ValueError("reference_image is required for i2v/img2img mode")
+        if self.mode == "first_last_frame" and (not self.first_frame_image or not self.last_frame_image):
+            raise ValueError("first_frame_image and last_frame_image are required for first_last_frame mode")
+        if self.mode == "arbitrary_frame" and not self.arbitrary_frames:
+            raise ValueError("arbitrary_frames must not be empty for arbitrary_frame mode")
+
+        for field_name in ("reference_image", "first_frame_image", "last_frame_image"):
+            value = getattr(self, field_name)
+            if self._approx_bytes_from_data_uri(value) > max_image_bytes:
+                raise ValueError(f"{field_name} exceeds max size of {max_image_bytes} bytes")
+
+        for idx, item in enumerate(self.arbitrary_frames or []):
+            if self._approx_bytes_from_data_uri(item.image) > max_image_bytes:
+                raise ValueError(f"arbitrary_frames[{idx}].image exceeds max size of {max_image_bytes} bytes")
+
+        return self
+
 
 # ─── Responses ────────────────────────────────────────────────────────────────
 
@@ -124,6 +173,8 @@ class StatusResponse(BaseModel):
     task_id: str
     status: TaskStatus
     progress: int = Field(default=0, ge=0, le=100)
+    stage: Optional[str] = None
+    stage_detail: Optional[str] = None
     result_url: Optional[str] = None
     preview_url: Optional[str] = None
     error: Optional[str] = None
@@ -170,6 +221,28 @@ class HealthResponse(BaseModel):
     app: str = "gooni-gooni-backend"
 
 
+class GenerationSessionResponse(BaseModel):
+    session_status: SessionStatus = SessionStatus.active
+    expires_at: datetime
+
+
+class GenerationSessionStateResponse(BaseModel):
+    active: bool
+    expires_at: Optional[datetime] = None
+
+
+class AdminSessionStateResponse(BaseModel):
+    active: bool
+    idle_timeout_seconds: int = 43200
+    last_activity_at: Optional[datetime] = None
+
+
+class ErrorResponse(BaseModel):
+    code: str
+    detail: str
+    user_action: str
+
+
 class AddAccountRequest(BaseModel):
     label: str
     token_id: str
@@ -180,7 +253,7 @@ class AccountResponse(BaseModel):
     id: str
     label: str
     workspace: Optional[str] = None
-    status: str
+    status: AccountStatus
     use_count: int
     last_used: Optional[str] = None
     last_error: Optional[str] = None

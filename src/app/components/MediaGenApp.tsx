@@ -38,6 +38,7 @@ function getStatusText(progress: number, type: GenerationType): string {
 
 import { configManager } from "../utils/configManager";
 import type { ModelId } from "../utils/configManager";
+import { ensureGenerationSession, sessionFetch } from "../utils/sessionClient";
 
 // ─── API Integration ─────────────────────────────────────────────────────────
 async function generateMediaAPI(
@@ -76,17 +77,16 @@ async function generateMediaAPI(
     throw new Error("Backend not configured. Set VITE_API_URL in .env and rebuild the app.");
   }
 
-  const API_KEY = localStorage.getItem("mg_api_key") ?? "";
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    ...(API_KEY ? { "X-API-Key": API_KEY } : {}),
-  };
-
-  const genRes = await fetch(`${API_URL}/generate`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(payload),
-  });
+  await ensureGenerationSession();
+  const genRes = await sessionFetch(
+    "/generate",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+    { retryOn401: true }
+  );
 
   if (!genRes.ok) {
     const detail = await genRes.text();
@@ -137,35 +137,32 @@ async function pollTask(
   onProgress: (p: number) => void,
   onStatusText: (text: string) => void
 ): Promise<{ url: string; thumbnailUrl?: string }> {
-  const API_KEY = localStorage.getItem("mg_api_key") ?? "";
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    ...(API_KEY ? { "X-API-Key": API_KEY } : {}),
-  };
   const POLL_INTERVAL_MS = 3000;
   const MAX_POLLS = 400;
 
   for (let poll = 0; poll < MAX_POLLS; poll++) {
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
-    const statusRes = await fetch(`${API_URL}/status/${task_id}`, { headers });
+    const statusRes = await sessionFetch(`/status/${task_id}`, {}, { retryOn401: true });
     if (!statusRes.ok) throw new Error(`Status check failed (${statusRes.status})`);
-    const { status, progress, error } = await statusRes.json() as {
-      status: string; progress: number; error?: string;
+    const { status, progress, error, stage, stage_detail, result_url, preview_url } = await statusRes.json() as {
+      status: string;
+      progress: number;
+      error?: string;
+      stage?: string;
+      stage_detail?: string;
+      result_url?: string;
+      preview_url?: string;
     };
     onProgress(status === "done" ? 100 : Math.max(5, Math.min(99, progress ?? 0)));
     
     if (status === "failed") throw new Error(error ?? "Generation failed on the server");
     
-    // Fallback to local text mapping if no explicit error to render
-    onStatusText(status === "pending" ? "Pending in queue..." : getStatusText(progress ?? 0, type));
+    const stageText = stage_detail || stage;
+    onStatusText(stageText || (status === "pending" ? "Pending in queue..." : getStatusText(progress ?? 0, type)));
 
     if (status === "done") {
-      let resultUrl = `${API_URL}/results/${task_id}`;
-      let previewUrl = `${API_URL}/preview/${task_id}`;
-      if (API_KEY) {
-        resultUrl += `?api_key=${encodeURIComponent(API_KEY)}`;
-        previewUrl += `?api_key=${encodeURIComponent(API_KEY)}`;
-      }
+      const resultUrl = result_url || `${API_URL}/results/${task_id}`;
+      const previewUrl = preview_url || `${API_URL}/preview/${task_id}`;
       return { url: resultUrl, thumbnailUrl: type === "video" ? previewUrl : undefined };
     }
   }

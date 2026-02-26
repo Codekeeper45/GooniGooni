@@ -251,6 +251,25 @@ function SuccessState({
 }) {
   const isVideo = result.type === "video";
 
+  const handleDownload = async () => {
+    try {
+      const response = await fetch(result.url, { credentials: "include" });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const ext = isVideo ? "mp4" : "png";
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `gooni-result-${Date.now()}.${ext}`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch {
+      window.open(result.url, "_blank", "noopener,noreferrer");
+    }
+  };
+
   return (
     <motion.div
       initial={{ opacity: 0 }}
@@ -315,7 +334,7 @@ function SuccessState({
           <ActionChip
             icon={<Download className="w-3.5 h-3.5" />}
             label="Download"
-            onClick={() => window.open(result.url, "_blank")}
+            onClick={handleDownload}
           />
           <ActionChip
             icon={<RotateCcw className="w-3.5 h-3.5" />}

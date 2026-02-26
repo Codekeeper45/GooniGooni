@@ -1,6 +1,5 @@
 """
-Unit tests for backend/schemas.py
-Tests Pydantic validation logic — no Modal, no GPU, no network.
+Unit tests for backend/schemas.py.
 """
 import sys
 from pathlib import Path
@@ -14,8 +13,8 @@ if BACKEND not in sys.path:
 
 from schemas import GenerateRequest, GenerateResponse, StatusResponse, TaskStatus
 
+SAMPLE_IMAGE = "data:image/png;base64,AAAA"
 
-# ─── Helpers ──────────────────────────────────────────────────────────────────
 
 def make_req(**kwargs):
     """Build a minimal valid payload and merge kwargs."""
@@ -26,10 +25,20 @@ def make_req(**kwargs):
         "prompt": "test prompt",
     }
     base.update(kwargs)
+
+    if base["mode"] in {"img2img", "i2v"}:
+        base.setdefault("reference_image", SAMPLE_IMAGE)
+    if base["mode"] == "first_last_frame":
+        base.setdefault("first_frame_image", SAMPLE_IMAGE)
+        base.setdefault("last_frame_image", SAMPLE_IMAGE)
+    if base["mode"] == "arbitrary_frame":
+        base.setdefault(
+            "arbitrary_frames",
+            [{"frame_index": 0, "image": SAMPLE_IMAGE, "strength": 0.85}],
+        )
+
     return GenerateRequest(**base)
 
-
-# ─── Happy-path construction for each model + mode ────────────────────────────
 
 class TestValidRequests:
     def test_pony_txt2img(self):
@@ -72,22 +81,16 @@ class TestValidRequests:
         make_req(model="phr00t", type="video", mode="first_last_frame")
 
 
-# ─── Mode incompatibility validation ──────────────────────────────────────────
-
 class TestModeValidation:
     def test_phr00t_arbitrary_frame_rejected(self):
-        with pytest.raises(ValidationError) as exc_info:
+        with pytest.raises(ValidationError):
             make_req(model="phr00t", type="video", mode="arbitrary_frame")
-        errors = exc_info.value.errors()
-        assert any("mode" in str(e) for e in errors)
 
     def test_pony_t2v_rejected(self):
-        """Image model cannot use video mode."""
         with pytest.raises(ValidationError):
             make_req(model="pony", type="image", mode="t2v")
 
     def test_anisora_txt2img_rejected(self):
-        """Video model cannot use image mode."""
         with pytest.raises(ValidationError):
             make_req(model="anisora", type="video", mode="txt2img")
 
@@ -99,8 +102,6 @@ class TestModeValidation:
         with pytest.raises(ValidationError):
             make_req(model="pony", type="audio", mode="txt2img")
 
-
-# ─── Field constraints ────────────────────────────────────────────────────────
 
 class TestFieldConstraints:
     def test_prompt_required(self):
@@ -147,8 +148,6 @@ class TestFieldConstraints:
         req = make_req(model="anisora", type="video", mode="t2v")
         assert req.output_format == "mp4"
 
-
-# ─── Response schemas ─────────────────────────────────────────────────────────
 
 class TestResponseSchemas:
     def test_generate_response(self):

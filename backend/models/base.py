@@ -6,6 +6,7 @@ from __future__ import annotations
 import abc
 import base64
 import io
+import os
 import random
 from typing import Optional
 
@@ -74,3 +75,15 @@ class BasePipeline(abc.ABC):
         reader.close()
         img = Image.fromarray(frame)
         BasePipeline.make_preview_from_pil(img, preview_path, size)
+
+    @staticmethod
+    def export_video(frames: list, out_path: str, fps: int, output_format: str) -> None:
+        """Write frames to video without duplicating full frame list in memory."""
+        import imageio
+        import numpy as np
+
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        codec = "libx264" if output_format == "mp4" else "vp9"
+        with imageio.get_writer(out_path, fps=fps, codec=codec, quality=8) as writer:
+            for frame in frames:
+                writer.append_data(np.array(frame) if isinstance(frame, Image.Image) else frame)

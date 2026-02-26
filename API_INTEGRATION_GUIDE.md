@@ -680,3 +680,25 @@ interface GenerationResponse {
 **Version:** 1.0  
 **Last Updated:** 2026-02-24  
 **Application:** MediaGen Universal WebUI
+
+---
+
+## Session Auth Update (2026-02)
+
+- Frontend больше не использует `localStorage.mg_api_key` и не отправляет постоянный `X-API-Key`.
+- Для пользовательских запросов используется cookie-сессия:
+  - `POST /auth/session` -> выдаёт `gg_session` (HttpOnly cookie, TTL 24h).
+  - `GET /auth/session` -> проверка валидности session.
+- Пользовательские endpoints требуют generation session (или server-to-server `X-API-Key`):
+  - `POST /generate`
+  - `GET /status/{task_id}`
+  - `GET /results/{task_id}`
+  - `GET /preview/{task_id}`
+  - `GET /gallery`
+  - `DELETE /gallery/{task_id}`
+- Admin авторизация работает через cookie-сессию:
+  - `POST /admin/session` (header `x-admin-key` только для входа)
+  - `GET /admin/session`
+  - `DELETE /admin/session`
+- Статусы аккаунтов server-authoritative: `pending|checking|ready|failed|disabled`.
+- `ready` выставляется только после успешного health-check; переход `failed -> ready` без `checking` запрещён.

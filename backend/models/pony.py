@@ -1,26 +1,16 @@
 """
-Pony Diffusion V6 XL pipeline – anime/hentai image generation.
-
-Supported modes:
-  • txt2img – text → image
-  • img2img – reference image → image
-
-GPU: T4 (16 GB).
+Pony Diffusion V6 XL pipeline for image generation.
 """
 from __future__ import annotations
 
 import os
-import sys
-from pathlib import Path
 
 import torch
 from PIL import Image
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
 from models.base import BasePipeline
-from storage import result_file_path, preview_file_path
+from storage import preview_file_path, result_file_path
 
-# Map frontend sampler names → diffusers scheduler classes
 _SAMPLERS = {
     "Euler a": "EulerAncestralDiscreteScheduler",
     "DPM++ 2M Karras": "DPMSolverMultistepScheduler",
@@ -29,13 +19,13 @@ _SAMPLERS = {
 
 
 class PonyPipeline(BasePipeline):
-    """Pony Diffusion V6 XL – high-quality anime image generation."""
+    """Pony Diffusion V6 XL image pipeline."""
 
     def __init__(self, hf_model_id: str):
         self.hf_model_id = hf_model_id
         self._loaded = False
-
-    # ─── Load ─────────────────────────────────────────────────────────────────
+        self._txt2img = None
+        self._img2img = None
 
     def load(self, cache_path: str) -> None:
         if self._loaded:
@@ -43,33 +33,33 @@ class PonyPipeline(BasePipeline):
 
         from diffusers import StableDiffusionXLPipeline, StableDiffusionXLImg2ImgPipeline
 
-        print(f"[pony] Loading model: {self.hf_model_id}")
-
         self._txt2img = StableDiffusionXLPipeline.from_pretrained(
             self.hf_model_id,
             cache_dir=cache_path,
             torch_dtype=torch.float16,
             use_safetensors=True,
         ).to("cuda")
-
         self._img2img = StableDiffusionXLImg2ImgPipeline.from_pipe(self._txt2img)
 
-        self._loaded = True
-        print("[pony] Model loaded ✓")
+        for pipe in (self._txt2img, self._img2img):
+            if hasattr(pipe, "vae") and pipe.vae is not None:
+                pipe.vae.enable_slicing()
+                pipe.vae.enable_tiling()
 
-    # ─── Sampler setter ───────────────────────────────────────────────────────
+        self._loaded = True
 
     def _apply_sampler(self, pipe, sampler_name: str) -> None:
         from diffusers import schedulers as sched
+
         cls_name = _SAMPLERS.get(sampler_name, "EulerAncestralDiscreteScheduler")
         cls = getattr(sched, cls_name, None)
         if cls:
-            # Preserve the existing config (sigma, beta, etc.)
             pipe.scheduler = cls.from_config(pipe.scheduler.config)
 
-    # ─── Generate ─────────────────────────────────────────────────────────────
-
     def generate(self, request: dict, task_id: str, results_path: str) -> tuple[str, str]:
+        if not self._loaded:
+            raise RuntimeError("Pipeline not initialized. Call load() first.")
+
         mode = request.get("mode", "txt2img")
         seed = self.resolve_seed(request.get("seed", -1))
         generator = torch.Generator(device="cuda").manual_seed(seed)
@@ -90,38 +80,38 @@ class PonyPipeline(BasePipeline):
         out_path = result_file_path(task_id, output_format)
         prev_path = preview_file_path(task_id)
 
-        if mode == "txt2img":
-            self._apply_sampler(self._txt2img, sampler)
-            image = self._txt2img(
-                prompt=prompt,
-                negative_prompt=negative_prompt or None,
-                width=width,
-                height=height,
-                num_inference_steps=steps,
-                guidance_scale=cfg_scale,
-                clip_skip=clip_skip,
-                generator=generator,
-            ).images[0]
+        with torch.inference_mode():
+            if mode == "txt2img":
+                self._apply_sampler(self._txt2img, sampler)
+                image = self._txt2img(
+                    prompt=prompt,
+                    negative_prompt=negative_prompt or None,
+                    width=width,
+                    height=height,
+                    num_inference_steps=steps,
+                    guidance_scale=cfg_scale,
+                    clip_skip=clip_skip,
+                    generator=generator,
+                ).images[0]
 
-        elif mode == "img2img":
-            ref_img = self.decode_image(request["reference_image"]).resize((width, height), Image.LANCZOS)
-            self._apply_sampler(self._img2img, sampler)
-            image = self._img2img(
-                prompt=prompt,
-                negative_prompt=negative_prompt or None,
-                image=ref_img,
-                strength=denoising_strength,
-                num_inference_steps=steps,
-                guidance_scale=cfg_scale,
-                clip_skip=clip_skip,
-                generator=generator,
-            ).images[0]
+            elif mode == "img2img":
+                ref_img = self.decode_image(request["reference_image"]).resize((width, height), Image.LANCZOS)
+                self._apply_sampler(self._img2img, sampler)
+                image = self._img2img(
+                    prompt=prompt,
+                    negative_prompt=negative_prompt or None,
+                    image=ref_img,
+                    strength=denoising_strength,
+                    num_inference_steps=steps,
+                    guidance_scale=cfg_scale,
+                    clip_skip=clip_skip,
+                    generator=generator,
+                ).images[0]
 
-        else:
-            raise ValueError(f"Unsupported mode for pony: {mode}")
+            else:
+                raise ValueError(f"Unsupported mode for pony: {mode}")
 
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
         image.save(out_path)
-
         self.make_preview_from_pil(image, prev_path)
         return out_path, prev_path
