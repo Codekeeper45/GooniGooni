@@ -146,6 +146,20 @@ function loadUiState(): PersistedUiState | null {
   }
 }
 
+function patchUiState(patch: Partial<PersistedUiState>) {
+  try {
+    const current = loadUiState() ?? ({} as PersistedUiState);
+    const next = {
+      ...current,
+      ...patch,
+      savedAt: Date.now(),
+    };
+    localStorage.setItem(UI_STATE_KEY, JSON.stringify(next));
+  } catch {
+    // Best-effort local persistence
+  }
+}
+
 function deserializeHistory(raw: string): HistoryItem[] {
   try {
     const parsed = JSON.parse(raw) as Array<Record<string, unknown>>;
@@ -381,6 +395,31 @@ export function MediaGenApp() {
   const phr00tStepsDefault = Number(phr00tFixed.steps?.value ?? 4);
   const phr00tCfgDefault = Number(phr00tFixed.cfg_scale?.value ?? 1.0);
 
+  const setGenerationTypePersisted = (next: GenerationType) => {
+    setGenerationType(next);
+    patchUiState({ generationType: next });
+  };
+
+  const setVideoModelPersisted = (next: VideoModel) => {
+    setVideoModel(next);
+    patchUiState({ videoModel: next });
+  };
+
+  const setImageModelPersisted = (next: ImageModel) => {
+    setImageModel(next);
+    patchUiState({ imageModel: next });
+  };
+
+  const setVideoModePersisted = (next: VideoMode) => {
+    setVideoMode(next);
+    patchUiState({ videoMode: next });
+  };
+
+  const setImageModePersisted = (next: ImageMode) => {
+    setImageMode(next);
+    patchUiState({ imageMode: next });
+  };
+
   const upsertHistoryItem = (item: HistoryItem) => {
     setHistory((prev) => {
       const rest = prev.filter((h) => h.id !== item.id);
@@ -605,13 +644,13 @@ export function MediaGenApp() {
       return;
     }
 
-    setGenerationType(saved.type);
+    setGenerationTypePersisted(saved.type);
     if (saved.type === "video") {
-      setVideoModel(saved.modelKey as VideoModel);
-      setVideoMode(saved.mode as VideoMode);
+      setVideoModelPersisted(saved.modelKey as VideoModel);
+      setVideoModePersisted(saved.mode as VideoMode);
     } else {
-      setImageModel(saved.modelKey as ImageModel);
-      setImageMode(saved.mode as ImageMode);
+      setImageModelPersisted(saved.modelKey as ImageModel);
+      setImageModePersisted(saved.mode as ImageMode);
     }
 
     setStatus("generating");
@@ -880,18 +919,18 @@ export function MediaGenApp() {
 
   const handleReuseHistory = (item: HistoryItem) => {
     setPrompt(item.prompt);
-    setGenerationType(item.type);
+    setGenerationTypePersisted(item.type);
     if (item.type === "video") {
       if (item.model.toLowerCase().includes("phr00t")) {
-        setVideoModel("phr00t");
+        setVideoModelPersisted("phr00t");
       } else {
-        setVideoModel("anisora");
+        setVideoModelPersisted("anisora");
       }
     } else {
       if (item.model.toLowerCase().includes("flux")) {
-        setImageModel("flux");
+        setImageModelPersisted("flux");
       } else {
-        setImageModel("pony");
+        setImageModelPersisted("pony");
       }
     }
     setWidth(item.width);
@@ -917,7 +956,7 @@ export function MediaGenApp() {
   };
 
   const handleVideoModeChange = (mode: VideoMode) => {
-    setVideoMode(mode);
+    setVideoModePersisted(mode);
     setReferenceImage(null);
     setFirstFrameImage(null);
     setLastFrameImage(null);
@@ -925,7 +964,7 @@ export function MediaGenApp() {
   };
 
   const handleImageModeChange = (mode: ImageMode) => {
-    setImageMode(mode);
+    setImageModePersisted(mode);
     setReferenceImage(null);
   };
   return (
@@ -949,11 +988,11 @@ export function MediaGenApp() {
         <ControlPanel
           // Type & Model
           generationType={generationType}
-          setGenerationType={setGenerationType}
+          setGenerationType={setGenerationTypePersisted}
           videoModel={videoModel}
-          setVideoModel={setVideoModel}
+          setVideoModel={setVideoModelPersisted}
           imageModel={imageModel}
-          setImageModel={setImageModel}
+          setImageModel={setImageModelPersisted}
           
           // Mode
           videoMode={videoMode}
