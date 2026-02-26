@@ -86,13 +86,10 @@ class PonyPipeline(BasePipeline):
             warnings.simplefilter("always", RuntimeWarning)
             image = pipe(**kwargs).images[0]
 
-        for warn in caught:
-            message = str(warn.message)
-            if "invalid value encountered in cast" in message:
-                raise RuntimeError(
-                    "Pony decode produced invalid pixel values (NaN/Inf). "
-                    "Retry with lower resolution/steps or a different seed."
-                )
+        saw_invalid_cast_warning = any(
+            "invalid value encountered in cast" in str(warn.message)
+            for warn in caught
+        )
 
         if image is None:
             raise RuntimeError("Pony pipeline returned empty image output.")
@@ -103,12 +100,28 @@ class PonyPipeline(BasePipeline):
                 "Retry with lower resolution/steps or a different seed."
             )
         # Detect near-uniform gray canvas collapse before saving artifacts.
-        if (arr.max() - arr.min()) < 4:
+        dynamic_range = int(arr.max()) - int(arr.min())
+        if dynamic_range < 4:
             raise RuntimeError(
                 "Pony output collapsed to a near-uniform image. "
                 "Retry with a different seed or prompt."
             )
+        # RuntimeWarning alone can be noisy; fail only when it correlates with low-detail output.
+        if saw_invalid_cast_warning and dynamic_range < 10:
+            raise RuntimeError(
+                "Pony decode produced unstable pixel values (NaN/Inf warning + low detail). "
+                "Retry with lower resolution/steps or a different seed."
+            )
         return image
+
+    @staticmethod
+    def _is_retryable_decode_error(exc: Exception) -> bool:
+        msg = str(exc).lower()
+        return (
+            "invalid pixel values" in msg
+            or "near-uniform image" in msg
+            or "unstable pixel values" in msg
+        )
 
     def generate(self, request: dict, task_id: str, results_path: str) -> tuple[str, str]:
         if not self._loaded:
@@ -116,7 +129,6 @@ class PonyPipeline(BasePipeline):
 
         mode = request.get("mode", "txt2img")
         seed = self.resolve_seed(request.get("seed", -1))
-        generator = torch.Generator(device="cuda").manual_seed(seed)
 
         prompt = request["prompt"]
         negative_prompt = request.get("negative_prompt", "")
@@ -134,38 +146,54 @@ class PonyPipeline(BasePipeline):
         out_path = result_file_path(task_id, output_format)
         prev_path = preview_file_path(task_id)
 
-        with torch.inference_mode():
-            if mode == "txt2img":
-                self._apply_sampler(self._txt2img, sampler)
-                image = self._run_pipe_checked(
-                    self._txt2img,
-                    prompt=prompt,
-                    negative_prompt=negative_prompt or None,
-                    width=width,
-                    height=height,
-                    num_inference_steps=steps,
-                    guidance_scale=cfg_scale,
-                    clip_skip=clip_skip,
-                    generator=generator,
-                )
+        image = None
+        last_exc: Exception | None = None
+        for attempt in (0, 1):
+            # One guarded retry with a nearby seed helps bypass occasional unstable SDXL decodes.
+            attempt_seed = seed + attempt
+            generator = torch.Generator(device="cuda").manual_seed(attempt_seed)
+            try:
+                with torch.inference_mode():
+                    if mode == "txt2img":
+                        self._apply_sampler(self._txt2img, sampler)
+                        image = self._run_pipe_checked(
+                            self._txt2img,
+                            prompt=prompt,
+                            negative_prompt=negative_prompt or None,
+                            width=width,
+                            height=height,
+                            num_inference_steps=steps,
+                            guidance_scale=cfg_scale,
+                            clip_skip=clip_skip,
+                            generator=generator,
+                        )
 
-            elif mode == "img2img":
-                ref_img = self.decode_image(request["reference_image"]).resize((width, height), Image.LANCZOS)
-                self._apply_sampler(self._img2img, sampler)
-                image = self._run_pipe_checked(
-                    self._img2img,
-                    prompt=prompt,
-                    negative_prompt=negative_prompt or None,
-                    image=ref_img,
-                    strength=denoising_strength,
-                    num_inference_steps=steps,
-                    guidance_scale=cfg_scale,
-                    clip_skip=clip_skip,
-                    generator=generator,
-                )
+                    elif mode == "img2img":
+                        ref_img = self.decode_image(request["reference_image"]).resize((width, height), Image.LANCZOS)
+                        self._apply_sampler(self._img2img, sampler)
+                        image = self._run_pipe_checked(
+                            self._img2img,
+                            prompt=prompt,
+                            negative_prompt=negative_prompt or None,
+                            image=ref_img,
+                            strength=denoising_strength,
+                            num_inference_steps=steps,
+                            guidance_scale=cfg_scale,
+                            clip_skip=clip_skip,
+                            generator=generator,
+                        )
+                    else:
+                        raise ValueError(f"Unsupported mode for pony: {mode}")
+                break
+            except RuntimeError as exc:
+                last_exc = exc
+                if attempt == 0 and self._is_retryable_decode_error(exc):
+                    self.clear_gpu_memory(sync=False)
+                    continue
+                raise
 
-            else:
-                raise ValueError(f"Unsupported mode for pony: {mode}")
+        if image is None and last_exc is not None:
+            raise last_exc
 
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
         image.save(out_path)

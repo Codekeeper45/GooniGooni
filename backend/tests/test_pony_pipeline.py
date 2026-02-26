@@ -68,17 +68,26 @@ class _UniformDummyPipe:
         return _DummyResult(Image.new("RGB", (16, 16), (128, 128, 128)))
 
 
+class _UniformWarnDummyPipe:
+    def __call__(self, **kwargs):
+        warnings.warn(
+            "invalid value encountered in cast",
+            RuntimeWarning,
+            stacklevel=1,
+        )
+        return _DummyResult(Image.new("RGB", (16, 16), (128, 128, 128)))
+
+
 def test_run_pipe_checked_returns_image_without_warning():
     pipe = _DummyPipe(emit_invalid_cast_warning=False)
     image = PonyPipeline._run_pipe_checked(pipe, prompt="ok")
     assert isinstance(image, Image.Image)
 
 
-def test_run_pipe_checked_raises_on_invalid_cast_warning():
+def test_run_pipe_checked_allows_invalid_cast_warning_on_non_uniform_output():
     pipe = _DummyPipe(emit_invalid_cast_warning=True)
-    with pytest.raises(RuntimeError) as exc:
-        PonyPipeline._run_pipe_checked(pipe, prompt="bad")
-    assert "invalid pixel values" in str(exc.value).lower()
+    image = PonyPipeline._run_pipe_checked(pipe, prompt="warn")
+    assert isinstance(image, Image.Image)
 
 
 def test_run_pipe_checked_raises_on_uniform_collapsed_output():
@@ -86,3 +95,11 @@ def test_run_pipe_checked_raises_on_uniform_collapsed_output():
     with pytest.raises(RuntimeError) as exc:
         PonyPipeline._run_pipe_checked(pipe, prompt="flat")
     assert "near-uniform image" in str(exc.value).lower()
+
+
+def test_run_pipe_checked_raises_when_warning_and_low_detail_coexist():
+    pipe = _UniformWarnDummyPipe()
+    with pytest.raises(RuntimeError) as exc:
+        PonyPipeline._run_pipe_checked(pipe, prompt="unstable")
+    message = str(exc.value).lower()
+    assert ("unstable pixel values" in message) or ("near-uniform image" in message)
