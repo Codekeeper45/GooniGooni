@@ -6,7 +6,7 @@ interface Account {
   id: string;
   label: string;
   workspace: string | null;
-  status: "pending" | "checking" | "ready" | "failed" | "disabled";
+  status: "pending" | "checking" | "deploying" | "ready" | "failed" | "disabled";
   use_count: number;
   last_used: string | null;
   last_error: string | null;
@@ -20,8 +20,9 @@ interface Account {
 // ─── Status badge config ──────────────────────────────────────────────────────
 
 const STATUS_CONFIG = {
-  pending:  { label: "⏳ Deploying",  color: "#f59e0b", bg: "rgba(245,158,11,0.15)" },
-  checking: { label: "🔍 Checking",  color: "#f59e0b", bg: "rgba(245,158,11,0.15)" },
+  pending:  { label: "⏳ Pending",    color: "#f59e0b", bg: "rgba(245,158,11,0.15)" },
+  checking: { label: "🔍 Checking",   color: "#f59e0b", bg: "rgba(245,158,11,0.15)" },
+  deploying: { label: "🚀 Deploying", color: "#3b82f6", bg: "rgba(59,130,246,0.15)" },
   ready:    { label: "✅ Ready",       color: "#10b981", bg: "rgba(16,185,129,0.15)" },
   failed:   { label: "❌ Failed",      color: "#ef4444", bg: "rgba(239,68,68,0.15)"  },
   disabled: { label: "⚫ Disabled",   color: "#6b7280", bg: "rgba(107,114,128,0.15)"},
@@ -139,9 +140,11 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onClose }) => {
     fetchAccounts();
   }, [fetchAccounts]);
 
-  // Auto-refresh while any account is in 'pending' or 'checking' state
+  // Auto-refresh while any account is in non-terminal onboarding state
   useEffect(() => {
-    const hasActive = accounts.some((a) => a.status === "pending" || a.status === "checking");
+    const hasActive = accounts.some(
+      (a) => a.status === "pending" || a.status === "checking" || a.status === "deploying"
+    );
     if (!hasActive) return;
     const timer = setInterval(fetchAccounts, 5000);
     return () => clearInterval(timer);

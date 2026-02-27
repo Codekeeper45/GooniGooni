@@ -14,7 +14,7 @@ interface Account {
   id: string;
   label: string;
   workspace: string | null;
-  status: "pending" | "checking" | "ready" | "failed" | "disabled";
+  status: "pending" | "checking" | "deploying" | "ready" | "failed" | "disabled";
   use_count: number;
   last_used: string | null;
   last_error: string | null;
@@ -42,6 +42,7 @@ type Tab = "accounts" | "logs";
 const statusColors: Record<string, string> = {
   pending: "#f59e0b",
   checking: "#3b82f6",
+  deploying: "#2563eb",
   ready: "#10b981",
   failed: "#ef4444",
   disabled: "#6b7280",
@@ -49,6 +50,7 @@ const statusColors: Record<string, string> = {
 const statusIcons: Record<string, string> = {
   pending: "P",
   checking: "C",
+  deploying: "D",
   ready: "OK",
   failed: "X",
   disabled: "OFF",
@@ -202,7 +204,9 @@ export function AdminDashboard() {
 
   useEffect(() => {
     if (authState !== "ready") return;
-    const hasActiveChecks = accounts.some((a) => a.status === "pending" || a.status === "checking");
+    const hasActiveChecks = accounts.some(
+      (a) => a.status === "pending" || a.status === "checking" || a.status === "deploying"
+    );
     if (!hasActiveChecks) return;
     const timer = setInterval(fetchAccounts, 5000);
     return () => clearInterval(timer);

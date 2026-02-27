@@ -2,9 +2,11 @@
 Unit tests for backend/router.py
 Uses monkeypatching to avoid real SQLite I/O — no Modal, no GPU.
 """
+from __future__ import annotations
+
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -15,16 +17,14 @@ if BACKEND not in sys.path:
 from router import AccountRouter, NoReadyAccountError
 
 
-def _make_account(id_: str, use_count: int = 0) -> dict:
+def _make_account(id_: str, use_count: int = 0, last_used: str | None = None) -> dict:
     return {
         "id": id_,
         "label": f"Account-{id_}",
-        "token_id": "tid",
-        "token_secret": "tsec",
         "workspace": "ws",
         "status": "ready",
         "use_count": use_count,
-        "last_used": None,
+        "last_used": last_used,
         "last_error": None,
     }
 
@@ -38,38 +38,29 @@ def _stub_recovery():
 class TestRouterPick:
     def test_raises_when_no_ready_accounts(self):
         r = AccountRouter()
-        with patch("router.acc_store.list_ready_accounts", return_value=[]):
+        with patch("router.acc_store.pick_and_mark_ready_account", return_value=None), patch(
+            "router.acc_store.list_accounts", return_value=[]
+        ):
             with pytest.raises(NoReadyAccountError):
                 r.pick()
 
-    def test_returns_least_used_first(self):
-        accounts = [
-            _make_account("b", use_count=5),
-            _make_account("a", use_count=0),
-        ]
+    def test_returns_atomically_picked_account(self):
         r = AccountRouter()
-        with patch("router.acc_store.list_ready_accounts", return_value=accounts):
-            # list_ready_accounts is already sorted by use_count ASC in the real impl
-            # Simulate sorted order
-            sorted_accounts = sorted(accounts, key=lambda x: x["use_count"])
-            with patch("router.acc_store.list_ready_accounts", return_value=sorted_accounts):
-                picked = r.pick()
-                assert picked["id"] == "a"
-
-    def test_returns_first_of_equally_used(self):
-        accounts = [_make_account("x", 3), _make_account("y", 3)]
-        r = AccountRouter()
-        with patch("router.acc_store.list_ready_accounts", return_value=accounts):
+        with patch(
+            "router.acc_store.pick_and_mark_ready_account",
+            return_value=_make_account("a"),
+        ) as mock_pick:
             picked = r.pick()
-            assert picked["id"] == "x"  # first in list
+            assert picked["id"] == "a"
+            mock_pick.assert_called_once_with()
 
 
 class TestRouterMarkSuccess:
-    def test_calls_mark_account_used(self):
+    def test_mark_success_is_noop(self):
         r = AccountRouter()
         with patch("router.acc_store.mark_account_used") as mock_used:
             r.mark_success("acct-1")
-            mock_used.assert_called_once_with("acct-1")
+            mock_used.assert_not_called()
 
 
 class TestRouterMarkFailed:
@@ -86,32 +77,39 @@ class TestRouterMarkFailed:
 
 class TestPickWithFallback:
     def test_skips_tried_accounts(self):
-        all_accounts = [
-            _make_account("a", use_count=0),
-            _make_account("b", use_count=1),
-        ]
         r = AccountRouter()
-        with patch("router.acc_store.list_ready_accounts", return_value=all_accounts):
+        with patch(
+            "router.acc_store.pick_and_mark_ready_account",
+            return_value=_make_account("b", use_count=1),
+        ) as mock_pick:
             picked = r.pick_with_fallback(tried=["a"])
             assert picked["id"] == "b"
+            mock_pick.assert_called_once_with(exclude_ids=["a"])
 
     def test_raises_when_all_tried(self):
         all_accounts = [_make_account("a"), _make_account("b")]
         r = AccountRouter()
-        with patch("router.acc_store.list_ready_accounts", return_value=all_accounts):
+        with patch("router.acc_store.pick_and_mark_ready_account", return_value=None), patch(
+            "router.acc_store.list_ready_accounts", return_value=all_accounts
+        ):
             with pytest.raises(NoReadyAccountError):
                 r.pick_with_fallback(tried=["a", "b"])
 
     def test_empty_tried_behaves_like_pick(self):
-        all_accounts = [_make_account("x")]
         r = AccountRouter()
-        with patch("router.acc_store.list_ready_accounts", return_value=all_accounts):
+        with patch(
+            "router.acc_store.pick_and_mark_ready_account",
+            return_value=_make_account("x"),
+        ) as mock_pick:
             picked = r.pick_with_fallback(tried=[])
             assert picked["id"] == "x"
+            mock_pick.assert_called_once_with(exclude_ids=[])
 
     def test_raises_when_no_accounts_at_all(self):
         r = AccountRouter()
-        with patch("router.acc_store.list_ready_accounts", return_value=[]):
+        with patch("router.acc_store.pick_and_mark_ready_account", return_value=None), patch(
+            "router.acc_store.list_ready_accounts", return_value=[]
+        ), patch("router.acc_store.list_accounts", return_value=[]):
             with pytest.raises(NoReadyAccountError):
                 r.pick_with_fallback()
 
@@ -121,36 +119,28 @@ class TestFallbackSimulation:
 
     def test_fallback_to_second_account_on_failure(self):
         """
-        Simulate: pick A → dispatch fails → mark A failed → pick B → success.
+        Simulate: pick A → dispatch fails → mark A failed → pick B.
         """
-        _dispatched = []
-        _failed = []
-
-        accounts_list = [_make_account("A"), _make_account("B")]
-
-        def mock_list_ready():
-            return [a for a in accounts_list if a["id"] not in _failed]
-
         r = AccountRouter()
-        tried = []
 
-        with patch("router.acc_store.list_ready_accounts", side_effect=mock_list_ready), \
-             patch("router.acc_store.mark_account_used") as mock_used, \
-             patch("router.acc_store.mark_account_failed") as _mock_failed:
+        def _pick_side_effect(exclude_ids=None):
+            exclude_ids = exclude_ids or []
+            if "A" not in exclude_ids:
+                return _make_account("A")
+            if "B" not in exclude_ids:
+                return _make_account("B")
+            return None
 
-            # First pick → A
-            acct = r.pick_with_fallback(tried=tried)
+        with patch(
+            "router.acc_store.pick_and_mark_ready_account",
+            side_effect=_pick_side_effect,
+        ) as mock_pick, patch("router.acc_store.mark_account_failed") as mock_failed:
+            acct = r.pick_with_fallback(tried=[])
             assert acct["id"] == "A"
-            tried.append("A")
 
-            # Simulate failure on A
-            _failed.append("A")
             r.mark_failed("A", "timeout")
+            mock_failed.assert_called_once()
 
-            # Second pick → B
-            acct = r.pick_with_fallback(tried=tried)
+            acct = r.pick_with_fallback(tried=["A"])
             assert acct["id"] == "B"
-
-            # Success on B
-            r.mark_success("B")
-            mock_used.assert_called_once_with("B")
+            assert mock_pick.call_count == 2

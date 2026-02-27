@@ -3,6 +3,7 @@ Unit tests for deployer secret synchronization workflow.
 """
 from __future__ import annotations
 
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -136,6 +137,7 @@ def test_deploy_account_health_429_disables_account(monkeypatch):
     assert row is not None
     assert row["status"] == "disabled"
     assert row["failure_type"] == "quota_exceeded"
+    assert (row["last_error"] or "").startswith("health_failed:")
 
 
 def test_deploy_account_requires_warmup_before_ready(monkeypatch):
@@ -165,6 +167,7 @@ def test_deploy_account_requires_warmup_before_ready(monkeypatch):
     assert row is not None
     assert row["status"] == "failed"
     assert row["failure_type"] in {"health_check_failed", "unknown"}
+    assert (row["last_error"] or "").startswith("warmup_failed:")
 
 
 def test_deploy_account_masks_secret_values_on_sync_failure(monkeypatch):
@@ -194,6 +197,7 @@ def test_deploy_account_masks_secret_values_on_sync_failure(monkeypatch):
     assert row is not None
     assert row["status"] == "disabled"
     assert row["failure_type"] == "config_failed"
+    assert (row["last_error"] or "").startswith("config_failed:")
     assert "huggingface" in (row["last_error"] or "")
     assert hf_token not in (row["last_error"] or "")
 
@@ -232,3 +236,42 @@ def test_deploy_account_retries_before_success(monkeypatch):
     assert row is not None
     assert row["status"] == "ready"
     assert deploy_attempts["count"] == 2
+
+
+def test_deploy_account_writes_onboarding_audit_steps(monkeypatch):
+    _set_required_shared_env(monkeypatch)
+    account_id = accounts.add_account("AuditTrail", "tok_id_a", "tok_secret_a")
+
+    def fake_run(cmd, **kwargs):
+        if len(cmd) >= 4 and cmd[3] == "secret":
+            return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+        if len(cmd) >= 4 and cmd[3] == "deploy":
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout="Deployed app at https://workspace-audit--gooni-api.modal.run",
+                stderr="",
+            )
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="unexpected")
+
+    monkeypatch.setattr(deployer.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        deployer,
+        "_wait_for_workspace_health",
+        lambda workspace, account_id=None, attempts=1, interval_seconds=0.0, cache_ttl_seconds=0: (True, None),
+    )
+    monkeypatch.setattr(deployer, "_trigger_workspace_warmup", lambda workspace, account_id=None: (True, None))
+
+    deployer.deploy_account(account_id)
+
+    with sqlite3.connect(deployer.acc_store.DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT action FROM admin_audit_log ORDER BY id ASC"
+        ).fetchall()
+    actions = [r[0] for r in rows]
+
+    assert "account_onboarding_started" in actions
+    assert "account_tokens_check_started" in actions
+    assert "account_deploy_started" in actions
+    assert "account_healthcheck_started" in actions
+    assert "account_ready" in actions

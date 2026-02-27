@@ -50,6 +50,18 @@ def test_allowed_fsm_pending_to_checking_to_ready():
     assert row["workspace"] == "ws-test"
 
 
+def test_allowed_fsm_with_deploying_stage():
+    account_id = accounts.add_account("DeployFlow", "tok_id", "tok_secret")
+    accounts.update_account_status(account_id, "checking")
+    accounts.update_account_status(account_id, "deploying")
+    accounts.update_account_status(account_id, "checking")
+    accounts.update_account_status(account_id, "ready", workspace="ws-deploy")
+    row = accounts.get_account(account_id)
+    assert row is not None
+    assert row["status"] == "ready"
+    assert row["workspace"] == "ws-deploy"
+
+
 def test_forbidden_ready_to_pending_transition():
     account_id = accounts.add_account("Test", "tok_id", "tok_secret")
     accounts.update_account_status(account_id, "checking")
@@ -80,9 +92,12 @@ def test_failed_can_recover_via_checking_then_ready():
 def test_list_ready_accounts_excludes_non_ready():
     pending_id = accounts.add_account("Pending", "tok_id", "tok_secret")
     checking_id = accounts.add_account("Checking", "tok_id", "tok_secret")
+    deploying_id = accounts.add_account("Deploying", "tok_id", "tok_secret")
     ready_id = accounts.add_account("Ready", "tok_id", "tok_secret")
 
     accounts.update_account_status(checking_id, "checking")
+    accounts.update_account_status(deploying_id, "checking")
+    accounts.update_account_status(deploying_id, "deploying")
     accounts.update_account_status(ready_id, "checking")
     accounts.update_account_status(ready_id, "ready")
 
@@ -90,6 +105,87 @@ def test_list_ready_accounts_excludes_non_ready():
     assert ready_id in ids
     assert pending_id not in ids
     assert checking_id not in ids
+    assert deploying_id not in ids
+
+
+def test_list_ready_accounts_orders_by_last_used_then_use_count():
+    never_used = accounts.add_account("NeverUsed", "tok_id", "tok_secret")
+    old_used = accounts.add_account("OldUsed", "tok_id", "tok_secret")
+    recent_used = accounts.add_account("RecentUsed", "tok_id", "tok_secret")
+
+    for aid in (never_used, old_used, recent_used):
+        accounts.update_account_status(aid, "checking")
+        accounts.update_account_status(aid, "ready")
+
+    with accounts._db() as conn:  # test-only setup
+        conn.execute(
+            "UPDATE modal_accounts SET use_count=?, last_used=? WHERE id=?",
+            (5, None, never_used),
+        )
+        conn.execute(
+            "UPDATE modal_accounts SET use_count=?, last_used=? WHERE id=?",
+            (10, "2026-01-01T00:00:00+00:00", old_used),
+        )
+        conn.execute(
+            "UPDATE modal_accounts SET use_count=?, last_used=? WHERE id=?",
+            (0, "2026-01-02T00:00:00+00:00", recent_used),
+        )
+
+    ids = [row["id"] for row in accounts.list_ready_accounts()]
+    assert ids[:3] == [never_used, old_used, recent_used]
+
+
+def test_list_ready_accounts_tiebreaks_by_use_count():
+    low_count = accounts.add_account("Low", "tok_id", "tok_secret")
+    high_count = accounts.add_account("High", "tok_id", "tok_secret")
+    same_last_used = "2026-01-01T00:00:00+00:00"
+
+    for aid in (low_count, high_count):
+        accounts.update_account_status(aid, "checking")
+        accounts.update_account_status(aid, "ready")
+
+    with accounts._db() as conn:  # test-only setup
+        conn.execute(
+            "UPDATE modal_accounts SET use_count=?, last_used=? WHERE id=?",
+            (1, same_last_used, low_count),
+        )
+        conn.execute(
+            "UPDATE modal_accounts SET use_count=?, last_used=? WHERE id=?",
+            (9, same_last_used, high_count),
+        )
+
+    ids = [row["id"] for row in accounts.list_ready_accounts()]
+    assert ids[:2] == [low_count, high_count]
+
+
+def test_pick_and_mark_ready_account_updates_usage_immediately():
+    account_id = accounts.add_account("PickMe", "tok_id", "tok_secret")
+    accounts.update_account_status(account_id, "checking")
+    accounts.update_account_status(account_id, "ready")
+
+    row_before = accounts.get_account(account_id)
+    assert row_before["use_count"] == 0
+    assert row_before["last_used"] is None
+
+    picked = accounts.pick_and_mark_ready_account()
+    assert picked is not None
+    assert picked["id"] == account_id
+
+    row_after = accounts.get_account(account_id)
+    assert row_after["use_count"] == 1
+    assert row_after["last_used"] is not None
+
+
+def test_pick_and_mark_ready_account_respects_exclude_ids():
+    a = accounts.add_account("A", "tok_a", "sec_a")
+    b = accounts.add_account("B", "tok_b", "sec_b")
+    for aid in (a, b):
+        accounts.update_account_status(aid, "checking")
+        accounts.update_account_status(aid, "ready")
+
+    picked = accounts.pick_and_mark_ready_account(exclude_ids=[a])
+    assert picked is not None
+    assert picked["id"] == b
 
 
 def test_disable_enable_cycle():

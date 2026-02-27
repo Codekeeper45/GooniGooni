@@ -1,11 +1,12 @@
 """
-AccountRouter — round-robin multi-account dispatch with failover.
+AccountRouter — multi-account dispatch with failover.
 
 Rotation rules:
   1. Only 'ready' accounts participate in rotation
-  2. Round-robin by (use_count ASC, last_used ASC)  — i.e. least recently / least used first
-  3. On account failure: mark it 'failed', try next candidate (up to MAX_FALLBACKS)
-  4. After MAX_FALLBACKS exhausted → raise NoReadyAccountError
+  2. Pick least-recently-used first (last_used ASC), tie-break by use_count ASC
+  3. Selection and usage mark are atomic (pick+mark on assignment)
+  4. On account failure: mark it 'failed', try next candidate (up to MAX_FALLBACKS)
+  5. After MAX_FALLBACKS exhausted → raise NoReadyAccountError
 
 The router is stateless at module level; it reads account state fresh from
 the DB on every pick() call so that status changes (new account goes ready,
@@ -33,7 +34,7 @@ class NoReadyAccountError(RuntimeError):
 
 
 class AccountRouter:
-    """Thread-safe round-robin account picker with failure tracking."""
+    """Thread-safe account picker with failure tracking."""
 
     @staticmethod
     def _no_ready_error() -> NoReadyAccountError:
@@ -61,16 +62,15 @@ class AccountRouter:
 
     def pick(self) -> dict:
         """
-        Return the most appropriate ready account (least-used / least-recently-used).
+        Return a ready account and mark it used immediately.
         Raises NoReadyAccountError if no ready accounts exist.
         """
         acc_store.recover_failed_accounts(cooldown_seconds=FAILED_ACCOUNT_COOLDOWN_SECONDS)
         with _router_lock:
-            candidates = acc_store.list_ready_accounts()
-        if not candidates:
+            picked = acc_store.pick_and_mark_ready_account()
+        if not picked:
             raise self._no_ready_error()
-        # list_ready_accounts already returns sorted by use_count ASC, last_used ASC
-        return candidates[0]
+        return picked
 
     def pick_account(self) -> Optional[dict]:
         """
@@ -83,8 +83,11 @@ class AccountRouter:
             return None
 
     def mark_success(self, account_id: str) -> None:
-        """Record a successful dispatch."""
-        acc_store.mark_account_used(account_id)
+        """
+        Compatibility no-op.
+        Account usage is already marked atomically during pick().
+        """
+        _ = account_id
 
     def mark_used(self, account_id: str) -> None:
         """Alias kept for compatibility with older call-sites/tests."""
@@ -110,14 +113,15 @@ class AccountRouter:
         tried = tried or []
         acc_store.recover_failed_accounts(cooldown_seconds=FAILED_ACCOUNT_COOLDOWN_SECONDS)
         with _router_lock:
+            picked = acc_store.pick_and_mark_ready_account(exclude_ids=tried)
+            if picked is not None:
+                return picked
             candidates = acc_store.list_ready_accounts()
-        # Exclude already-tried accounts
-        remaining = [c for c in candidates if c["id"] not in tried]
-        if not remaining:
-            if not candidates:
-                raise self._no_ready_error()
+        if not candidates:
+            raise self._no_ready_error()
+        if tried:
             raise NoReadyAccountError(f"All {len(tried)} ready account(s) failed for this request.")
-        return remaining[0]
+        raise NoReadyAccountError("No ready Modal accounts available.")
 
 
 # Singleton — import and use `router` directly

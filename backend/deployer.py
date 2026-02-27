@@ -23,6 +23,7 @@ from typing import Optional
 
 import accounts as acc_store
 import httpx
+from admin_security import _ensure_audit_table, _log_action
 
 # Path to the main Modal app file (relative to repo root)
 BACKEND_DIR = Path(__file__).parent
@@ -91,6 +92,44 @@ def _redact_sensitive_text(text: str, account: Optional[dict] = None) -> str:
 def _extract_subprocess_error(result: subprocess.CompletedProcess, account: Optional[dict]) -> str:
     raw = result.stderr or result.stdout or "Unknown deploy error"
     return _redact_sensitive_text(raw, account)[:500]
+
+
+def _normalize_onboarding_error(code: str, error: str, account: Optional[dict]) -> str:
+    redacted = _redact_sensitive_text(error or "Unknown error", account).strip()
+    if not redacted:
+        redacted = "Unknown error"
+    return f"{code}: {redacted[:460]}"
+
+
+def _audit_onboarding_step(
+    *,
+    account: Optional[dict],
+    action: str,
+    success: bool,
+    details: str = "",
+) -> None:
+    try:
+        _ensure_audit_table()
+        account_id = str((account or {}).get("id") or "unknown")
+        label = str((account or {}).get("label") or "")
+        payload = f"account_id={account_id}; label={label}"
+        if details:
+            payload = f"{payload}; {details}"
+        _log_action("system", action, payload[:500], success=success)
+    except Exception as exc:
+        logger.warning("Onboarding audit log failed: %s", exc)
+
+
+def _audit_failure_outcome(account_id: str, account: Optional[dict], reason_code: str) -> None:
+    row = acc_store.get_account(account_id)
+    status = (row or {}).get("status", "unknown")
+    action = "account_disabled" if status == "disabled" else "account_failed"
+    _audit_onboarding_step(
+        account=account,
+        action=action,
+        success=False,
+        details=f"reason={reason_code}; status={status}",
+    )
 
 
 def _deploy_backoff_seconds(attempt: int) -> float:
@@ -173,21 +212,65 @@ def deploy_account(account_id: str) -> None:
             pass  # best-effort; container-local reads remain consistent
 
     try:
+        _audit_onboarding_step(
+            account=account,
+            action="account_onboarding_started",
+            success=True,
+            details="step=started",
+        )
         acc_store.update_account_status(account_id, "checking", error=None)
         _commit_volume()
+        _audit_onboarding_step(
+            account=account,
+            action="account_tokens_check_started",
+            success=True,
+            details="step=tokens_check",
+        )
         try:
             _sync_workspace_secrets(env, account)
         except Exception as exc:
+            raw_error = str(exc)
+            detected_failure_type, _ = acc_store._classify_error(raw_error)
+            if detected_failure_type == "auth_failed":
+                error_code = "invalid_tokens"
+                failure_type = "auth_failed"
+            elif detected_failure_type == "config_failed":
+                error_code = "config_failed"
+                failure_type = "config_failed"
+            else:
+                error_code = "config_failed"
+                failure_type = detected_failure_type
+            normalized_error = _normalize_onboarding_error(error_code, raw_error, account)
             acc_store.mark_account_failed(
                 account_id,
-                _redact_sensitive_text(str(exc), account)[:500],
-                failure_type="config_failed",
+                normalized_error,
+                failure_type=failure_type,
             )
+            _audit_onboarding_step(
+                account=account,
+                action="account_tokens_check_failed",
+                success=False,
+                details=f"step=tokens_check; code={error_code}; error={normalized_error[:180]}",
+            )
+            _audit_failure_outcome(account_id, account, error_code)
             _commit_volume()
             return
+        _audit_onboarding_step(
+            account=account,
+            action="account_tokens_check_passed",
+            success=True,
+            details="step=tokens_check",
+        )
 
         workspace: Optional[str] = None
         deploy_error: Optional[str] = None
+        acc_store.update_account_status(account_id, "deploying", error=None)
+        _audit_onboarding_step(
+            account=account,
+            action="account_deploy_started",
+            success=True,
+            details="step=deploy",
+        )
         for attempt in range(1, ACCOUNT_DEPLOY_MAX_RETRIES + 1):
             try:
                 logger.info(
@@ -224,14 +307,35 @@ def deploy_account(account_id: str) -> None:
 
         if not workspace:
             error = deploy_error or "Deploy failed"
+            normalized_error = _normalize_onboarding_error("deploy_failed", error, account)
             failure_type, _ = acc_store._classify_error(error)
             acc_store.mark_account_failed(
                 account_id,
-                error,
+                normalized_error,
                 failure_type=failure_type,
             )
+            _audit_onboarding_step(
+                account=account,
+                action="account_deploy_failed",
+                success=False,
+                details=f"step=deploy; code=deploy_failed; error={normalized_error[:180]}",
+            )
+            _audit_failure_outcome(account_id, account, "deploy_failed")
             _commit_volume()
             return
+        acc_store.update_account_status(account_id, "checking", workspace=workspace, error=None)
+        _audit_onboarding_step(
+            account=account,
+            action="account_deploy_passed",
+            success=True,
+            details=f"step=deploy; workspace={workspace}",
+        )
+        _audit_onboarding_step(
+            account=account,
+            action="account_healthcheck_started",
+            success=True,
+            details=f"step=health_check; workspace={workspace}",
+        )
 
         ok, health_error = _wait_for_workspace_health(
             workspace,
@@ -241,43 +345,98 @@ def deploy_account(account_id: str) -> None:
         )
         if not ok:
             error = health_error or "health check failed"
+            normalized_error = _normalize_onboarding_error("health_failed", error, account)
             if _is_health_429_quota_error(error):
                 failure_type = "quota_exceeded"
             else:
                 failure_type, _ = acc_store._classify_error(error)
             acc_store.mark_account_failed(
                 account_id,
-                error,
+                normalized_error,
                 failure_type=failure_type,
             )
+            _audit_onboarding_step(
+                account=account,
+                action="account_healthcheck_failed",
+                success=False,
+                details=f"step=health_check; code=health_failed; error={normalized_error[:180]}",
+            )
+            _audit_failure_outcome(account_id, account, "health_failed")
             _commit_volume()
             return
+        _audit_onboarding_step(
+            account=account,
+            action="account_healthcheck_passed",
+            success=True,
+            details=f"step=health_check; workspace={workspace}",
+        )
+        _audit_onboarding_step(
+            account=account,
+            action="account_warmup_started",
+            success=True,
+            details=f"step=warmup; workspace={workspace}",
+        )
 
         warmup_ok, warmup_error = _trigger_workspace_warmup(workspace, account_id=account_id)
         if ACCOUNT_WARMUP_REQUIRED and not warmup_ok:
             error = warmup_error or "Required warmup failed"
+            normalized_error = _normalize_onboarding_error("warmup_failed", error, account)
             failure_type, _ = acc_store._classify_error(error)
             acc_store.mark_account_failed(
                 account_id,
-                error,
+                normalized_error,
                 failure_type=failure_type,
             )
+            _audit_onboarding_step(
+                account=account,
+                action="account_warmup_failed",
+                success=False,
+                details=f"step=warmup; code=warmup_failed; error={normalized_error[:180]}",
+            )
+            _audit_failure_outcome(account_id, account, "warmup_failed")
             _commit_volume()
             return
         if not warmup_ok:
             logger.warning("workspace optional warmup failed: workspace=%s error=%s", workspace, warmup_error)
+            _audit_onboarding_step(
+                account=account,
+                action="account_warmup_failed",
+                success=False,
+                details=f"step=warmup_optional; workspace={workspace}; error={str(warmup_error)[:180]}",
+            )
+        else:
+            _audit_onboarding_step(
+                account=account,
+                action="account_warmup_passed",
+                success=True,
+                details=f"step=warmup; workspace={workspace}",
+            )
 
         acc_store.update_account_status(account_id, "ready", workspace=workspace, error=None)
+        _audit_onboarding_step(
+            account=account,
+            action="account_ready",
+            success=True,
+            details=f"workspace={workspace}",
+        )
         _commit_volume()
 
     except Exception as exc:
-        error = _redact_sensitive_text(str(exc), account)[:500]
-        failure_type, _ = acc_store._classify_error(error)
+        raw_error = str(exc)
+        error = _normalize_onboarding_error("deploy_failed", raw_error, account)
+        failure_type, _ = acc_store._classify_error(raw_error)
         acc_store.mark_account_failed(
             account_id,
             error,
             failure_type=failure_type,
         )
+        _audit_onboarding_step(
+            account=account,
+            action="account_onboarding_failed",
+            success=False,
+            details=f"code=deploy_failed; error={error[:180]}",
+        )
+        _audit_failure_outcome(account_id, account, "deploy_failed")
         _commit_volume()
 
 

@@ -22,10 +22,11 @@ _lock = threading.Lock()
 _ENC_PREFIX = "enc::"
 logger = logging.getLogger("accounts")
 
-_ALLOWED_STATUSES = {"pending", "checking", "ready", "failed", "disabled"}
+_ALLOWED_STATUSES = {"pending", "checking", "deploying", "ready", "failed", "disabled"}
 _ALLOWED_TRANSITIONS = {
     "pending": {"pending", "checking", "failed", "disabled"},
-    "checking": {"checking", "ready", "failed", "disabled"},
+    "checking": {"checking", "deploying", "ready", "failed", "disabled"},
+    "deploying": {"deploying", "checking", "ready", "failed", "disabled"},
     "ready": {"ready", "checking", "failed", "disabled"},
     "failed": {"failed", "checking", "disabled"},
     "disabled": {"disabled", "ready", "checking"},
@@ -208,9 +209,60 @@ def list_ready_accounts() -> list[dict]:
     """
     with _db() as conn:
         rows = conn.execute(
-            "SELECT * FROM modal_accounts WHERE status='ready' ORDER BY use_count ASC, last_used ASC"
+            """
+            SELECT *
+            FROM modal_accounts
+            WHERE status='ready'
+            ORDER BY last_used ASC, use_count ASC, added_at ASC
+            """
         ).fetchall()
     return [_to_public(r) for r in rows]
+
+
+def pick_and_mark_ready_account(exclude_ids: Optional[list[str]] = None) -> Optional[dict]:
+    """
+    Atomically pick one ready account and immediately mark it as used.
+
+    Selection order:
+      1) Oldest last_used first (NULL means never used and is treated as oldest)
+      2) On tie, lower use_count first
+      3) On tie, older added_at first for deterministic ordering
+    """
+    exclude_ids = exclude_ids or []
+    where = "status='ready'"
+    params: list[str] = []
+    if exclude_ids:
+        placeholders = ",".join("?" for _ in exclude_ids)
+        where += f" AND id NOT IN ({placeholders})"
+        params.extend(exclude_ids)
+
+    with _lock, _db() as conn:
+        row = conn.execute(
+            f"""
+            SELECT *
+            FROM modal_accounts
+            WHERE {where}
+            ORDER BY last_used ASC, use_count ASC, added_at ASC
+            LIMIT 1
+            """,
+            params,
+        ).fetchone()
+        if row is None:
+            return None
+
+        conn.execute(
+            """
+            UPDATE modal_accounts
+            SET last_used=?, use_count=use_count+1
+            WHERE id=?
+            """,
+            (_now_iso(), row["id"]),
+        )
+        updated = conn.execute(
+            "SELECT * FROM modal_accounts WHERE id=?",
+            (row["id"],),
+        ).fetchone()
+    return _to_public(updated) if updated else None
 
 
 def update_account_status(

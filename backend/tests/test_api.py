@@ -307,7 +307,7 @@ class TestAdminSessionContracts:
         assert list_r.status_code == 200, list_r.text
         payload = list_r.json()
         assert "accounts" in payload
-        allowed_statuses = {"pending", "checking", "ready", "failed", "disabled"}
+        allowed_statuses = {"pending", "checking", "deploying", "ready", "failed", "disabled"}
         for row in payload["accounts"]:
             assert row.get("status") in allowed_statuses
 

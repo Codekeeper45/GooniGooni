@@ -42,6 +42,7 @@ class SessionStatus(str, Enum):
 class AccountStatus(str, Enum):
     pending = "pending"
     checking = "checking"
+    deploying = "deploying"
     ready = "ready"
     failed = "failed"
     disabled = "disabled"
