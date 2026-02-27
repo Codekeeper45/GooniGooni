@@ -103,6 +103,17 @@ export class InferenceConfigManager {
     return this.getAllModels().filter((m) => m.type === type);
   }
 
+  // Backward-compat helper used by ControlPanel summary UI.
+  getModelLabel(type: GenerationType, modelId: string): string {
+    const model = this.getModel(modelId as ModelId);
+    if (model?.name) return model.name;
+
+    const fallback = String(modelId || "").trim();
+    if (fallback) return fallback;
+
+    return type === "video" ? "Video model" : "Image model";
+  }
+
   // ─── Get modes for model ────────────────────────────────────────────────────
   getModesForModel(modelId: ModelId): Record<string, ModeConfig> {
     const model = this.getModel(modelId);
