@@ -219,28 +219,26 @@ def get_admin_auth(action: str = "unknown"):
         _rate_check(ip)
 
         expected = _os.environ.get("ADMIN_KEY", "")
-
-        if expected and len(expected) < 16:
-            logger.error("ADMIN_KEY is too short (<%d chars)", 16)
-            _log_action(ip, action, "key_too_short", success=False)
-            raise _admin_error(
-                code="admin_misconfigured",
-                detail="Admin key is configured with invalid length.",
-                user_action="Contact support and rotate ADMIN_KEY.",
-                status_code=status.HTTP_403_FORBIDDEN,
-            )
-
-        if not expected:
-            _log_action(ip, action, "no_key_configured", success=False)
-            raise _admin_error(
-                code="admin_misconfigured",
-                detail="Admin is not configured.",
-                user_action="Configure ADMIN_KEY in backend secrets.",
-                status_code=status.HTTP_403_FORBIDDEN,
-            )
-
         # Backward-compatible path: explicit header auth.
+        # This path still requires ADMIN_KEY.
         if x_admin_key:
+            if expected and len(expected) < 16:
+                logger.error("ADMIN_KEY is too short (<%d chars)", 16)
+                _log_action(ip, action, "key_too_short", success=False)
+                raise _admin_error(
+                    code="admin_misconfigured",
+                    detail="Admin key is configured with invalid length.",
+                    user_action="Contact support and rotate ADMIN_KEY.",
+                    status_code=status.HTTP_403_FORBIDDEN,
+                )
+            if not expected:
+                _log_action(ip, action, "no_key_configured_for_header_auth", success=False)
+                raise _admin_error(
+                    code="admin_misconfigured",
+                    detail="Header-based admin key auth is not configured.",
+                    user_action="Configure ADMIN_KEY or use login/password session.",
+                    status_code=status.HTTP_403_FORBIDDEN,
+                )
             if not hmac.compare_digest(x_admin_key.encode(), expected.encode()):
                 _log_action(ip, action, "bad_key_attempt", success=False)
                 logger.warning("Admin auth failure for action=%s ip=%s", action, ip)
@@ -254,6 +252,7 @@ def get_admin_auth(action: str = "unknown"):
             return ip
 
         # Preferred path: admin session cookie.
+        # This path does NOT depend on ADMIN_KEY and supports login/password mode.
         token = request.cookies.get(ADMIN_SESSION_COOKIE, "")
         if not token:
             _log_action(ip, action, "missing_admin_session", success=False)

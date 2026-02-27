@@ -89,6 +89,20 @@ def test_get_admin_auth_accepts_cookie_session(monkeypatch):
     assert ip == "127.0.0.1"
 
 
+def test_get_admin_auth_cookie_session_does_not_require_admin_key(monkeypatch):
+    import storage
+    from admin_security import ADMIN_SESSION_COOKIE, get_admin_auth
+
+    monkeypatch.delenv("ADMIN_KEY", raising=False)
+    token, _ = storage.create_admin_session(idle_timeout_seconds=3600)
+
+    dep = get_admin_auth("list_accounts")
+    req = DummyRequest(cookies={ADMIN_SESSION_COOKIE: token})
+
+    ip = asyncio.run(dep(req, x_admin_key=""))
+    assert ip == "127.0.0.1"
+
+
 def test_get_admin_auth_requires_cookie_or_header(monkeypatch):
     from admin_security import get_admin_auth
 
