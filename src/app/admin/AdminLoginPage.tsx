@@ -3,7 +3,6 @@ import { useNavigate } from "react-router";
 import {
   clearSession,
   createAdminSession,
-  createHeaderSession,
   ensureAdminSession,
   getSession,
 } from "./adminSession";
@@ -12,9 +11,10 @@ export function AdminLoginPage() {
   const nav = useNavigate();
   const saved = getSession();
   const [apiUrl, setApiUrl] = useState(saved?.apiUrl ?? "");
-  const [adminKey, setAdminKey] = useState("");
+  const [login, setLogin] = useState("admin");
+  const [password, setPassword] = useState("");
   const [error, setError] = useState("");
-  const [showKey, setShowKey] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
@@ -30,28 +30,24 @@ export function AdminLoginPage() {
     setError("");
 
     const url = apiUrl.trim().replace(/\/$/, "");
-    const key = adminKey.trim();
+    const userLogin = login.trim();
+    const userPassword = password;
 
-    if (!url || !key) {
-      setError("Заполните оба поля");
+    if (!url || !userLogin || !userPassword) {
+      setError("Fill all fields");
       return;
     }
     if (!url.startsWith("https://") && !url.startsWith("http://")) {
-      setError("URL должен начинаться с http:// или https://");
+      setError("URL must start with http:// or https://");
       return;
     }
 
     try {
       setLoading(true);
-      try {
-        await createAdminSession(url, key);
-      } catch {
-        // Fallback mode: stateless admin auth via x-admin-key header.
-        await createHeaderSession(url, key);
-      }
+      await createAdminSession(url, userLogin, userPassword);
       nav("/admin/dashboard");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Ошибка авторизации");
+      setError(err instanceof Error ? err.message : "Authentication failed");
     } finally {
       setLoading(false);
     }
@@ -88,7 +84,7 @@ export function AdminLoginPage() {
           gap: 6,
         }}
       >
-        ← На главную
+        Back to app
       </button>
 
       <div
@@ -104,12 +100,12 @@ export function AdminLoginPage() {
         }}
       >
         <div style={{ textAlign: "center", marginBottom: 36 }}>
-          <div style={{ fontSize: 40, marginBottom: 8 }}>🛡️</div>
+          <div style={{ fontSize: 40, marginBottom: 8 }}>Admin</div>
           <h1 style={{ color: "#fff", margin: 0, fontSize: 24, fontWeight: 700 }}>
             Gooni Admin
           </h1>
           <p style={{ color: "rgba(255,255,255,0.45)", margin: "6px 0 0", fontSize: 14 }}>
-            Управление аккаунтами и деплоем
+            Account and deploy control panel
           </p>
         </div>
 
@@ -124,7 +120,7 @@ export function AdminLoginPage() {
                 fontWeight: 600,
               }}
             >
-              🌐 Modal Backend URL
+              Modal Backend URL
             </label>
             <input
               type="url"
@@ -132,6 +128,39 @@ export function AdminLoginPage() {
               onChange={(e) => setApiUrl(e.target.value)}
               placeholder="https://workspace--gooni-api.modal.run"
               autoComplete="off"
+              required
+              style={{
+                width: "100%",
+                boxSizing: "border-box",
+                padding: "12px 14px",
+                background: "rgba(255,255,255,0.08)",
+                border: "1px solid rgba(255,255,255,0.18)",
+                borderRadius: 10,
+                color: "#fff",
+                fontSize: 14,
+                outline: "none",
+              }}
+            />
+          </div>
+
+          <div style={{ marginBottom: 18 }}>
+            <label
+              style={{
+                display: "block",
+                color: "rgba(255,255,255,0.7)",
+                fontSize: 13,
+                marginBottom: 6,
+                fontWeight: 600,
+              }}
+            >
+              Login
+            </label>
+            <input
+              type="text"
+              value={login}
+              onChange={(e) => setLogin(e.target.value)}
+              placeholder="admin"
+              autoComplete="username"
               required
               style={{
                 width: "100%",
@@ -157,14 +186,14 @@ export function AdminLoginPage() {
                 fontWeight: 600,
               }}
             >
-              🔑 Admin Key
+              Password
             </label>
             <div style={{ position: "relative" }}>
               <input
-                type={showKey ? "text" : "password"}
-                value={adminKey}
-                onChange={(e) => setAdminKey(e.target.value)}
-                placeholder="Ваш ADMIN_KEY"
+                type={showPassword ? "text" : "password"}
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="Enter admin password"
                 autoComplete="current-password"
                 required
                 style={{
@@ -181,7 +210,7 @@ export function AdminLoginPage() {
               />
               <button
                 type="button"
-                onClick={() => setShowKey((v) => !v)}
+                onClick={() => setShowPassword((v) => !v)}
                 style={{
                   position: "absolute",
                   right: 12,
@@ -191,11 +220,11 @@ export function AdminLoginPage() {
                   border: "none",
                   cursor: "pointer",
                   color: "rgba(255,255,255,0.5)",
-                  fontSize: 16,
+                  fontSize: 14,
                   padding: 0,
                 }}
               >
-                {showKey ? "🙈" : "👁️"}
+                {showPassword ? "Hide" : "Show"}
               </button>
             </div>
           </div>
@@ -212,7 +241,7 @@ export function AdminLoginPage() {
                 fontSize: 13,
               }}
             >
-              ⚠️ {error}
+              {error}
             </div>
           )}
 
@@ -234,12 +263,12 @@ export function AdminLoginPage() {
               boxShadow: "0 4px 16px rgba(124,58,237,0.4)",
             }}
           >
-            {loading ? "Проверка..." : "Войти в панель"}
+            {loading ? "Checking..." : "Sign in"}
           </button>
         </form>
 
         <p style={{ textAlign: "center", marginTop: 24, color: "rgba(255,255,255,0.3)", fontSize: 12 }}>
-          Ключ не сохраняется в браузере, хранится только сессионная cookie
+          Credentials are validated on backend. Browser keeps only session cookie.
         </p>
       </div>
     </div>

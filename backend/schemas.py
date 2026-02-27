@@ -287,6 +287,11 @@ class AdminSessionStateResponse(BaseModel):
     last_activity_at: Optional[datetime] = None
 
 
+class AdminLoginRequest(BaseModel):
+    login: str = Field(..., min_length=1, max_length=128)
+    password: str = Field(..., min_length=1, max_length=512)
+
+
 class ErrorResponse(BaseModel):
     code: str
     detail: str

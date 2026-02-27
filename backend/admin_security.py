@@ -8,6 +8,7 @@ Security helpers for admin endpoints:
 from __future__ import annotations
 
 import hmac
+import hashlib
 import logging
 import sqlite3
 import threading
@@ -46,6 +47,54 @@ def _admin_error(
         status_code=status_code,
         detail={"code": code, "detail": detail, "user_action": user_action},
     )
+
+
+def _verify_pbkdf2_sha256(password: str, stored_hash: str) -> bool:
+    """
+    Verify hash format: pbkdf2_sha256$<iterations>$<salt>$<hex_digest>
+    """
+    try:
+        scheme, iterations_raw, salt, expected_hex = stored_hash.split("$", 3)
+    except ValueError:
+        return False
+    if scheme != "pbkdf2_sha256":
+        return False
+    try:
+        iterations = int(iterations_raw)
+    except ValueError:
+        return False
+    if iterations < 100_000 or iterations > 10_000_000:
+        return False
+    derived = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt.encode("utf-8"),
+        iterations,
+    ).hex()
+    return hmac.compare_digest(derived, expected_hex)
+
+
+def _verify_admin_password(password: str, stored_hash: str) -> bool:
+    """
+    Verify admin password against configured hash.
+    Supported formats:
+      - pbkdf2_sha256$<iterations>$<salt>$<hex_digest>
+      - bcrypt ($2a/$2b/$2y) when bcrypt is installed
+    """
+    if not stored_hash:
+        return False
+    if stored_hash.startswith("pbkdf2_sha256$"):
+        return _verify_pbkdf2_sha256(password, stored_hash)
+    if stored_hash.startswith("$2a$") or stored_hash.startswith("$2b$") or stored_hash.startswith("$2y$"):
+        try:
+            import bcrypt
+        except Exception:
+            return False
+        try:
+            return bool(bcrypt.checkpw(password.encode("utf-8"), stored_hash.encode("utf-8")))
+        except Exception:
+            return False
+    return False
 
 
 def _ensure_rate_limit_table(conn: sqlite3.Connection) -> None:
@@ -267,3 +316,70 @@ def verify_admin_key_header(action: str = "admin_session_create"):
         return ip
 
     return _dep
+
+
+def verify_admin_login_password(request: Request, login: str, password: str, action: str = "admin_login") -> str:
+    """
+    Validate admin login/password against env-configured credentials.
+    Required env:
+      - ADMIN_LOGIN
+      - ADMIN_PASSWORD_HASH
+    """
+    import os as _os
+
+    ip = _get_client_ip(request)
+    _rate_check(ip)
+
+    expected_login = _os.environ.get("ADMIN_LOGIN", "")
+    expected_password_hash = _os.environ.get("ADMIN_PASSWORD_HASH", "")
+
+    # Transitional fallback for old setups: allow ADMIN_KEY as password for login=admin.
+    # This keeps existing deployments reachable until ADMIN_LOGIN/ADMIN_PASSWORD_HASH
+    # are configured.
+    legacy_key = _os.environ.get("ADMIN_KEY", "")
+    legacy_mode = bool(not expected_login and not expected_password_hash and legacy_key)
+
+    if not expected_login and not legacy_mode:
+        _log_action(ip, action, "admin_login_misconfigured", success=False)
+        raise _admin_error(
+            code="admin_misconfigured",
+            detail="Admin login is not configured.",
+            user_action="Configure ADMIN_LOGIN and ADMIN_PASSWORD_HASH in backend secrets.",
+            status_code=status.HTTP_403_FORBIDDEN,
+        )
+
+    if not expected_password_hash and not legacy_mode:
+        _log_action(ip, action, "admin_password_misconfigured", success=False)
+        raise _admin_error(
+            code="admin_misconfigured",
+            detail="Admin password hash is not configured.",
+            user_action="Configure ADMIN_PASSWORD_HASH in backend secrets.",
+            status_code=status.HTTP_403_FORBIDDEN,
+        )
+
+    if not login or not password:
+        _log_action(ip, action, "empty_credentials", success=False)
+        raise _admin_error(
+            code="admin_credentials_invalid",
+            detail="Invalid admin credentials.",
+            user_action="Check login and password, then retry.",
+            status_code=status.HTTP_403_FORBIDDEN,
+        )
+
+    if legacy_mode:
+        login_ok = hmac.compare_digest(login.encode("utf-8"), b"admin")
+        password_ok = hmac.compare_digest(password.encode("utf-8"), legacy_key.encode("utf-8"))
+    else:
+        login_ok = hmac.compare_digest(login.encode("utf-8"), expected_login.encode("utf-8"))
+        password_ok = _verify_admin_password(password, expected_password_hash)
+    if not (login_ok and password_ok):
+        _log_action(ip, action, "bad_login_password", success=False)
+        raise _admin_error(
+            code="admin_credentials_invalid",
+            detail="Invalid admin credentials.",
+            user_action="Check login and password, then retry.",
+            status_code=status.HTTP_403_FORBIDDEN,
+        )
+
+    _log_action(ip, action, "auth=login_password", success=True)
+    return ip

@@ -4,6 +4,7 @@ Unit tests for backend/admin_security.py
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import sys
 from pathlib import Path
 
@@ -134,3 +135,51 @@ def test_rate_limit_precedence_over_bad_key(monkeypatch):
 
     # Current policy: throttle check runs first and deterministically returns 429.
     assert exc.value.status_code == 429
+
+
+def _make_pbkdf2_hash(password: str, salt: str = "salt123", iterations: int = 200000) -> str:
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt.encode("utf-8"),
+        iterations,
+    ).hex()
+    return f"pbkdf2_sha256${iterations}${salt}${digest}"
+
+
+def test_verify_admin_login_password_accepts_pbkdf2(monkeypatch):
+    from admin_security import verify_admin_login_password
+
+    monkeypatch.setenv("ADMIN_LOGIN", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD_HASH", _make_pbkdf2_hash("secret-pass"))
+    monkeypatch.delenv("ADMIN_KEY", raising=False)
+
+    req = DummyRequest()
+    ip = verify_admin_login_password(req, "admin", "secret-pass")
+    assert ip == "127.0.0.1"
+
+
+def test_verify_admin_login_password_rejects_invalid(monkeypatch):
+    from admin_security import verify_admin_login_password
+
+    monkeypatch.setenv("ADMIN_LOGIN", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD_HASH", _make_pbkdf2_hash("secret-pass"))
+    monkeypatch.delenv("ADMIN_KEY", raising=False)
+
+    req = DummyRequest()
+    with pytest.raises(HTTPException) as exc:
+        verify_admin_login_password(req, "admin", "wrong-pass")
+    assert exc.value.status_code == 403
+    assert exc.value.detail["code"] == "admin_credentials_invalid"
+
+
+def test_verify_admin_login_password_legacy_mode(monkeypatch):
+    from admin_security import verify_admin_login_password
+
+    monkeypatch.delenv("ADMIN_LOGIN", raising=False)
+    monkeypatch.delenv("ADMIN_PASSWORD_HASH", raising=False)
+    monkeypatch.setenv("ADMIN_KEY", "x" * 24)
+
+    req = DummyRequest()
+    ip = verify_admin_login_password(req, "admin", "x" * 24)
+    assert ip == "127.0.0.1"

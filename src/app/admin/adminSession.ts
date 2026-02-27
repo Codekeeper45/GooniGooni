@@ -63,13 +63,16 @@ async function parseError(response: Response): Promise<string> {
   return `HTTP ${response.status}`;
 }
 
-export async function createAdminSession(apiUrl: string, adminKey: string): Promise<void> {
+export async function createAdminSession(
+  apiUrl: string,
+  login: string,
+  password: string,
+): Promise<void> {
   const base = normalizeApiUrl(apiUrl);
-  const response = await fetch(`${base}/admin/session`, {
+  const response = await fetch(`${base}/admin/login`, {
     method: "POST",
-    headers: {
-      "x-admin-key": adminKey,
-    },
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ login, password }),
     credentials: "include",
   });
   if (!response.ok) {

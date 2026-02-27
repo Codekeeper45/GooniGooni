@@ -567,6 +567,7 @@ def fastapi_app():
     from router import router as account_router, NoReadyAccountError, MAX_FALLBACKS
     from deployer import deploy_account_async, deploy_all_accounts
     from schemas import (
+        AdminLoginRequest,
         DeleteResponse,
         GalleryResponse,
         GenerateRequest,
@@ -1440,11 +1441,35 @@ def fastapi_app():
     from admin_security import (
         _ensure_audit_table,
         get_admin_auth,
+        verify_admin_login_password,
         verify_admin_key_header,
         ADMIN_SESSION_COOKIE,
     )
 
     _ensure_audit_table()
+
+    @api.post("/admin/login", status_code=status.HTTP_204_NO_CONTENT, tags=["Admin"])
+    async def admin_login(
+        payload: AdminLoginRequest,
+        request: Request,
+        response: Response,
+    ):
+        verify_admin_login_password(
+            request,
+            payload.login,
+            payload.password,
+            action="admin_login",
+        )
+        results_vol.reload()
+        token, _ = storage.create_admin_session(idle_timeout_seconds=admin_idle_timeout_seconds)
+        results_vol.commit()
+        _set_session_cookie(
+            response=response,
+            key=ADMIN_SESSION_COOKIE,
+            value=token,
+            max_age=admin_idle_timeout_seconds,
+        )
+        return None
 
     @api.post("/admin/session", status_code=status.HTTP_204_NO_CONTENT, tags=["Admin"])
     async def create_admin_session(
