@@ -53,6 +53,55 @@ const statusIcons: Record<string, string> = {
   disabled: "OFF",
 };
 
+type AdminErrorPayload = {
+  code?: string;
+  detail: string;
+};
+
+const ADMIN_SESSION_ERROR_CODES = new Set([
+  "admin_session_missing",
+  "admin_session_expired",
+  "admin_session_invalid",
+]);
+
+async function readAdminError(response: Response): Promise<AdminErrorPayload> {
+  try {
+    const payload = await response.json();
+    const detailNode = payload?.detail;
+    if (detailNode && typeof detailNode === "object") {
+      return {
+        code: typeof detailNode.code === "string" ? detailNode.code : undefined,
+        detail:
+          typeof detailNode.detail === "string"
+            ? detailNode.detail
+            : `HTTP ${response.status}`,
+      };
+    }
+    if (typeof detailNode === "string") {
+      return { detail: detailNode };
+    }
+  } catch {
+    // ignore parse errors
+  }
+  return { detail: `HTTP ${response.status}` };
+}
+
+async function handleAuthFailureIfNeeded(
+  response: Response,
+  nav: ReturnType<typeof useNavigate>,
+): Promise<boolean> {
+  if (response.status !== 401 && response.status !== 403) {
+    return false;
+  }
+  const error = await readAdminError(response);
+  if (error.code && ADMIN_SESSION_ERROR_CODES.has(error.code)) {
+    clearSession();
+    nav("/admin");
+    return true;
+  }
+  return false;
+}
+
 function StatusBadge({ status }: { status: string }) {
   const color = statusColors[status] ?? "#6b7280";
   return (
@@ -108,16 +157,19 @@ export function AdminDashboard() {
   const fetchAccounts = useCallback(async () => {
     try {
       const res = await adminFetch("/admin/accounts");
-      if (res.status === 401 || res.status === 403) {
-        clearSession();
-        nav("/admin");
+      if (await handleAuthFailureIfNeeded(res, nav)) {
+        return;
+      }
+      if (!res.ok) {
+        const error = await readAdminError(res);
+        showToast(error.detail, false);
         return;
       }
       const data = await res.json();
       setAccounts(data.accounts ?? []);
       setOps(data.diagnostics ?? null);
     } catch {
-      // network error
+      showToast("Network error while loading accounts.", false);
     }
   }, [nav]);
 
@@ -148,11 +200,15 @@ export function AdminDashboard() {
   async function doAction(path: string, method = "POST", okMessage = "Done") {
     try {
       const res = await adminFetch(path, { method });
+      if (await handleAuthFailureIfNeeded(res, nav)) {
+        return;
+      }
       if (res.ok) {
         showToast(okMessage || "Done");
         await fetchAccounts();
       } else {
-        showToast(`Error ${res.status}`, false);
+        const error = await readAdminError(res);
+        showToast(error.detail, false);
       }
     } catch {
       showToast("Network error", false);
@@ -171,6 +227,9 @@ export function AdminDashboard() {
         method: "POST",
         body: JSON.stringify({ label, token_id: tokenId, token_secret: tokenSecret }),
       }, 60000);
+      if (await handleAuthFailureIfNeeded(res, nav)) {
+        return;
+      }
       if (res.ok) {
         showToast("Account added. Health check started.");
         setLabel("");
@@ -178,9 +237,8 @@ export function AdminDashboard() {
         setTokenSecret("");
         await fetchAccounts();
       } else {
-        const payload = await res.json().catch(() => ({}));
-        const detail = payload?.detail?.detail || payload?.detail || res.status;
-        showToast(`Error: ${detail}`, false);
+        const error = await readAdminError(res);
+        showToast(`Error: ${error.detail}`, false);
       }
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") {
