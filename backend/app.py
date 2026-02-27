@@ -47,6 +47,11 @@ def _resolve_video_gpu() -> str:
 
 
 VIDEO_GPU_CLASS = _resolve_video_gpu()
+IMAGE_GPU_CLASS = os.environ.get("IMAGE_GPU", "A10G").strip() or "A10G"
+VIDEO_FUNCTION_TIMEOUT = int(os.environ.get("VIDEO_TIMEOUT", "900"))
+IMAGE_FUNCTION_TIMEOUT = int(os.environ.get("IMAGE_TIMEOUT", "300"))
+VIDEO_FUNCTION_CPU = float(os.environ.get("VIDEO_CPU", "4"))
+IMAGE_FUNCTION_CPU = float(os.environ.get("IMAGE_CPU", "4"))
 
 # в”Ђв”Ђв”Ђ Modal Secrets в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 # Create via: modal secret create gooni-api-key API_KEY=your-secret-key
@@ -283,10 +288,16 @@ def _execute_video_generation(
             task_id,
             "processing",
             progress=10,
-            stage="loading_pipeline",
+            stage="model_resolve",
             stage_detail=f"model={model_id_key}",
             lane_mode=lane_mode,
             fallback_reason=fallback_reason,
+        )
+        _record_event(
+            "pipeline_resolve_started",
+            task_id=task_id,
+            model=model_id_key,
+            lane_mode=lane_mode,
         )
         pipeline = _get_video_pipeline(
             model_id_key,
@@ -295,7 +306,41 @@ def _execute_video_generation(
         _update_status(
             task_id,
             "processing",
-            progress=25,
+            progress=35,
+            stage="pipeline_materialize",
+            stage_detail=f"model={model_id_key}",
+            lane_mode=lane_mode,
+            fallback_reason=fallback_reason,
+        )
+        _record_event(
+            "pipeline_ready",
+            task_id=task_id,
+            model=model_id_key,
+            lane_mode=lane_mode,
+        )
+
+        if request_dict.get("_warmup_only"):
+            _update_status(
+                task_id,
+                "done",
+                progress=100,
+                stage="completed",
+                stage_detail="warmup_only",
+                lane_mode=lane_mode,
+                fallback_reason=fallback_reason,
+            )
+            _record_event(
+                "lane_warmed",
+                task_id=task_id,
+                model=model_id_key,
+                lane_mode=lane_mode,
+            )
+            return {"warmed": True}
+
+        _update_status(
+            task_id,
+            "processing",
+            progress=60,
             stage="inference",
             stage_detail=f"model={model_id_key}",
             lane_mode=lane_mode,
@@ -303,6 +348,15 @@ def _execute_video_generation(
         )
 
         result_path, preview_path = pipeline.generate(request_dict, task_id, RESULTS_PATH)
+        _update_status(
+            task_id,
+            "processing",
+            progress=90,
+            stage="artifact_write",
+            stage_detail="persisting_result",
+            lane_mode=lane_mode,
+            fallback_reason=fallback_reason,
+        )
         _ensure_artifacts_exist(result_path, preview_path)
         _update_status(
             task_id,
@@ -361,9 +415,10 @@ def _execute_video_generation(
 @app.function(
     image=video_image,
     gpu=VIDEO_GPU_CLASS,
+    cpu=VIDEO_FUNCTION_CPU,
     min_containers=int(os.environ.get("VIDEO_DEGRADED_MIN_CONTAINERS", "0")),
     max_containers=int(os.environ.get("VIDEO_CONCURRENCY", "1")),
-    timeout=900,
+    timeout=VIDEO_FUNCTION_TIMEOUT,
     volumes=_volumes,
     secrets=[api_secret, hf_secret],
 )
@@ -380,6 +435,7 @@ def run_video_generation(request_dict: dict, task_id: str) -> dict:
 @app.function(
     image=video_image,
     gpu=VIDEO_GPU_CLASS,
+    cpu=VIDEO_FUNCTION_CPU,
     min_containers=int(
         os.environ.get(
             "VIDEO_ANISORA_MIN_CONTAINERS",
@@ -392,7 +448,7 @@ def run_video_generation(request_dict: dict, task_id: str) -> dict:
             os.environ.get("VIDEO_LANE_WARM_MAX_CONTAINERS", "1"),
         )
     ),
-    timeout=900,
+    timeout=VIDEO_FUNCTION_TIMEOUT,
     volumes=_volumes,
     secrets=[api_secret, hf_secret],
 )
@@ -409,6 +465,7 @@ def run_anisora_generation(request_dict: dict, task_id: str) -> dict:
 @app.function(
     image=video_image,
     gpu=VIDEO_GPU_CLASS,
+    cpu=VIDEO_FUNCTION_CPU,
     min_containers=int(
         os.environ.get(
             "VIDEO_PHR00T_MIN_CONTAINERS",
@@ -421,7 +478,7 @@ def run_anisora_generation(request_dict: dict, task_id: str) -> dict:
             os.environ.get("VIDEO_LANE_WARM_MAX_CONTAINERS", "1"),
         )
     ),
-    timeout=900,
+    timeout=VIDEO_FUNCTION_TIMEOUT,
     volumes=_volumes,
     secrets=[api_secret, hf_secret],
 )
@@ -435,55 +492,209 @@ def run_phr00t_generation(request_dict: dict, task_id: str) -> dict:
     )
 
 
-# в”Ђв”Ђв”Ђ Image Generation Function в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+# в”Ђв”Ђв”Ђ Image Generation Functions в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 
-@app.function(
-    image=image_gen_image,
-    gpu=os.environ.get("IMAGE_GPU", "A10G"),
-    min_containers=int(os.environ.get("IMAGE_MIN_CONTAINERS", "1")),
-    max_containers=int(os.environ.get("IMAGE_CONCURRENCY", "2")),
-    timeout=300,
-    volumes=_volumes,
-    secrets=[api_secret, hf_secret],
-)
-def run_image_generation(request_dict: dict, task_id: str) -> dict:
-    """
-    Modal function that runs on A10G by default.
-    Supports pony (SDXL) and flux (NF4) models.
-    """
+def _execute_image_generation(
+    request_dict: dict,
+    task_id: str,
+    *,
+    lane_mode: str,
+    fallback_reason: Optional[str] = None,
+) -> dict:
     sys.path.insert(0, "/root")
 
     import storage
+    from models.base import BasePipeline
+
+    def _update_status(*args, **kwargs) -> None:
+        storage.update_task_status(*args, **kwargs)
+        results_vol.commit()
+
     results_vol.reload()
     storage.init_db()
-    storage.update_task_status(task_id, "processing", progress=5)
-    results_vol.commit()
-
     model_id_key = request_dict["model"]
 
+    _update_status(
+        task_id,
+        "processing",
+        progress=5,
+        stage="dispatch",
+        stage_detail=f"image_{lane_mode}",
+        lane_mode=lane_mode,
+        fallback_reason=fallback_reason,
+    )
+    storage.record_operational_event(
+        "pipeline_resolve_started",
+        task_id=task_id,
+        model=model_id_key,
+        lane_mode=lane_mode,
+    )
+    results_vol.commit()
+
     try:
-        storage.update_task_status(task_id, "processing", progress=10)
-        results_vol.commit()
+        _update_status(
+            task_id,
+            "processing",
+            progress=10,
+            stage="model_resolve",
+            stage_detail=f"model={model_id_key}",
+            lane_mode=lane_mode,
+            fallback_reason=fallback_reason,
+        )
         pipeline = _get_image_pipeline(model_id_key)
-        storage.update_task_status(task_id, "processing", progress=20)
+        _update_status(
+            task_id,
+            "processing",
+            progress=35,
+            stage="pipeline_materialize",
+            stage_detail=f"model={model_id_key}",
+            lane_mode=lane_mode,
+            fallback_reason=fallback_reason,
+        )
+        storage.record_operational_event(
+            "pipeline_ready",
+            task_id=task_id,
+            model=model_id_key,
+            lane_mode=lane_mode,
+        )
         results_vol.commit()
 
+        if request_dict.get("_warmup_only"):
+            _update_status(
+                task_id,
+                "done",
+                progress=100,
+                stage="completed",
+                stage_detail="warmup_only",
+                lane_mode=lane_mode,
+                fallback_reason=fallback_reason,
+            )
+            storage.record_operational_event(
+                "lane_warmed",
+                task_id=task_id,
+                model=model_id_key,
+                lane_mode=lane_mode,
+            )
+            results_vol.commit()
+            return {"warmed": True}
+
+        _update_status(
+            task_id,
+            "processing",
+            progress=60,
+            stage="inference",
+            stage_detail=f"model={model_id_key}",
+            lane_mode=lane_mode,
+            fallback_reason=fallback_reason,
+        )
         result_path, preview_path = pipeline.generate(request_dict, task_id, RESULTS_PATH)
+        _update_status(
+            task_id,
+            "processing",
+            progress=90,
+            stage="artifact_write",
+            stage_detail="persisting_result",
+            lane_mode=lane_mode,
+            fallback_reason=fallback_reason,
+        )
+
         if not result_path or not os.path.exists(result_path):
             raise RuntimeError(f"Image generation finished without result artifact: {result_path}")
         if not preview_path or not os.path.exists(preview_path):
             raise RuntimeError(f"Image generation finished without preview artifact: {preview_path}")
-        storage.update_task_status(
-            task_id, "done", progress=100,
+
+        _update_status(
+            task_id,
+            "done",
+            progress=100,
             result_path=result_path,
             preview_path=preview_path,
+            stage="completed",
+            stage_detail="ok",
+            lane_mode=lane_mode,
+            fallback_reason=fallback_reason,
         )
-        results_vol.commit()
         return {"result_path": result_path, "preview_path": preview_path}
     except Exception as exc:
-        storage.update_task_status(task_id, "failed", error_msg=str(exc))
-        results_vol.commit()
+        _update_status(
+            task_id,
+            "failed",
+            error_msg=str(exc),
+            stage="failed",
+            stage_detail=f"{type(exc).__name__}",
+            lane_mode=lane_mode,
+            fallback_reason=fallback_reason,
+        )
         raise
+    finally:
+        BasePipeline.clear_gpu_memory(sync=False)
+        storage.record_operational_event(
+            "memory_cleanup",
+            task_id=task_id,
+            model=model_id_key,
+            lane_mode=lane_mode,
+        )
+        results_vol.commit()
+
+
+@app.function(
+    image=image_gen_image,
+    gpu=IMAGE_GPU_CLASS,
+    cpu=IMAGE_FUNCTION_CPU,
+    min_containers=int(os.environ.get("IMAGE_DEGRADED_MIN_CONTAINERS", "0")),
+    max_containers=int(os.environ.get("IMAGE_CONCURRENCY", "2")),
+    timeout=IMAGE_FUNCTION_TIMEOUT,
+    volumes=_volumes,
+    secrets=[api_secret, hf_secret],
+)
+def run_image_generation(request_dict: dict, task_id: str) -> dict:
+    """Degraded shared image lane (used as fallback)."""
+    return _execute_image_generation(
+        request_dict=request_dict,
+        task_id=task_id,
+        lane_mode="degraded_shared",
+        fallback_reason=request_dict.get("_fallback_reason"),
+    )
+
+
+@app.function(
+    image=image_gen_image,
+    gpu=IMAGE_GPU_CLASS,
+    cpu=IMAGE_FUNCTION_CPU,
+    min_containers=int(os.environ.get("IMAGE_PONY_MIN_CONTAINERS", os.environ.get("IMAGE_LANE_WARM_MIN_CONTAINERS", "1"))),
+    max_containers=int(os.environ.get("IMAGE_PONY_MAX_CONTAINERS", os.environ.get("IMAGE_LANE_WARM_MAX_CONTAINERS", "1"))),
+    timeout=IMAGE_FUNCTION_TIMEOUT,
+    volumes=_volumes,
+    secrets=[api_secret, hf_secret],
+)
+def run_pony_generation(request_dict: dict, task_id: str) -> dict:
+    """Dedicated warm lane for Pony."""
+    request_dict["model"] = "pony"
+    return _execute_image_generation(
+        request_dict=request_dict,
+        task_id=task_id,
+        lane_mode="dedicated",
+    )
+
+
+@app.function(
+    image=image_gen_image,
+    gpu=IMAGE_GPU_CLASS,
+    cpu=IMAGE_FUNCTION_CPU,
+    min_containers=int(os.environ.get("IMAGE_FLUX_MIN_CONTAINERS", os.environ.get("IMAGE_LANE_WARM_MIN_CONTAINERS", "1"))),
+    max_containers=int(os.environ.get("IMAGE_FLUX_MAX_CONTAINERS", os.environ.get("IMAGE_LANE_WARM_MAX_CONTAINERS", "1"))),
+    timeout=IMAGE_FUNCTION_TIMEOUT,
+    volumes=_volumes,
+    secrets=[api_secret, hf_secret],
+)
+def run_flux_generation(request_dict: dict, task_id: str) -> dict:
+    """Dedicated warm lane for Flux."""
+    request_dict["model"] = "flux"
+    return _execute_image_generation(
+        request_dict=request_dict,
+        task_id=task_id,
+        lane_mode="dedicated",
+    )
 
 
 # в”Ђв”Ђв”Ђ FastAPI Server в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ

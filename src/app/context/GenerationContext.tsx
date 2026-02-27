@@ -18,11 +18,16 @@ import { useGallery } from "./GalleryContext";
 const STAGE_LABELS: Record<string, string> = {
   queued: "Waiting for GPU worker…",
   pending: "Waiting for GPU worker…",
+  dispatch: "Dispatching to worker…",
+  model_resolve: "Resolving model…",
+  pipeline_materialize: "Loading AI model…",
   loading_model: "Loading AI model…",
   preprocessing: "Preparing inputs…",
   generating_video: "Generating video…",
   generating_image: "Generating image…",
   generating: "Generating…",
+  inference: "Generating…",
+  artifact_write: "Saving result…",
   postprocessing: "Encoding result…",
   saving: "Saving to gallery…",
   done: "Complete!",
@@ -138,6 +143,8 @@ const GenerationContext = createContext<GenerationContextType | null>(null);
 const STORAGE_KEY = "mg_generation_state_v2";
 const POLL_INTERVAL_MS = 2000;
 const MAX_POLL_ERRORS = 5;
+const WORKER_QUEUE_STALL_TIMEOUT_MS = 130_000;
+const FATAL_POLL_HTTP_CODES = new Set([401, 404, 410, 422, 500, 502, 503]);
 
 export function GenerationProvider({ children }: { children: React.ReactNode }) {
   const { addToGallery } = useGallery();
@@ -252,26 +259,63 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
 
   const startPolling = useCallback((tid: string, resolvedSeed: number) => {
     let consecutiveErrors = 0;
+    const startedAtMs = Date.now();
+    let queuedAtMs: number | null = null;
     setTaskId(tid);
+
+    const failPolling = (message: string) => {
+      stopPolling();
+      setStatus("error");
+      setError(message);
+      setHistory(prev =>
+        prev.map(h =>
+          h.taskId === tid
+            ? { ...h, status: "failed", error: message }
+            : h
+        ),
+      );
+    };
 
     const poll = async () => {
       if (abortRef.current) return;
       try {
         const resp = await sessionFetch(`/status/${tid}`, {}, { retryOn401: true });
         if (!resp.ok) {
+          const apiErr = await readApiError(resp, "Status check failed.");
+          if (FATAL_POLL_HTTP_CODES.has(resp.status)) {
+            failPolling(apiErr.detail || "Generation failed.");
+            return;
+          }
           consecutiveErrors++;
           if (consecutiveErrors >= MAX_POLL_ERRORS) {
-            stopPolling();
-            setStatus("error");
-            setError("Connection to server lost.");
+            failPolling(apiErr.detail || "Connection to server lost.");
           }
           return;
         }
 
         consecutiveErrors = 0;
         const data = await resp.json();
-        setProgress(data.progress ?? 0);
+        const currentProgress = Number(data.progress ?? 0);
+        setProgress(currentProgress);
         setStatusText(getStatusText(data.stage, generationType));
+
+        if (
+          data.status === "pending" &&
+          currentProgress === 0 &&
+          (!data.stage || data.stage === "queued")
+        ) {
+          if (queuedAtMs === null) {
+            const createdAtMs =
+              typeof data.created_at === "string"
+                ? Date.parse(data.created_at)
+                : NaN;
+            queuedAtMs = Number.isFinite(createdAtMs) ? createdAtMs : startedAtMs;
+          }
+          if (Date.now() - queuedAtMs >= WORKER_QUEUE_STALL_TIMEOUT_MS) {
+            failPolling("Worker start timeout: no GPU worker picked up the task in time.");
+            return;
+          }
+        }
 
         if (data.status === "done") {
           stopPolling();
@@ -303,17 +347,12 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
 
           setHistory(prev => prev.map(h => h.taskId === tid ? { ...h, status: "done", thumbnailUrl: previewUrl ?? resultUrl } : h));
         } else if (data.status === "failed") {
-          stopPolling();
-          setStatus("error");
-          setError(data.error_msg ?? "Generation failed.");
-          setHistory(prev => prev.map(h => h.taskId === tid ? { ...h, status: "failed", error: data.error_msg } : h));
+          failPolling(data.error_msg ?? "Generation failed.");
         }
       } catch {
         consecutiveErrors++;
         if (consecutiveErrors >= MAX_POLL_ERRORS) {
-          stopPolling();
-          setStatus("error");
-          setError("Polling error.");
+          failPolling("Polling error.");
         }
       }
     };

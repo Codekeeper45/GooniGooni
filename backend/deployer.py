@@ -184,6 +184,7 @@ def deploy_account(account_id: str) -> None:
 
             acc_store.update_account_status(account_id, "ready", workspace=workspace, error=None)
             _commit_volume()
+            _trigger_workspace_warmup(workspace, account_id=account_id)
         else:
             error = _extract_subprocess_error(result, account)
             failure_type, _ = acc_store._classify_error(error)
@@ -315,4 +316,47 @@ def _wait_for_workspace_health(
     if account_id:
         acc_store.update_health_check(account_id, f"failed: {last_error}")
 
+    return False, last_error
+
+
+def _trigger_workspace_warmup(workspace: str, account_id: Optional[str] = None) -> tuple[bool, Optional[str]]:
+    """
+    Trigger async lane warmup on a freshly deployed workspace.
+    Warmup failure is non-fatal: account stays ready, but diagnostics are updated.
+    """
+    enabled = (os.environ.get("ENABLE_LANE_WARMUP", "1").strip().lower() in {"1", "true", "yes", "on"})
+    if not enabled:
+        return True, None
+
+    api_key = os.environ.get("API_KEY", "").strip()
+    if not api_key:
+        return False, "API_KEY is missing; cannot trigger warmup"
+
+    retries = max(1, int(os.environ.get("WARMUP_RETRIES", "2")))
+    connect_timeout = float(os.environ.get("WARMUP_CONNECT_TIMEOUT_SECONDS", "5"))
+    read_timeout = float(os.environ.get("WARMUP_TIMEOUT_SECONDS", "25"))
+    timeout = httpx.Timeout(connect=connect_timeout, read=read_timeout, write=10.0, pool=5.0)
+    url = f"https://{workspace}--gooni-api.modal.run/warmup"
+    headers = {"X-API-Key": api_key}
+    last_error = "warmup did not run"
+
+    for attempt in range(1, retries + 1):
+        try:
+            with httpx.Client(timeout=timeout) as client:
+                response = client.post(url, headers=headers)
+            if response.status_code == 200:
+                logger.info("workspace warmup scheduled: %s", workspace)
+                if account_id:
+                    acc_store.update_health_check(account_id, "ok+warmed")
+                return True, None
+            last_error = f"warmup status={response.status_code}"
+        except Exception as exc:
+            last_error = f"warmup error: {exc}"
+
+        if attempt < retries:
+            time.sleep(2.0)
+
+    logger.warning("workspace warmup failed: workspace=%s error=%s", workspace, last_error)
+    if account_id:
+        acc_store.update_health_check(account_id, f"warmup_failed: {last_error}")
     return False, last_error

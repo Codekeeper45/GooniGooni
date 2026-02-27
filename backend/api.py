@@ -255,14 +255,27 @@ def create_app(results_vol=None) -> FastAPI:
 
     # ── Generation orchestration (imported functions from app.py at runtime) ──
 
-    async def _spawn_local_generation(req: GenerateRequest, *, force_degraded_reason: Optional[str] = None) -> GenerateResponse:
+    async def _spawn_local_generation(
+        req: GenerateRequest,
+        *,
+        force_degraded_reason: Optional[str] = None,
+        warmup_only: bool = False,
+    ) -> GenerateResponse:
         import random
         # Late import to access Modal spawnable functions
-        from app import run_image_generation, run_video_generation, run_anisora_generation, run_phr00t_generation, results_vol as _rvol
+        from app import (
+            run_anisora_generation,
+            run_flux_generation,
+            run_image_generation,
+            run_phr00t_generation,
+            run_pony_generation,
+            run_video_generation,
+            results_vol as _rvol,
+        )
 
         params = req.model_dump(exclude={"prompt", "negative_prompt", "model", "type", "mode", "width", "height", "seed", "reference_image", "first_frame_image", "last_frame_image", "arbitrary_frames"})
         model_key = req.model.value
-        lane_mode = "dedicated" if req.type.value == "video" else None
+        lane_mode: Optional[str] = "dedicated"
         resolved_seed = req.seed if req.seed != -1 else random.randint(0, 2_147_483_647)
 
         task_id = storage.create_task(
@@ -273,17 +286,40 @@ def create_app(results_vol=None) -> FastAPI:
         )
         req_dict = _normalize_request_dict(req)
         req_dict["seed"] = resolved_seed
+        if warmup_only:
+            req_dict["_warmup_only"] = True
 
-        # Image lane
+        # Image lane — dedicated first, degraded fallback
         if req.type.value != "video":
-            storage.update_task_status(task_id, "pending", progress=0, stage="queued", stage_detail="image_lane")
+            fallback_reason = force_degraded_reason
+            if fallback_reason is None:
+                try:
+                    storage.update_task_status(task_id, "pending", progress=0, stage="queued", stage_detail="dedicated_lane", lane_mode="dedicated")
+                    _rvol.commit()
+                    if model_key == "pony":
+                        run_pony_generation.spawn(req_dict, task_id)
+                    elif model_key == "flux":
+                        run_flux_generation.spawn(req_dict, task_id)
+                    else:
+                        raise ValueError(f"Unsupported image model: {model_key}")
+                    storage.record_operational_event("warm_lane_ready", task_id=task_id, model=model_key, lane_mode="dedicated")
+                    _rvol.commit()
+                    return GenerateResponse(task_id=task_id, status=TaskStatus.pending)
+                except Exception as exc:
+                    fallback_reason = _fallback_reason_from_error(exc)
+                    storage.record_operational_event("fallback_activated", task_id=task_id, model=model_key, lane_mode="degraded_shared", reason=fallback_reason)
+
+            req_dict["_fallback_reason"] = fallback_reason or "capacity"
+            storage.update_task_status(task_id, "pending", progress=0, stage="queued", stage_detail="degraded_image_lane", lane_mode="degraded_shared", fallback_reason=fallback_reason)
             _rvol.commit()
             try:
                 run_image_generation.spawn(req_dict, task_id)
             except Exception as exc:
-                storage.update_task_status(task_id, "failed", error_msg=f"Spawn failed: {exc}", stage="failed", stage_detail="spawn_failed")
+                storage.update_task_status(task_id, "failed", error_msg=f"Spawn failed: {exc}", stage="failed", stage_detail="degraded_spawn_failed", lane_mode="degraded_shared", fallback_reason=fallback_reason)
                 _rvol.commit()
                 raise HTTPException(status_code=503, detail=_error_payload("enqueue_failed", "Failed to enqueue image generation task.", "Retry later."))
+            storage.record_operational_event("queue_depth", task_id=task_id, model=model_key, lane_mode="degraded_shared", reason=fallback_reason)
+            _rvol.commit()
             return GenerateResponse(task_id=task_id, status=TaskStatus.pending)
 
         # Video lane — dedicated first, degraded fallback
@@ -382,6 +418,81 @@ def create_app(results_vol=None) -> FastAPI:
         _vol_reload()
         return await _spawn_local_generation(req)
 
+    @api.post("/warmup", tags=["Generation"])
+    async def warmup_lanes(_: str = Depends(verify_api_key)):
+        _vol_reload()
+        enabled = (os.environ.get("ENABLE_LANE_WARMUP", "1").strip().lower() in {"1", "true", "yes", "on"})
+        if not enabled:
+            return {"ok": True, "enabled": False, "scheduled": []}
+
+        models_csv = os.environ.get("WARMUP_MODELS", "anisora,phr00t,pony,flux")
+        wanted = {m.strip().lower() for m in models_csv.split(",") if m.strip()}
+        specs = [
+            {
+                "model": "anisora",
+                "type": "video",
+                "mode": "t2v",
+                "prompt": "lane warmup",
+                "width": 720,
+                "height": 1280,
+                "steps": 8,
+            },
+            {
+                "model": "phr00t",
+                "type": "video",
+                "mode": "t2v",
+                "prompt": "lane warmup",
+                "width": 720,
+                "height": 1280,
+                "steps": 4,
+                "cfg_scale": 1.0,
+            },
+            {
+                "model": "pony",
+                "type": "image",
+                "mode": "txt2img",
+                "prompt": "lane warmup",
+                "width": 1024,
+                "height": 1024,
+                "steps": 30,
+            },
+            {
+                "model": "flux",
+                "type": "image",
+                "mode": "txt2img",
+                "prompt": "lane warmup",
+                "width": 1024,
+                "height": 1024,
+                "steps": 25,
+            },
+        ]
+
+        scheduled: list[dict] = []
+        errors: list[dict] = []
+        for spec in specs:
+            if spec["model"] not in wanted:
+                continue
+            try:
+                req = GenerateRequest(**spec)
+                spawned = await _spawn_local_generation(
+                    req,
+                    warmup_only=True,
+                )
+                scheduled.append({"model": spec["model"], "task_id": spawned.task_id})
+            except Exception as exc:
+                errors.append({"model": spec["model"], "error": str(exc)})
+
+        if errors and not scheduled:
+            raise HTTPException(
+                status_code=503,
+                detail=_error_payload(
+                    "warmup_failed",
+                    "Failed to schedule lane warmup tasks.",
+                    "Check worker availability and retry warmup.",
+                ),
+            )
+        return {"ok": True, "enabled": True, "scheduled": scheduled, "errors": errors}
+
     @api.post("/generate", response_model=GenerateResponse, tags=["Generation"])
     async def generate(req: GenerateRequest, _: str = Depends(verify_generation_session)):
         import httpx
@@ -457,7 +568,7 @@ def create_app(results_vol=None) -> FastAPI:
             raise HTTPException(status_code=404, detail=_error_payload("task_not_found", f"Task '{task_id}' not found.", "Verify task id and retry."))
 
         pending_start_warning = int(os.environ.get("PENDING_WORKER_START_WARNING_SECONDS", "120"))
-        pending_start_fail = int(os.environ.get("PENDING_WORKER_START_FAIL_SECONDS", "0"))
+        pending_start_fail = int(os.environ.get("PENDING_WORKER_START_FAIL_SECONDS", "120"))
         if result.status == TaskStatus.pending and (result.progress or 0) == 0 and (result.stage is None or result.stage == "queued") and result.created_at is not None:
             age = (datetime.now(result.created_at.tzinfo) - result.created_at).total_seconds()
             if pending_start_fail > 0 and age >= pending_start_fail:

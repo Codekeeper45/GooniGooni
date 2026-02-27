@@ -61,6 +61,8 @@ IMAGE_TIMEOUT = int(os.environ.get("IMAGE_TIMEOUT", "300"))   # 5 min
 # Dedicated video lane policy (AniSora / Phr00t keep warm independently)
 VIDEO_LANE_WARM_MIN_CONTAINERS = int(os.environ.get("VIDEO_LANE_WARM_MIN_CONTAINERS", "1"))
 VIDEO_LANE_WARM_MAX_CONTAINERS = int(os.environ.get("VIDEO_LANE_WARM_MAX_CONTAINERS", "1"))
+IMAGE_LANE_WARM_MIN_CONTAINERS = int(os.environ.get("IMAGE_LANE_WARM_MIN_CONTAINERS", "1"))
+IMAGE_LANE_WARM_MAX_CONTAINERS = int(os.environ.get("IMAGE_LANE_WARM_MAX_CONTAINERS", "1"))
 
 # Degraded shared-worker queue policy
 DEGRADED_QUEUE_MAX_DEPTH = int(os.environ.get("VIDEO_DEGRADED_QUEUE_MAX_DEPTH", "25"))
@@ -70,6 +72,9 @@ DEGRADED_QUEUE_OVERLOAD_CODE = "queue_overloaded"
 # Dedicated-lane readiness/fallback policy
 VIDEO_LANE_HEALTH_GRACE_SECONDS = int(os.environ.get("VIDEO_LANE_HEALTH_GRACE_SECONDS", "60"))
 VIDEO_LANE_ASSIGNMENT_TIMEOUT_SECONDS = int(os.environ.get("VIDEO_LANE_ASSIGNMENT_TIMEOUT_SECONDS", "30"))
+ENABLE_LANE_WARMUP = (os.environ.get("ENABLE_LANE_WARMUP", "1").strip().lower() in {"1", "true", "yes", "on"})
+WARMUP_RETRIES = int(os.environ.get("WARMUP_RETRIES", "2"))
+WARMUP_TIMEOUT_SECONDS = int(os.environ.get("WARMUP_TIMEOUT_SECONDS", "25"))
 
 # Fixed video generation constraints (source-of-truth for backend validation/tests)
 VIDEO_FIXED_CONSTRAINTS = {
