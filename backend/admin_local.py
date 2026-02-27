@@ -22,7 +22,7 @@ from admin_security import (
     verify_admin_key_header,
     verify_admin_login_password,
 )
-from deployer import deploy_account_async, deploy_all_accounts
+from deployer import deploy_account_async, deploy_all_accounts, get_missing_shared_env_keys
 from schemas import AdminLoginRequest, AdminSessionStateResponse
 
 
@@ -195,6 +195,19 @@ async def admin_add_account(
     token_secret: str = Body(...),
     _ip: str = Depends(get_admin_auth("add_account_local")),
 ):
+    missing_env = get_missing_shared_env_keys()
+    if missing_env:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=_error_payload(
+                code="admin_env_missing",
+                detail="Missing required shared env: " + ", ".join(missing_env),
+                user_action=(
+                    "Set required env vars (API_KEY, ADMIN_LOGIN, ADMIN_PASSWORD_HASH, "
+                    "ACCOUNTS_ENCRYPT_KEY, HF_TOKEN) in VM runtime and restart container."
+                ),
+            ),
+        )
     try:
         account_id = acc_store.add_account(
             label=label,

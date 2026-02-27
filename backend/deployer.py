@@ -28,6 +28,89 @@ import httpx
 BACKEND_DIR = Path(__file__).parent
 APP_FILE = str(BACKEND_DIR / "app.py")
 logger = logging.getLogger("deployer")
+MODAL_TARGET_ENV = (os.environ.get("MODAL_TARGET_ENV", "main").strip() or "main")
+
+_SHARED_SECRET_BINDINGS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("gooni-api-key", ("API_KEY",)),
+    ("gooni-admin", ("ADMIN_LOGIN", "ADMIN_PASSWORD_HASH")),
+    ("gooni-accounts", ("ACCOUNTS_ENCRYPT_KEY",)),
+    ("huggingface", ("HF_TOKEN",)),
+)
+
+
+def required_shared_env_keys() -> tuple[str, ...]:
+    seen: list[str] = []
+    for _, keys in _SHARED_SECRET_BINDINGS:
+        for key in keys:
+            if key not in seen:
+                seen.append(key)
+    return tuple(seen)
+
+
+def get_missing_shared_env_keys() -> list[str]:
+    missing: list[str] = []
+    for key in required_shared_env_keys():
+        if not os.environ.get(key, "").strip():
+            missing.append(key)
+    return missing
+
+
+def _redact_sensitive_text(text: str, account: Optional[dict] = None) -> str:
+    redacted = text
+    secrets: list[str] = []
+    for key in required_shared_env_keys():
+        value = os.environ.get(key, "").strip()
+        if value:
+            secrets.append(value)
+    if account:
+        for key in ("token_id", "token_secret"):
+            value = str(account.get(key, "")).strip()
+            if value:
+                secrets.append(value)
+
+    for value in secrets:
+        # Avoid masking generic short strings.
+        if len(value) >= 6:
+            redacted = redacted.replace(value, "***")
+    return redacted
+
+
+def _extract_subprocess_error(result: subprocess.CompletedProcess, account: Optional[dict]) -> str:
+    raw = result.stderr or result.stdout or "Unknown deploy error"
+    return _redact_sensitive_text(raw, account)[:500]
+
+
+def _sync_workspace_secrets(env: dict[str, str], account: dict) -> None:
+    missing = get_missing_shared_env_keys()
+    if missing:
+        raise RuntimeError(
+            "Missing required shared env: " + ", ".join(missing)
+        )
+
+    for secret_name, env_keys in _SHARED_SECRET_BINDINGS:
+        key_values = [f"{env_key}={os.environ[env_key].strip()}" for env_key in env_keys]
+        cmd = [
+            sys.executable,
+            "-m",
+            "modal",
+            "secret",
+            "create",
+            "-e",
+            MODAL_TARGET_ENV,
+            "--force",
+            secret_name,
+            *key_values,
+        ]
+        result = subprocess.run(
+            cmd,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+        if result.returncode != 0:
+            error = _extract_subprocess_error(result, account)
+            raise RuntimeError(f"Secret sync failed for {secret_name}: {error}")
 
 
 def deploy_account(account_id: str) -> None:
@@ -59,8 +142,19 @@ def deploy_account(account_id: str) -> None:
     try:
         acc_store.update_account_status(account_id, "checking", error=None)
         _commit_volume()
+        try:
+            _sync_workspace_secrets(env, account)
+        except Exception as exc:
+            acc_store.mark_account_failed(
+                account_id,
+                _redact_sensitive_text(str(exc), account)[:500],
+                failure_type="config_failed",
+            )
+            _commit_volume()
+            return
+
         result = subprocess.run(
-            [sys.executable, "-m", "modal", "deploy", APP_FILE],
+            [sys.executable, "-m", "modal", "deploy", "-e", MODAL_TARGET_ENV, APP_FILE],
             env=env,
             capture_output=True,
             text=True,
@@ -91,7 +185,7 @@ def deploy_account(account_id: str) -> None:
             acc_store.update_account_status(account_id, "ready", workspace=workspace, error=None)
             _commit_volume()
         else:
-            error = (result.stderr or result.stdout or "Unknown deploy error")[:500]
+            error = _extract_subprocess_error(result, account)
             failure_type, _ = acc_store._classify_error(error)
             acc_store.mark_account_failed(
                 account_id,
@@ -108,7 +202,7 @@ def deploy_account(account_id: str) -> None:
         )
         _commit_volume()
     except Exception as exc:
-        error = str(exc)
+        error = _redact_sensitive_text(str(exc), account)[:500]
         failure_type, _ = acc_store._classify_error(error)
         acc_store.mark_account_failed(
             account_id,

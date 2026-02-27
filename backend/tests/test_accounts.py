@@ -134,6 +134,14 @@ def test_mark_account_failed_disables_after_threshold():
     assert row["fail_count"] == 1
 
 
+def test_mark_account_failed_config_error_disables_immediately():
+    account_id = accounts.add_account("Cfg", "tok_id", "tok_secret")
+    accounts.mark_account_failed(account_id, "Secret sync failed for huggingface")
+    row = accounts.get_account(account_id)
+    assert row["status"] == "disabled"
+    assert row["failure_type"] == "config_failed"
+
+
 def test_recover_failed_accounts_after_cooldown():
     account_id = accounts.add_account("Test", "tok_id", "tok_secret")
     accounts.mark_account_failed(account_id, "transient", max_fail_count=6)
@@ -151,3 +159,20 @@ def test_recover_failed_accounts_after_cooldown():
     row = accounts.get_account(account_id)
     assert row["status"] == "ready"
     assert row["failed_at"] is None
+
+
+def test_recover_failed_accounts_skips_config_failures():
+    account_id = accounts.add_account("CfgRecover", "tok_id", "tok_secret")
+    with accounts._db() as conn:  # test-only setup
+        conn.execute(
+            """
+            UPDATE modal_accounts
+            SET status='failed', failure_type='config_failed', failed_at=?
+            WHERE id=?
+            """,
+            ("2000-01-01T00:00:00+00:00", account_id),
+        )
+    recovered = accounts.recover_failed_accounts(cooldown_seconds=60)
+    assert recovered == 0
+    row = accounts.get_account(account_id)
+    assert row["status"] == "failed"

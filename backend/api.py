@@ -43,7 +43,7 @@ from config import (
     DEGRADED_QUEUE_OVERLOAD_CODE,
 )
 from router import router as account_router, NoReadyAccountError, MAX_FALLBACKS
-from deployer import deploy_account_async, deploy_all_accounts
+from deployer import deploy_account_async, deploy_all_accounts, get_missing_shared_env_keys
 from schemas import (
     AdminLoginRequest,
     AdminSessionStateResponse,
@@ -618,6 +618,19 @@ def create_app(results_vol=None) -> FastAPI:
     @api.post("/admin/accounts", tags=["Admin"], status_code=201)
     async def admin_add_account(label: str = Body(...), token_id: str = Body(...), token_secret: str = Body(...), _ip: str = Depends(get_admin_auth("add_account"))):
         _vol_reload()
+        missing_env = get_missing_shared_env_keys()
+        if missing_env:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=_error_payload(
+                    "admin_env_missing",
+                    "Missing required shared env: " + ", ".join(missing_env),
+                    (
+                        "Set required env vars (API_KEY, ADMIN_LOGIN, ADMIN_PASSWORD_HASH, "
+                        "ACCOUNTS_ENCRYPT_KEY, HF_TOKEN) and restart API container."
+                    ),
+                ),
+            )
         account_id = acc_store.add_account(label=label, token_id=token_id, token_secret=token_secret)
         _vol_commit()
         deploy_account_async(account_id)

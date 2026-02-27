@@ -71,12 +71,17 @@ Do not store real values in git.
 
 Example content:
 ```dotenv
+API_KEY=<shared_api_key_for_all_modal_accounts>
 ADMIN_LOGIN=admin
 ADMIN_PASSWORD_HASH=pbkdf2_sha256$<iterations>$<salt>$<hex_digest>
 ACCOUNTS_ENCRYPT_KEY=<FERNET_KEY>
+HF_TOKEN=<huggingface_access_token>
+MODAL_TARGET_ENV=main
 ADMIN_COOKIE_SECURE=0
 ADMIN_COOKIE_SAMESITE=lax
 ```
+
+`MODAL_TARGET_ENV` is optional. Default is `main`.
 
 ## 5. Admin auth details
 
@@ -122,6 +127,20 @@ It fails fast because of `set -e`.
 ```bash
 gcloud compute ssh openclaw-server --zone=us-east1-b --command "bash -lc 'set -e; cd ~/gooni-gooni; git fetch --all --prune; git checkout 001-fix-vram-oom; git pull --ff-only origin 001-fix-vram-oom; sudo docker build --pull -t gooni-gooni:local --build-arg VITE_API_URL=https://yapparov-emir-f--gooni-api.modal.run .; sudo mkdir -p /opt/gooni/results; sudo test -f /opt/gooni/admin.env; sudo docker stop gooni-gooni >/dev/null 2>&1 || true; sudo docker rm gooni-gooni >/dev/null 2>&1 || true; sudo docker run -d --name gooni-gooni --restart unless-stopped -p 80:80 -v /opt/gooni/results:/results --env-file /opt/gooni/admin.env gooni-gooni:local; sleep 8; sudo docker ps --filter name=gooni-gooni --format "table {{.Names}}\\t{{.Image}}\\t{{.Status}}"'"
 ```
+
+### Preflight for automatic Modal account provisioning
+
+Before adding a new account in Admin panel, verify shared env vars exist in VM container:
+
+```bash
+gcloud compute ssh openclaw-server --zone=us-east1-b --command "sudo docker exec gooni-gooni sh -lc 'for k in API_KEY ADMIN_LOGIN ADMIN_PASSWORD_HASH ACCOUNTS_ENCRYPT_KEY HF_TOKEN; do if [ -z \"\${!k}\" ]; then echo \"MISSING: $k\"; else echo \"OK: $k\"; fi; done'"
+```
+
+When `POST /api/admin/accounts` is called, backend now auto-syncs these secrets to the new Modal workspace before deploy:
+- `gooni-api-key` (`API_KEY`)
+- `gooni-admin` (`ADMIN_LOGIN`, `ADMIN_PASSWORD_HASH`)
+- `gooni-accounts` (`ACCOUNTS_ENCRYPT_KEY`)
+- `huggingface` (`HF_TOKEN`)
 
 ### Verify VM deployment
 ```bash
@@ -212,6 +231,12 @@ modal deploy backend/app.py
 - Root cause: Modal workspace spend limit reached.
 - Action: fix billing/quota in Modal dashboard.
 - Note: admin login on VM still works because it is local now.
+
+### New account instantly becomes `failed`
+- Check `last_error` in Admin panel.
+- If `admin_env_missing`: VM container is missing required shared env values.
+- If `config_failed`: secret sync to target workspace failed (permissions/token/environment mismatch).
+- Fix env/token and click account `Deploy` again.
 
 ### No changes after deploy
 - Ensure git pulled latest commit on VM.

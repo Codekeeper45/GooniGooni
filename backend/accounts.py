@@ -37,6 +37,7 @@ _AUTH_PATTERNS = ("authentication", "unauthorized", "invalid token", "auth faile
 _TIMEOUT_PATTERNS = ("timeout", "timed out")
 _CONTAINER_PATTERNS = ("container", "deployment failed")
 _HEALTH_PATTERNS = ("health check", "endpoint not responding")
+_CONFIG_PATTERNS = ("secret sync failed", "missing required shared env", "config_failed")
 
 
 def _classify_error(error: str) -> tuple[str, str]:
@@ -45,7 +46,7 @@ def _classify_error(error: str) -> tuple[str, str]:
 
     Returns:
         tuple of (failure_type, recovery_policy) where:
-        - failure_type: quota_exceeded | auth_failed | timeout | container_failed | health_check_failed | unknown
+        - failure_type: quota_exceeded | auth_failed | config_failed | timeout | container_failed | health_check_failed | unknown
         - recovery_policy: manual_only | auto_recover
     """
     lower = error.lower()
@@ -53,6 +54,8 @@ def _classify_error(error: str) -> tuple[str, str]:
         return "quota_exceeded", "manual_only"
     if any(p in lower for p in _AUTH_PATTERNS):
         return "auth_failed", "manual_only"
+    if any(p in lower for p in _CONFIG_PATTERNS):
+        return "config_failed", "manual_only"
     if any(p in lower for p in _TIMEOUT_PATTERNS):
         return "timeout", "auto_recover"
     if any(p in lower for p in _CONTAINER_PATTERNS):
@@ -268,7 +271,7 @@ def mark_account_failed(
     Mark account failed and increment failure counter.
 
     Error classification:
-    - quota_exceeded / auth_failed → immediately disabled (manual_only)
+    - quota_exceeded / auth_failed / config_failed → immediately disabled (manual_only)
     - timeout / container_failed / health_check_failed / unknown → fail_count logic (auto_recover)
 
     If fail_count reaches max_fail_count for auto_recover errors,
@@ -279,7 +282,7 @@ def mark_account_failed(
 
     recovery_policy = (
         "manual_only"
-        if failure_type in ("quota_exceeded", "auth_failed")
+        if failure_type in ("quota_exceeded", "auth_failed", "config_failed")
         else "auto_recover"
     )
 
@@ -328,7 +331,7 @@ def recover_failed_accounts(cooldown_seconds: int = 300) -> int:
     Auto-recover failed accounts after cooldown to avoid permanent brick state.
     Returns number of recovered accounts.
 
-    Accounts with failure_type in ('quota_exceeded', 'auth_failed') are excluded
+    Accounts with failure_type in ('quota_exceeded', 'auth_failed', 'config_failed') are excluded
     from auto-recovery — they require manual intervention via enable_account().
     """
     if cooldown_seconds <= 0:
@@ -344,7 +347,7 @@ def recover_failed_accounts(cooldown_seconds: int = 300) -> int:
             FROM modal_accounts
             WHERE status='failed'
               AND failed_at IS NOT NULL
-              AND (failure_type IS NULL OR failure_type NOT IN ('quota_exceeded', 'auth_failed'))
+              AND (failure_type IS NULL OR failure_type NOT IN ('quota_exceeded', 'auth_failed', 'config_failed'))
             """
         ).fetchall()
 
