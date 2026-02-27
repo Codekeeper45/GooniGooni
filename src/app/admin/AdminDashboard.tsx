@@ -46,11 +46,11 @@ const statusColors: Record<string, string> = {
   disabled: "#6b7280",
 };
 const statusIcons: Record<string, string> = {
-  pending: "вЏі",
-  checking: "рџ”Ћ",
-  ready: "вњ…",
-  failed: "вќЊ",
-  disabled: "вЏёпёЏ",
+  pending: "P",
+  checking: "C",
+  ready: "OK",
+  failed: "X",
+  disabled: "OFF",
 };
 
 function StatusBadge({ status }: { status: string }) {
@@ -67,7 +67,7 @@ function StatusBadge({ status }: { status: string }) {
         fontWeight: 600,
       }}
     >
-      {statusIcons[status] ?? "вЂў"} {status}
+      {statusIcons[status] ?? "*"} {status}
     </span>
   );
 }
@@ -145,24 +145,24 @@ export function AdminDashboard() {
     return () => clearInterval(timer);
   }, [accounts, fetchAccounts]);
 
-  async function doAction(path: string, method = "POST", okMessage = "Р“РѕС‚РѕРІРѕ вњ…") {
+  async function doAction(path: string, method = "POST", okMessage = "Done") {
     try {
       const res = await adminFetch(path, { method });
       if (res.ok) {
-        showToast(okMessage || "Р“РѕС‚РѕРІРѕ вњ…");
+        showToast(okMessage || "Done");
         await fetchAccounts();
       } else {
-        showToast(`РћС€РёР±РєР° ${res.status}`, false);
+        showToast(`Error ${res.status}`, false);
       }
     } catch {
-      showToast("РЎРµС‚РµРІР°СЏ РѕС€РёР±РєР°", false);
+      showToast("Network error", false);
     }
   }
 
   async function handleAddAccount(e: React.FormEvent) {
     e.preventDefault();
     if (!label || !tokenId || !tokenSecret) {
-      showToast("Р—Р°РїРѕР»РЅРёС‚Рµ РІСЃРµ РїРѕР»СЏ", false);
+      showToast("Fill all fields", false);
       return;
     }
     setAddLoading(true);
@@ -172,7 +172,7 @@ export function AdminDashboard() {
         body: JSON.stringify({ label, token_id: tokenId, token_secret: tokenSecret }),
       }, 60000);
       if (res.ok) {
-        showToast("вњ… РђРєРєР°СѓРЅС‚ РґРѕР±Р°РІР»РµРЅ. РџСЂРѕРІРµСЂРєР° Р·Р°РїСѓС‰РµРЅР°.");
+        showToast("Account added. Health check started.");
         setLabel("");
         setTokenId("");
         setTokenSecret("");
@@ -180,7 +180,7 @@ export function AdminDashboard() {
       } else {
         const payload = await res.json().catch(() => ({}));
         const detail = payload?.detail?.detail || payload?.detail || res.status;
-        showToast(`РћС€РёР±РєР°: ${detail}`, false);
+        showToast(`Error: ${detail}`, false);
       }
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") {
@@ -252,7 +252,7 @@ export function AdminDashboard() {
         }}
       >
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <span style={{ fontSize: 24 }}>рџ›ЎпёЏ</span>
+          <span style={{ fontSize: 24 }}>ADMIN</span>
           <div>
             <div style={{ fontWeight: 700, fontSize: 18 }}>Gooni Admin</div>
             <div style={{ fontSize: 12, color: "rgba(255,255,255,0.4)" }}>{session.apiUrl}</div>
@@ -271,7 +271,7 @@ export function AdminDashboard() {
               fontSize: 13,
             }}
           >
-            рџЏ  РќР° РіР»Р°РІРЅСѓСЋ
+            Home
           </button>
           <button
             onClick={handleLogout}
@@ -285,7 +285,7 @@ export function AdminDashboard() {
               fontSize: 13,
             }}
           >
-            рџљЄ Р’С‹Р№С‚Рё
+            Logout
           </button>
         </div>
       </div>
@@ -299,8 +299,8 @@ export function AdminDashboard() {
         }}
       >
         {([
-          ["accounts", "рџ’і РђРєРєР°СѓРЅС‚С‹"],
-          ["logs", "рџ“‹ Р›РѕРіРё"],
+          ["accounts", "Accounts"],
+          ["logs", "Logs"],
         ] as const).map(([t, label2]) => (
           <button
             key={t}
@@ -326,7 +326,7 @@ export function AdminDashboard() {
         {tab === "accounts" && (
           <>
             <div style={card}>
-              <h3 style={{ margin: "0 0 16px", fontSize: 16, color: "#c4b5fd" }}>вћ• Р”РѕР±Р°РІРёС‚СЊ Modal-Р°РєРєР°СѓРЅС‚</h3>
+              <h3 style={{ margin: "0 0 16px", fontSize: 16, color: "#c4b5fd" }}>Add Modal account</h3>
               <form onSubmit={handleAddAccount}>
                 <div
                   style={{
@@ -338,7 +338,7 @@ export function AdminDashboard() {
                 >
                   <div>
                     <label style={{ fontSize: 12, color: "rgba(255,255,255,0.5)", display: "block", marginBottom: 5 }}>
-                      РРјСЏ Р°РєРєР°СѓРЅС‚Р°
+                      Account label
                     </label>
                     <input style={input} placeholder="Workspace 1" value={label} onChange={(e) => setLabel(e.target.value)} required />
                   </div>
@@ -376,7 +376,7 @@ export function AdminDashboard() {
                           fontSize: 14,
                         }}
                       >
-                        {showSecret ? "рџ™€" : "рџ‘ЃпёЏ"}
+                        {showSecret ? "Hide" : "Show"}
                       </button>
                     </div>
                   </div>
@@ -390,7 +390,7 @@ export function AdminDashboard() {
                       boxShadow: "0 4px 12px rgba(124,58,237,0.3)",
                     }}
                   >
-                    {addLoading ? "вЏі" : "вћ• Р”РѕР±Р°РІРёС‚СЊ"}
+                    {addLoading ? "..." : "Add"}
                   </button>
                 </div>
               </form>
@@ -398,25 +398,25 @@ export function AdminDashboard() {
 
             <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 16, gap: 10 }}>
               <button
-                onClick={() => doAction("/admin/deploy-all", "POST", "рџљЂ Р”РµРїР»РѕР№ РІСЃРµС… Р°РєРєР°СѓРЅС‚РѕРІ Р·Р°РїСѓС‰РµРЅ")}
+                onClick={() => doAction("/admin/deploy-all", "POST", "Deploy all started")}
                 style={{ ...btn("linear-gradient(135deg,#059669,#10b981)"), padding: "8px 18px", fontSize: 13 }}
               >
-                рџљЂ Р—Р°РґРµРїР»РѕРёС‚СЊ РІСЃРµ
+                Deploy all
               </button>
               <button
                 onClick={fetchAccounts}
                 style={{ ...btn("rgba(255,255,255,0.1)"), padding: "8px 18px", fontSize: 13 }}
               >
-                рџ”„ РћР±РЅРѕРІРёС‚СЊ
+                Refresh
               </button>
             </div>
 
             {loading ? (
-              <div style={{ textAlign: "center", color: "rgba(255,255,255,0.4)", padding: 40 }}>вЏі Р—Р°РіСЂСѓР·РєР°...</div>
+              <div style={{ textAlign: "center", color: "rgba(255,255,255,0.4)", padding: 40 }}>Loading...</div>
             ) : accounts.length === 0 ? (
               <div style={{ ...card, textAlign: "center", padding: 40, color: "rgba(255,255,255,0.35)" }}>
-                <div style={{ fontSize: 40, marginBottom: 10 }}>рџ“­</div>
-                РќРµС‚ Р°РєРєР°СѓРЅС‚РѕРІ. Р”РѕР±Р°РІСЊС‚Рµ РїРµСЂРІС‹Р№ РІС‹С€Рµ.
+                <div style={{ fontSize: 40, marginBottom: 10 }}>-</div>
+                No accounts yet. Add your first account above.
               </div>
             ) : (
             <div style={card}>
@@ -451,7 +451,7 @@ export function AdminDashboard() {
               <table style={{ width: "100%", borderCollapse: "collapse" }}>
                   <thead>
                     <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.1)" }}>
-                      {["РРјСЏ", "Workspace", "РЎС‚Р°С‚СѓСЃ", "Р—Р°РїСЂРѕСЃРѕРІ", "РџРѕСЃР»РµРґРЅРёР№", "Р”РµР№СЃС‚РІРёСЏ"].map((h) => (
+                      {["Label", "Workspace", "Status", "Requests", "Last Used", "Actions"].map((h) => (
                         <th
                           key={h}
                           style={{
@@ -471,7 +471,7 @@ export function AdminDashboard() {
                     {accounts.map((acc) => (
                       <tr key={acc.id} style={{ borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
                         <td style={{ padding: "10px 8px", fontWeight: 600, fontSize: 14 }}>{acc.label}</td>
-                        <td style={{ padding: "10px 8px", fontSize: 13, color: "rgba(255,255,255,0.55)" }}>{acc.workspace ?? "вЂ”"}</td>
+                        <td style={{ padding: "10px 8px", fontSize: 13, color: "rgba(255,255,255,0.55)" }}>{acc.workspace ?? "-"}</td>
                         <td style={{ padding: "10px 8px" }}>
                           <StatusBadge status={acc.status} />
                           {acc.last_error && (
@@ -493,44 +493,44 @@ export function AdminDashboard() {
                         </td>
                         <td style={{ padding: "10px 8px", fontSize: 13, textAlign: "center" }}>{acc.use_count}</td>
                         <td style={{ padding: "10px 8px", fontSize: 12, color: "rgba(255,255,255,0.4)" }}>
-                          {acc.last_used ? new Date(acc.last_used).toLocaleString("ru-RU") : "вЂ”"}
+                          {acc.last_used ? new Date(acc.last_used).toLocaleString("en-US") : "-"}
                         </td>
                         <td style={{ padding: "10px 8px" }}>
                           <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                             <button
-                              onClick={() => doAction(`/admin/accounts/${acc.id}/deploy`, "POST", "рџљЂ РџСЂРѕРІРµСЂРєР° Р°РєРєР°СѓРЅС‚Р° Р·Р°РїСѓС‰РµРЅР°")}
+                              onClick={() => doAction(`/admin/accounts/${acc.id}/deploy`, "POST", "Account deploy started")}
                               style={btn("#1d4ed8")}
                               title="Re-deploy"
                             >
-                              рџљЂ
+                              Deploy
                             </button>
                             {acc.status !== "disabled" ? (
                               <button
-                                onClick={() => doAction(`/admin/accounts/${acc.id}/disable`, "POST", "вЏё РђРєРєР°СѓРЅС‚ РѕС‚РєР»СЋС‡С‘РЅ")}
+                                onClick={() => doAction(`/admin/accounts/${acc.id}/disable`, "POST", "Account disabled")}
                                 style={btn("#92400e")}
-                                title="РћС‚РєР»СЋС‡РёС‚СЊ"
+                                title="Disable"
                               >
-                                вЏё
+                                Disable
                               </button>
                             ) : (
                               <button
-                                onClick={() => doAction(`/admin/accounts/${acc.id}/enable`, "POST", "в–¶ РђРєРєР°СѓРЅС‚ РІРєР»СЋС‡С‘РЅ")}
+                                onClick={() => doAction(`/admin/accounts/${acc.id}/enable`, "POST", "Account enabled")}
                                 style={btn("#065f46")}
-                                title="Р’РєР»СЋС‡РёС‚СЊ"
+                                title="Enable"
                               >
-                                в–¶
+                                Enable
                               </button>
                             )}
                             <button
                               onClick={() => {
-                                if (confirm(`РЈРґР°Р»РёС‚СЊ Р°РєРєР°СѓРЅС‚ "${acc.label}"?`)) {
-                                  doAction(`/admin/accounts/${acc.id}`, "DELETE", "рџ—‘ РђРєРєР°СѓРЅС‚ СѓРґР°Р»С‘РЅ");
+                                if (confirm(`Delete account "${acc.label}"?`)) {
+                                  doAction(`/admin/accounts/${acc.id}`, "DELETE", "Account deleted");
                                 }
                               }}
                               style={btn("#7f1d1d")}
-                              title="РЈРґР°Р»РёС‚СЊ"
+                              title="Delete"
                             >
-                              рџ—‘
+                              Delete
                             </button>
                           </div>
                         </td>
@@ -546,21 +546,21 @@ export function AdminDashboard() {
         {tab === "logs" && (
           <div style={card}>
             <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 16 }}>
-              <h3 style={{ margin: 0, fontSize: 16, color: "#c4b5fd" }}>рџ“‹ Р–СѓСЂРЅР°Р» РґРµР№СЃС‚РІРёР№</h3>
+              <h3 style={{ margin: 0, fontSize: 16, color: "#c4b5fd" }}>Audit log</h3>
               <button
                 onClick={fetchLogs}
                 style={{ ...btn("rgba(255,255,255,0.1)"), padding: "6px 14px", fontSize: 12 }}
               >
-                рџ”„ РћР±РЅРѕРІРёС‚СЊ
+                Refresh
               </button>
             </div>
             {logs.length === 0 ? (
-              <div style={{ textAlign: "center", color: "rgba(255,255,255,0.35)", padding: 30 }}>РќРµС‚ Р·Р°РїРёСЃРµР№</div>
+              <div style={{ textAlign: "center", color: "rgba(255,255,255,0.35)", padding: 30 }}>No entries</div>
             ) : (
               <table style={{ width: "100%", borderCollapse: "collapse" }}>
                 <thead>
                   <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.1)" }}>
-                    {["Р’СЂРµРјСЏ", "IP", "Р”РµР№СЃС‚РІРёРµ", "Р”РµС‚Р°Р»Рё", "OK"].map((h) => (
+                    {["Time", "IP", "Action", "Details", "OK"].map((h) => (
                       <th
                         key={h}
                         style={{
@@ -580,14 +580,14 @@ export function AdminDashboard() {
                   {logs.slice().reverse().map((entry) => (
                     <tr key={entry.id} style={{ borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
                       <td style={{ padding: "8px", fontSize: 12, color: "rgba(255,255,255,0.45)" }}>
-                        {new Date(entry.ts).toLocaleString("ru-RU")}
+                        {new Date(entry.ts).toLocaleString("en-US")}
                       </td>
                       <td style={{ padding: "8px", fontSize: 12, fontFamily: "monospace", color: "#93c5fd" }}>
                         {entry.ip}
                       </td>
                       <td style={{ padding: "8px", fontSize: 13, fontWeight: 600 }}>{entry.action}</td>
                       <td style={{ padding: "8px", fontSize: 12, color: "rgba(255,255,255,0.5)" }}>{entry.details}</td>
-                      <td style={{ padding: "8px", fontSize: 14 }}>{entry.success ? "вњ…" : "вќЊ"}</td>
+                      <td style={{ padding: "8px", fontSize: 14 }}>{entry.success ? "OK" : "X"}</td>
                     </tr>
                   ))}
                 </tbody>

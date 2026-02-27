@@ -277,12 +277,11 @@ def mark_account_failed(
     if failure_type is None:
         failure_type, _ = _classify_error(error)
 
-    _, recovery_policy = _classify_error(error) if failure_type in ("quota_exceeded", "auth_failed") else (failure_type, "auto_recover")
-    # Re-derive policy from the failure_type directly
-    if failure_type in ("quota_exceeded", "auth_failed"):
-        recovery_policy = "manual_only"
-    else:
-        recovery_policy = "auto_recover"
+    recovery_policy = (
+        "manual_only"
+        if failure_type in ("quota_exceeded", "auth_failed")
+        else "auto_recover"
+    )
 
     now = _now_iso()
     with _lock, _db() as conn:

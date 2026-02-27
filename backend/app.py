@@ -1437,7 +1437,6 @@ def fastapi_app():
     # ═════════════════════════════════════════════════════════════════════════
 
     import os as _os
-    from deployer import deploy_account_async, deploy_all_accounts
     from admin_security import (
         _ensure_audit_table,
         get_admin_auth,

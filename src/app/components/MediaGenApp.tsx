@@ -63,6 +63,71 @@ function getStatusText(stage: string | null, generationType: GenerationType): st
 
 const POLL_INTERVAL_MS = 2000;
 const MAX_POLL_ERRORS = 5;
+const HISTORY_STORAGE_KEY = "gg_history_v1";
+const ACTIVE_TASK_STORAGE_KEY = "gg_active_task_v1";
+
+type ActiveTaskSnapshot = {
+  taskId: string;
+  type: GenerationType;
+  prompt: string;
+  model: string;
+  width: number;
+  height: number;
+  seed: number;
+  startedAt: number;
+};
+
+function saveHistory(items: HistoryItem[]) {
+  if (typeof window === "undefined") return;
+  const payload = items.map((item) => ({
+    ...item,
+    createdAt: item.createdAt instanceof Date ? item.createdAt.toISOString() : item.createdAt,
+    updatedAt: item.updatedAt instanceof Date ? item.updatedAt.toISOString() : item.updatedAt,
+  }));
+  window.localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(payload));
+}
+
+function loadHistory(): HistoryItem[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.localStorage.getItem(HISTORY_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((item) => ({
+        ...item,
+        createdAt: new Date(item.createdAt),
+        updatedAt: item.updatedAt ? new Date(item.updatedAt) : undefined,
+      }))
+      .filter((item) => item.id && item.prompt && item.type);
+  } catch {
+    return [];
+  }
+}
+
+function saveActiveTask(task: ActiveTaskSnapshot) {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(ACTIVE_TASK_STORAGE_KEY, JSON.stringify(task));
+}
+
+function loadActiveTask(): ActiveTaskSnapshot | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(ACTIVE_TASK_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed?.taskId || !parsed?.type) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function clearActiveTask() {
+  if (typeof window === "undefined") return;
+  window.localStorage.removeItem(ACTIVE_TASK_STORAGE_KEY);
+}
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
@@ -135,8 +200,9 @@ export function MediaGenApp() {
   } | null>(null);
 
   // ── History ─────────────────────────────────────────────────────────────────
-  const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [history, setHistory] = useState<HistoryItem[]>(() => loadHistory());
   const [showHistory, setShowHistory] = useState(false);
+  const resumedRef = useRef(false);
 
   // ── Refs for cleanup ────────────────────────────────────────────────────────
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -149,6 +215,10 @@ export function MediaGenApp() {
       if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
     };
   }, []);
+
+  useEffect(() => {
+    saveHistory(history);
+  }, [history]);
 
   // ── Derived model ID for configManager ──────────────────────────────────────
   const currentModelId: ModelId =
@@ -232,7 +302,30 @@ export function MediaGenApp() {
 
   // ── Poll status loop ────────────────────────────────────────────────────────
   const startPolling = useCallback(
-    (taskId: string, resolvedSeed: number) => {
+    (
+      taskId: string,
+      resolvedSeed: number,
+      taskContext?: {
+        type: GenerationType;
+        prompt: string;
+        model: string;
+        width: number;
+        height: number;
+      },
+    ) => {
+      abortRef.current = false;
+      if (pollIntervalRef.current) {
+        clearInterval(pollIntervalRef.current);
+        pollIntervalRef.current = null;
+      }
+
+      const context = taskContext ?? {
+        type: generationType,
+        prompt,
+        model: currentModelLabel,
+        width,
+        height,
+      };
       let consecutiveErrors = 0;
 
       const poll = async () => {
@@ -255,10 +348,11 @@ export function MediaGenApp() {
 
           // Update progress & stage
           setProgress(data.progress ?? 0);
-          setStatusText(getStatusText(data.stage, generationType));
+          setStatusText(getStatusText(data.stage, context.type));
 
           if (data.status === "done") {
             stopPolling();
+            clearActiveTask();
 
             // Build result URL — use result_url from status if available,
             // otherwise construct from /results/{task_id}
@@ -270,11 +364,11 @@ export function MediaGenApp() {
               url: resultUrl,
               thumbnailUrl: previewUrl ?? undefined,
               seed: resolvedSeed,
-              width,
-              height,
-              prompt,
-              model: currentModelLabel,
-              type: generationType,
+              width: context.width,
+              height: context.height,
+              prompt: context.prompt,
+              model: context.model,
+              type: context.type,
             });
             setStatus("done");
             setProgress(100);
@@ -284,11 +378,11 @@ export function MediaGenApp() {
               id: taskId,
               url: resultUrl,
               thumbnailUrl: previewUrl ?? undefined,
-              prompt,
-              type: generationType,
-              model: currentModelLabel,
-              width,
-              height,
+              prompt: context.prompt,
+              type: context.type,
+              model: context.model,
+              width: context.width,
+              height: context.height,
               seed: resolvedSeed,
               createdAt: new Date(),
             });
@@ -301,6 +395,7 @@ export function MediaGenApp() {
             );
           } else if (data.status === "failed") {
             stopPolling();
+            clearActiveTask();
             setStatus("error");
             setError(data.error_msg ?? "Generation failed on the server.");
 
@@ -392,6 +487,16 @@ export function MediaGenApp() {
 
       const data = await resp.json();
       const taskId = data.task_id as string;
+      saveActiveTask({
+        taskId,
+        type: generationType,
+        prompt,
+        model: currentModelLabel,
+        width,
+        height,
+        seed: resolvedSeed,
+        startedAt: Date.now(),
+      });
 
       // Update history item with task ID
       setHistory((prev) =>
@@ -412,11 +517,47 @@ export function MediaGenApp() {
             : h
         )
       );
+      clearActiveTask();
     }
   }, [
     prompt, status, seed, generationType, currentModelLabel,
     width, height, buildCurrentPayload, startPolling,
   ]);
+
+  useEffect(() => {
+    if (resumedRef.current) return;
+    const saved = loadActiveTask();
+    if (!saved) return;
+    resumedRef.current = true;
+    setStatus("generating");
+    setProgress(0);
+    setStatusText("Resuming active task...");
+    setHistory((prev) => {
+      if (prev.some((item) => item.taskId === saved.taskId || item.id === saved.taskId)) {
+        return prev;
+      }
+      const restored: HistoryItem = {
+        id: saved.taskId,
+        taskId: saved.taskId,
+        prompt: saved.prompt,
+        type: saved.type,
+        model: saved.model,
+        width: saved.width,
+        height: saved.height,
+        seed: saved.seed,
+        createdAt: new Date(saved.startedAt),
+        status: "pending",
+      };
+      return [restored, ...prev.slice(0, 49)];
+    });
+    startPolling(saved.taskId, saved.seed, {
+      type: saved.type,
+      prompt: saved.prompt,
+      model: saved.model,
+      width: saved.width,
+      height: saved.height,
+    });
+  }, [startPolling]);
 
   // ── Retry / Regenerate handlers ─────────────────────────────────────────────
   const handleRetry = useCallback(() => {
