@@ -1,6 +1,12 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router";
-import { clearSession, createAdminSession, ensureAdminSession, getSession } from "./adminSession";
+import {
+  clearSession,
+  createAdminSession,
+  createHeaderSession,
+  ensureAdminSession,
+  getSession,
+} from "./adminSession";
 
 export function AdminLoginPage() {
   const nav = useNavigate();
@@ -14,7 +20,7 @@ export function AdminLoginPage() {
   useEffect(() => {
     const existing = getSession();
     if (!existing) return;
-    ensureAdminSession(existing.apiUrl)
+    ensureAdminSession(existing)
       .then(() => nav("/admin/dashboard"))
       .catch(() => clearSession());
   }, [nav]);
@@ -37,7 +43,12 @@ export function AdminLoginPage() {
 
     try {
       setLoading(true);
-      await createAdminSession(url, key);
+      try {
+        await createAdminSession(url, key);
+      } catch {
+        // Fallback mode: stateless admin auth via x-admin-key header.
+        await createHeaderSession(url, key);
+      }
       nav("/admin/dashboard");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Ошибка авторизации");

@@ -94,7 +94,7 @@ export function AdminDashboard() {
       nav("/admin");
       return;
     }
-    ensureAdminSession(session.apiUrl).catch(() => {
+    ensureAdminSession(session).catch(() => {
       clearSession();
       nav("/admin");
     });
@@ -195,7 +195,7 @@ export function AdminDashboard() {
 
   async function handleLogout() {
     if (session) {
-      await revokeAdminSession(session.apiUrl).catch(() => undefined);
+      await revokeAdminSession(session).catch(() => undefined);
     }
     clearSession();
     nav("/admin");
