@@ -10,8 +10,7 @@ build/
 .vite/
 coverage/
 
-# Python / Backend (not needed for frontend Vite build)
-backend/
+# Python caches
 __pycache__/
 *.py[cod]
 *.pyo
