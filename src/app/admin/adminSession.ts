@@ -6,9 +6,40 @@ export interface AdminSession {
   authenticated: true;
 }
 
-function getAdminApiUrl(path: string): string {
+function getAdminApiUrl(path: string, base: string = ADMIN_API_BASE): string {
   const normalized = path.startsWith("/") ? path : `/${path}`;
-  return `${ADMIN_API_BASE}${normalized}`;
+  return base ? `${base}${normalized}` : normalized;
+}
+
+function getAdminApiBases(): string[] {
+  if (typeof window !== "undefined" && window.location.hostname.endsWith("modal.run")) {
+    // On direct Modal URL there is no nginx /api proxy, so allow a direct-path fallback.
+    return ["/api", ""];
+  }
+  return ["/api"];
+}
+
+async function fetchAdmin(path: string, init: RequestInit): Promise<Response> {
+  const bases = getAdminApiBases();
+  let lastError: unknown = null;
+
+  for (const base of bases) {
+    const url = getAdminApiUrl(path, base);
+    try {
+      const response = await fetch(url, init);
+      if (base === "/api" && response.status === 404 && bases.length > 1) {
+        continue;
+      }
+      return response;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  if (lastError instanceof Error) {
+    throw lastError;
+  }
+  throw new Error("Failed to reach admin API");
 }
 
 export function getSession(): AdminSession | null {
@@ -43,7 +74,7 @@ async function parseError(response: Response): Promise<string> {
 }
 
 export async function createAdminSession(login: string, password: string): Promise<void> {
-  const response = await fetch(getAdminApiUrl("/admin/login"), {
+  const response = await fetchAdmin("/admin/login", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ login, password }),
@@ -56,7 +87,7 @@ export async function createAdminSession(login: string, password: string): Promi
 }
 
 export async function ensureAdminSession(): Promise<void> {
-  const response = await fetch(getAdminApiUrl("/admin/session"), {
+  const response = await fetchAdmin("/admin/session", {
     method: "GET",
     credentials: "include",
   });
@@ -66,7 +97,7 @@ export async function ensureAdminSession(): Promise<void> {
 }
 
 export async function revokeAdminSession(): Promise<void> {
-  await fetch(getAdminApiUrl("/admin/session"), {
+  await fetchAdmin("/admin/session", {
     method: "DELETE",
     credentials: "include",
   });
@@ -80,7 +111,6 @@ export async function adminFetch(
   const session = getSession();
   if (!session) throw new Error("Not authenticated");
 
-  const url = getAdminApiUrl(path);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -90,7 +120,7 @@ export async function adminFetch(
       ...((options.headers as Record<string, string> | undefined) ?? {}),
     };
 
-    return await fetch(url, {
+    return await fetchAdmin(path, {
       ...options,
       credentials: "include",
       signal: options.signal ?? controller.signal,
