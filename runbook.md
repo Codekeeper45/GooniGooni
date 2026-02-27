@@ -1,257 +1,230 @@
-﻿# RUNBOOK - Gooni Gooni (VM + Modal)
+﻿# RUNBOOK - Gooni Gooni Production Operations
 
 Last updated: 2026-02-27
 Owner: Codekeeper45
 
-## 1. Environment map
+## 1. Production topology
 
-### Production VM (frontend container)
-- Host name: `openclaw-server`
+### VM layer (user-facing app + admin auth)
+- Host: `openclaw-server`
 - Zone: `us-east1-b`
 - External IP: `34.73.173.191`
-- Runtime: Docker container `gooni-gooni` (`nginx + local admin-api`)
-- App URL: `http://34.73.173.191/`
-- Admin URL: `http://34.73.173.191/admin`
-- Health URL: `http://34.73.173.191/health`
+- Container: `gooni-gooni`
+- Runtime inside container:
+  - `nginx` serves frontend (`/`, `/admin`)
+  - local `uvicorn` serves admin API behind same-origin `/api/*`
 
-### Modal (backend API)
+### Modal layer (generation backend)
 - Workspace: `yapparov-emir-f`
 - App: `gooni-gooni-backend`
 - API URL: `https://yapparov-emir-f--gooni-api.modal.run`
-- Direct admin URL (fallback mode): `https://yapparov-emir-f--gooni-api.modal.run/admin`
 - Health URL: `https://yapparov-emir-f--gooni-api.modal.run/health`
-- Docs URL: `https://yapparov-emir-f--gooni-api.modal.run/docs`
-- Modal dashboard: `https://modal.com/apps/yapparov-emir-f/main/deployed/gooni-gooni-backend`
+- Dashboard: `https://modal.com/apps/yapparov-emir-f/main/deployed/gooni-gooni-backend`
 
 ### GitHub
 - Repo: `https://github.com/Codekeeper45/GooniGooni.git`
-- Main work branch now: `001-fix-vram-oom`
+- Working branch: `001-fix-vram-oom`
 
-## 2. Access prerequisites
+## 2. Canonical URLs
 
-### GCP access (VM)
+- Site: `http://34.73.173.191/`
+- Admin page: `http://34.73.173.191/admin`
+- VM health: `http://34.73.173.191/health`
+- VM local admin API health: `http://34.73.173.191/api/health`
+- Modal API health: `https://yapparov-emir-f--gooni-api.modal.run/health`
+
+## 3. Access setup
+
+### GCP / VM
 ```bash
 gcloud auth login
 gcloud config set project <YOUR_PROJECT_ID>
 gcloud compute instances list
 ```
 
-### Modal access
+### Modal
 ```bash
 pip install modal
 modal setup
 modal profile current
 ```
 
-### GitHub access
+### Repo access
 ```bash
 git remote -v
 git ls-remote origin
 ```
 
-## 2.1 SSH commands (VM)
+## 4. Secret model
 
-### Connect to VM shell
+Do not store real values in git.
+
+### Modal secrets
+- `gooni-api-key`: `API_KEY`
+- `gooni-admin`: `ADMIN_LOGIN`, `ADMIN_PASSWORD_HASH`
+- `huggingface`: `HF_TOKEN`
+- `gooni-accounts`: `ACCOUNTS_ENCRYPT_KEY`
+
+### VM runtime secrets
+- File on VM: `/opt/gooni/admin.env`
+- Used by local admin API in container (`--env-file /opt/gooni/admin.env`)
+
+Example content:
+```dotenv
+ADMIN_LOGIN=admin
+ADMIN_PASSWORD_HASH=pbkdf2_sha256$<iterations>$<salt>$<hex_digest>
+ACCOUNTS_ENCRYPT_KEY=<FERNET_KEY>
+ADMIN_COOKIE_SECURE=0
+ADMIN_COOKIE_SAMESITE=lax
+```
+
+## 5. Admin auth details
+
+- Admin UI does not require backend URL input.
+- Admin UI talks to same-origin `/api/*` on VM.
+- Local admin API is independent from Modal billing limits.
+- Cookie name: `gg_admin_session`
+- Cookie flags are controlled by:
+  - `ADMIN_COOKIE_SECURE` (`1` for HTTPS)
+  - `ADMIN_COOKIE_SAMESITE` (`lax`, `strict`, `none`)
+
+## 6. Password hash generation
+
+Generate PBKDF2 hash:
+```bash
+python -c "import os,hashlib,binascii; p='CHANGE_ME'; i=600000; s=binascii.hexlify(os.urandom(16)).decode(); d=hashlib.pbkdf2_hmac('sha256', p.encode(), s.encode(), i).hex(); print(f'pbkdf2_sha256${i}${s}${d}')"
+```
+
+## 7. VM operations
+
+### SSH quick commands
 ```bash
 gcloud compute ssh openclaw-server --zone=us-east1-b
-```
-
-### Run one command on VM
-```bash
 gcloud compute ssh openclaw-server --zone=us-east1-b --command "hostname"
-```
-
-### Check app repo and current commit on VM
-```bash
 gcloud compute ssh openclaw-server --zone=us-east1-b --command "cd ~/gooni-gooni && git branch --show-current && git rev-parse --short HEAD"
 ```
 
-### Update branch on VM
+### Ensure admin env exists on VM
 ```bash
-gcloud compute ssh openclaw-server --zone=us-east1-b --command "cd ~/gooni-gooni && git fetch --all --prune && git checkout 001-fix-vram-oom && git pull --ff-only origin 001-fix-vram-oom"
+gcloud compute ssh openclaw-server --zone=us-east1-b --command "sudo mkdir -p /opt/gooni /opt/gooni/results && sudo test -f /opt/gooni/admin.env || echo 'Create /opt/gooni/admin.env first'"
 ```
 
-### Rebuild frontend container on VM (with fresh base images)
+Generate Fernet key for `ACCOUNTS_ENCRYPT_KEY`:
 ```bash
-gcloud compute ssh openclaw-server --zone=us-east1-b --command "cd ~/gooni-gooni && sudo docker build --pull -t gooni-gooni:local --build-arg VITE_API_URL=https://yapparov-emir-f--gooni-api.modal.run ."
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
-### Restart frontend container on VM
+### Full VM deploy (recommended)
+
+This command always updates git, rebuilds with fresh base images, and restarts container.
+It fails fast because of `set -e`.
+
 ```bash
-gcloud compute ssh openclaw-server --zone=us-east1-b --command "sudo mkdir -p /opt/gooni/results; sudo docker stop gooni-gooni >/dev/null 2>&1 || true; sudo docker rm gooni-gooni >/dev/null 2>&1 || true; sudo docker run -d --name gooni-gooni --restart unless-stopped -p 80:80 -v /opt/gooni/results:/results -e ADMIN_LOGIN=<LOGIN> -e ADMIN_PASSWORD_HASH=<PBKDF2_HASH> -e ADMIN_COOKIE_SECURE=0 -e ADMIN_COOKIE_SAMESITE=lax gooni-gooni:local"
+gcloud compute ssh openclaw-server --zone=us-east1-b --command "bash -lc 'set -e; cd ~/gooni-gooni; git fetch --all --prune; git checkout 001-fix-vram-oom; git pull --ff-only origin 001-fix-vram-oom; sudo docker build --pull -t gooni-gooni:local --build-arg VITE_API_URL=https://yapparov-emir-f--gooni-api.modal.run .; sudo mkdir -p /opt/gooni/results; sudo test -f /opt/gooni/admin.env; sudo docker stop gooni-gooni >/dev/null 2>&1 || true; sudo docker rm gooni-gooni >/dev/null 2>&1 || true; sudo docker run -d --name gooni-gooni --restart unless-stopped -p 80:80 -v /opt/gooni/results:/results --env-file /opt/gooni/admin.env gooni-gooni:local; sleep 8; sudo docker ps --filter name=gooni-gooni --format "table {{.Names}}\\t{{.Image}}\\t{{.Status}}"'"
 ```
 
-### Check container status and logs
+### Verify VM deployment
 ```bash
-gcloud compute ssh openclaw-server --zone=us-east1-b --command "sudo docker ps --filter name=gooni-gooni"
+curl -i http://34.73.173.191/health
+curl -i http://34.73.173.191/api/health
+```
+
+### Check container logs
+```bash
 gcloud compute ssh openclaw-server --zone=us-east1-b --command "sudo docker logs --tail=200 gooni-gooni"
 ```
 
-### End-to-end VM deploy (single command)
-```bash
-gcloud compute ssh openclaw-server --zone=us-east1-b --command "bash -lc 'set -e; cd ~/gooni-gooni; git fetch --all --prune; git checkout 001-fix-vram-oom; git pull --ff-only origin 001-fix-vram-oom; sudo docker build --pull -t gooni-gooni:local --build-arg VITE_API_URL=https://yapparov-emir-f--gooni-api.modal.run .; sudo mkdir -p /opt/gooni/results; sudo docker stop gooni-gooni >/dev/null 2>&1 || true; sudo docker rm gooni-gooni >/dev/null 2>&1 || true; sudo docker run -d --name gooni-gooni --restart unless-stopped -p 80:80 -v /opt/gooni/results:/results -e ADMIN_LOGIN=<LOGIN> -e ADMIN_PASSWORD_HASH=<PBKDF2_HASH> -e ADMIN_COOKIE_SECURE=0 -e ADMIN_COOKIE_SAMESITE=lax gooni-gooni:local; sleep 5; sudo docker ps --filter name=gooni-gooni --format \"table {{.Names}}\\t{{.Image}}\\t{{.Status}}\"'"
-```
-
-## 3. Secrets inventory (where they live)
-
-Do not store real secret values in this repository.
-All sensitive values must live in secret managers only.
-
-| Secret name | Variables inside | Used by | Storage |
-|---|---|---|---|
-| `gooni-api-key` | `API_KEY` | backend API auth | Modal Secret |
-| `gooni-admin` | `ADMIN_LOGIN`, `ADMIN_PASSWORD_HASH` | admin login/password auth | Modal Secret |
-| `huggingface` | `HF_TOKEN` | model download | Modal Secret |
-| `gooni-accounts` | `ACCOUNTS_ENCRYPT_KEY` (and account bootstrap values if used) | account crypto/deploy | Modal Secret |
-
-### Required local env for frontend build/runtime
-- `VITE_API_URL` (points to Modal API URL)
-
-### Secret checks (without printing values)
-```bash
-modal secret list
-```
-
-### Current admin auth flow
-- Admin UI does not ask for backend URL.
-- Admin API is called via same-origin `/api` on VM and served by local admin backend in the same container.
-- If UI is opened directly on `*.modal.run`, frontend falls back to direct `/admin/*` endpoints.
-- Admin session uses httpOnly cookie `gg_admin_session` (set `ADMIN_COOKIE_SECURE=1` when running behind HTTPS).
-
-## 4. Secret creation/rotation
-
-### Create password hash for admin (PBKDF2-SHA256)
-```bash
-python -c "import os,hashlib,binascii; pwd='CHANGE_ME'; it=600000; salt=binascii.hexlify(os.urandom(16)).decode(); digest=hashlib.pbkdf2_hmac('sha256', pwd.encode(), salt.encode(), it).hex(); print(f'pbkdf2_sha256${it}${salt}${digest}')"
-```
-
-### Create or update Modal secrets
-```bash
-modal secret create gooni-api-key API_KEY=<NEW_VALUE>
-modal secret create gooni-admin ADMIN_LOGIN=<LOGIN> ADMIN_PASSWORD_HASH=<PBKDF2_HASH>
-modal secret create huggingface HF_TOKEN=<NEW_VALUE>
-modal secret create gooni-accounts ACCOUNTS_ENCRYPT_KEY=<NEW_VALUE>
-```
-
-### Rotation policy
-- Rotate `API_KEY` and admin password hash on schedule and after any incident.
-- Rotate `HF_TOKEN` if compromised.
-- Rotate `ACCOUNTS_ENCRYPT_KEY` only with a migration plan (it protects encrypted account secrets).
-
-## 5. Deploy procedures
-
-### A) Deploy backend to Modal
-From repo root:
-```bash
-modal deploy backend/app.py
-```
-
-Verify:
-```bash
-curl -sS https://yapparov-emir-f--gooni-api.modal.run/health
-# expected: {"ok":true}
-```
-
-### B) Deploy frontend container to VM
-From local machine:
-```bash
-gcloud compute ssh openclaw-server --zone=us-east1-b --command "bash -lc 'set -e; cd ~/gooni-gooni; git fetch --all --prune; git checkout 001-fix-vram-oom; git pull --ff-only origin 001-fix-vram-oom; sudo docker build --pull -t gooni-gooni:local --build-arg VITE_API_URL=https://yapparov-emir-f--gooni-api.modal.run .; sudo mkdir -p /opt/gooni/results; sudo docker stop gooni-gooni >/dev/null 2>&1 || true; sudo docker rm gooni-gooni >/dev/null 2>&1 || true; sudo docker run -d --name gooni-gooni --restart unless-stopped -p 80:80 -v /opt/gooni/results:/results -e ADMIN_LOGIN=<LOGIN> -e ADMIN_PASSWORD_HASH=<PBKDF2_HASH> -e ADMIN_COOKIE_SECURE=0 -e ADMIN_COOKIE_SAMESITE=lax gooni-gooni:local; sleep 8; sudo docker ps --filter name=gooni-gooni --format \"table {{.Names}}\\t{{.Image}}\\t{{.Status}}\"'"
-```
-
-Verify:
-```bash
-curl -i http://34.73.173.191/health
-# expected: HTTP 200 and body: OK
-```
-
-## 5.1 Modal commands used in operations
-
-### Authentication and profile
-```bash
-modal setup
-modal profile current
-```
+## 8. Modal operations
 
 ### Deploy backend
 ```bash
 modal deploy backend/app.py
 ```
 
-### Deploy backend with explicit GPU classes
+### Deploy with explicit GPU class
 ```bash
 VIDEO_GPU=A10G IMAGE_GPU=A10G modal deploy backend/app.py
 ```
 
-### Check logs
+### Logs
 ```bash
 modal app logs gooni-gooni-backend
 modal app logs gooni-gooni-backend -f
 ```
 
-### Check web endpoints
+### Health checks
 ```bash
 curl -sS https://yapparov-emir-f--gooni-api.modal.run/health
 curl -sS https://yapparov-emir-f--gooni-api-health.modal.run
 ```
 
-### Secret operations
+## 9. End-to-end verification checklist
+
+### A) Site and admin
 ```bash
-modal secret list
-modal secret create gooni-api-key API_KEY=<NEW_VALUE>
-modal secret create gooni-admin ADMIN_LOGIN=<LOGIN> ADMIN_PASSWORD_HASH=<PBKDF2_HASH>
-modal secret create huggingface HF_TOKEN=<NEW_VALUE>
-modal secret create gooni-accounts ACCOUNTS_ENCRYPT_KEY=<NEW_VALUE>
+curl -i http://34.73.173.191/
+curl -i http://34.73.173.191/admin
+curl -i http://34.73.173.191/api/health
 ```
 
-### Optional: local route testing
+### B) Admin login/session
 ```bash
-modal serve backend/app.py
+# Login should return 204 and set cookie
+curl -i -X POST http://34.73.173.191/api/admin/login \
+  -H "Content-Type: application/json" \
+  -d '{"login":"<ADMIN_LOGIN>","password":"<ADMIN_PASSWORD>"}'
 ```
 
-## 6. Operational checks
-
-### Backend checks
+### C) Modal generation API
 ```bash
-curl -sS https://yapparov-emir-f--gooni-api.modal.run/health
-curl -sS https://yapparov-emir-f--gooni-api.modal.run/models -H "X-API-Key: <API_KEY>"
+curl -i https://yapparov-emir-f--gooni-api.modal.run/health
+curl -i https://yapparov-emir-f--gooni-api.modal.run/models -H "X-API-Key: <API_KEY>"
 ```
 
-### VM checks
+## 10. Rollback
+
+### VM rollback to previous commit/branch
 ```bash
-gcloud compute ssh openclaw-server --zone=us-east1-b --command "sudo docker ps --filter name=gooni-gooni"
-gcloud compute ssh openclaw-server --zone=us-east1-b --command "sudo docker logs --tail=100 gooni-gooni"
+gcloud compute ssh openclaw-server --zone=us-east1-b --command "bash -lc 'set -e; cd ~/gooni-gooni; git fetch --all --prune; git checkout <PREVIOUS_GOOD_REF>; sudo docker build --pull -t gooni-gooni:local --build-arg VITE_API_URL=https://yapparov-emir-f--gooni-api.modal.run .; sudo docker stop gooni-gooni >/dev/null 2>&1 || true; sudo docker rm gooni-gooni >/dev/null 2>&1 || true; sudo docker run -d --name gooni-gooni --restart unless-stopped -p 80:80 -v /opt/gooni/results:/results --env-file /opt/gooni/admin.env gooni-gooni:local'"
 ```
 
-### Modal logs
+### Modal rollback
 ```bash
-modal app logs gooni-gooni-backend
-```
-
-## 7. Rollback
-
-### Backend rollback (Modal)
-```bash
-git checkout <PREVIOUS_GOOD_COMMIT>
+git checkout <PREVIOUS_GOOD_REF>
 modal deploy backend/app.py
 ```
 
-### VM rollback
-```bash
-gcloud compute ssh openclaw-server --zone=us-east1-b --command "bash -lc 'cd ~/gooni-gooni; git fetch --all --prune; git checkout <PREVIOUS_GOOD_BRANCH_OR_COMMIT>; sudo docker build --pull -t gooni-gooni:local --build-arg VITE_API_URL=https://yapparov-emir-f--gooni-api.modal.run .; sudo docker stop gooni-gooni >/dev/null 2>&1 || true; sudo docker rm gooni-gooni >/dev/null 2>&1 || true; sudo docker run -d --name gooni-gooni --restart unless-stopped -p 80:80 gooni-gooni:local'"
-```
+## 11. Common incidents
 
-## 8. Troubleshooting quick list
+### Admin login shows `Failed to fetch`
+- Check VM container is running:
+  - `sudo docker ps --filter name=gooni-gooni`
+- Check local admin API:
+  - `curl -i http://34.73.173.191/api/health`
+- Check nginx proxy section `location /api/` in `nginx.conf`.
 
-- `401/403` on API: check `API_KEY`, session cookie, CORS origins.
-- Admin auth fails: check `gooni-admin` secret has valid `ADMIN_LOGIN` + `ADMIN_PASSWORD_HASH`.
-- `Failed to fetch` on admin login: open admin via `http://34.73.173.191/admin` (VM) or verify `/api` proxy in `nginx.conf`.
-- Model load errors: check `huggingface` secret and model access rights.
-- Worker account failures: check `gooni-accounts` secret and admin account statuses.
-- Frontend cannot call backend: rebuild VM image with correct `VITE_API_URL`.
+### Admin login returns `401/403`
+- Verify `/opt/gooni/admin.env` values.
+- Ensure `ADMIN_LOGIN`, `ADMIN_PASSWORD_HASH`, and `ACCOUNTS_ENCRYPT_KEY` are set correctly.
+- Restart container after env changes.
 
-## 9. Security rules (mandatory)
+### Modal returns `429` with billing text
+- Root cause: Modal workspace spend limit reached.
+- Action: fix billing/quota in Modal dashboard.
+- Note: admin login on VM still works because it is local now.
 
-- Never commit real passwords, keys, tokens, or `.env` with real values.
-- Never print full keys in logs.
-- Keep secrets only in Modal Secret Manager and private operator vault.
-- If compromise suspected: rotate secrets first, then redeploy backend and VM.
+### No changes after deploy
+- Ensure git pulled latest commit on VM.
+- Ensure docker image rebuilt with `--pull`.
+- Ensure old container was removed and new one started.
+- Confirm current running image:
+  - `sudo docker ps --filter name=gooni-gooni`
+  - `sudo docker inspect gooni-gooni --format '{{.Image}}'`
+
+## 12. Security rules
+
+- Never commit real passwords, API keys, or token secrets.
+- Never print full secrets in logs.
+- Store Modal secrets only in Modal secret manager.
+- Store VM admin env only in `/opt/gooni/admin.env` with restricted access.
+- After suspected compromise: rotate secrets first, then redeploy VM and Modal.

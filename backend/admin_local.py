@@ -195,11 +195,21 @@ async def admin_add_account(
     token_secret: str = Body(...),
     _ip: str = Depends(get_admin_auth("add_account_local")),
 ):
-    account_id = acc_store.add_account(
-        label=label,
-        token_id=token_id,
-        token_secret=token_secret,
-    )
+    try:
+        account_id = acc_store.add_account(
+            label=label,
+            token_id=token_id,
+            token_secret=token_secret,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=_error_payload(
+                code="admin_storage_misconfigured",
+                detail=str(exc),
+                user_action="Set ACCOUNTS_ENCRYPT_KEY in VM env and restart container.",
+            ),
+        ) from exc
     deploy_account_async(account_id)
     return {"id": account_id, "status": "pending", "message": "Deploying..."}
 
@@ -279,4 +289,3 @@ async def admin_get_logs(
     _ip: str = Depends(get_admin_auth("read_logs_local")),
 ):
     return {"logs": storage.get_audit_logs(limit=limit)}
-
