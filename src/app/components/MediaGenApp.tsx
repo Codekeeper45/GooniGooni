@@ -1,991 +1,463 @@
-import { useEffect, useRef, useState } from "react";
+/**
+ * MediaGenApp — E2E Generation Orchestrator
+ * ==========================================
+ * Root component that wires ControlPanel → Backend API → OutputPanel → Gallery.
+ *
+ * Flow:
+ *   1. User configures params in ControlPanel
+ *   2. handleGenerate() → POST /generate → {task_id}
+ *   3. Poll GET /status/{task_id} every 2s → progress/stage updates
+ *   4. On done → GET /results/{task_id} → blob URL
+ *   5. Save to GalleryContext + local history
+ */
+
+import { useState, useCallback, useEffect, useRef } from "react";
 import { Navbar } from "./Navbar";
 import { ControlPanel } from "./ControlPanel";
 import { OutputPanel } from "./OutputPanel";
 import { HistoryPanel } from "./HistoryPanel";
-import { useGallery } from "../context/GalleryContext";
-import type { GalleryItem } from "../context/GalleryContext";
-import type { 
-  GenerationType, 
-  VideoModel, 
+import type {
+  GenerationType,
+  VideoModel,
   ImageModel,
   VideoMode,
   ImageMode,
-  GenerationStatus 
+  GenerationStatus,
+  ArbitraryFrameItem,
 } from "./ControlPanel";
 import type { HistoryItem } from "./HistoryPanel";
-
-const API_URL = ((import.meta as any).env.VITE_API_URL as string | undefined) ?? "";
-
-// в”Ђв”Ђв”Ђ Generation status messages в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
-
-function getStatusText(progress: number, type: GenerationType): string {
-  if (type === "video") {
-    if (progress < 8) return "Initializing video model...";
-    if (progress < 20) return "Encoding prompt...";
-    if (progress < 45) return "Rendering frames...";
-    if (progress < 75) return "Upscaling...";
-    if (progress < 92) return "Applying enhancements...";
-    return "Finalizing video...";
-  } else {
-    if (progress < 15) return "Loading image model...";
-    if (progress < 35) return "Processing prompt...";
-    if (progress < 70) return "Generating image...";
-    if (progress < 92) return "Refining details...";
-    return "Finalizing...";
-  }
-}
-
+import { useGallery } from "../context/GalleryContext";
+import {
+  sessionFetch,
+  ensureGenerationSession,
+  readApiError,
+} from "../utils/sessionClient";
 import { configManager } from "../utils/configManager";
 import type { ModelId } from "../utils/configManager";
-import { ensureGenerationSession, readApiError, sessionFetch } from "../utils/sessionClient";
 
-// в”Ђв”Ђв”Ђ API Integration в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
-type PollStatus = "pending" | "processing" | "done" | "failed";
+// ─── Status text mapping ──────────────────────────────────────────────────────
 
-interface PollSnapshot {
-  taskId: string;
-  status: PollStatus;
-  progress: number;
-  stage?: string;
-  stageDetail?: string;
-  errorMsg?: string;
-  resultUrl?: string;
-  previewUrl?: string;
-}
+const STAGE_LABELS: Record<string, string> = {
+  queued: "Waiting for GPU worker…",
+  pending: "Waiting for GPU worker…",
+  loading_model: "Loading AI model…",
+  preprocessing: "Preparing inputs…",
+  generating_video: "Generating video…",
+  generating_image: "Generating image…",
+  generating: "Generating…",
+  postprocessing: "Encoding result…",
+  saving: "Saving to gallery…",
+  done: "Complete!",
+  failed: "Generation failed",
+};
 
-interface PersistedResult {
-  url: string;
-  thumbnailUrl?: string;
-  seed: number;
-  width: number;
-  height: number;
-  prompt: string;
-  model: string;
-  type: GenerationType;
-}
-
-interface PersistedUiState {
-  generationType: GenerationType;
-  videoModel: VideoModel;
-  imageModel: ImageModel;
-  videoMode: VideoMode;
-  imageMode: ImageMode;
-  prompt: string;
-  negativePrompt: string;
-  width: number;
-  height: number;
-  seed: number;
-  outputFormat: string;
-  numFrames: number;
-  videoSteps: number;
-  guidanceScale: number;
-  fps: number;
-  motionScore: number;
-  cfgScaleVideo: number;
-  referenceStrength: number;
-  lightingVariant: "high_noise" | "low_noise";
-  denoisingStrength: number;
-  imageSteps: number;
-  cfgScaleImage: number;
-  clipSkip: number;
-  sampler: string;
-  imageGuidanceScale: number;
-  imgDenoisingStrength: number;
-  useAdvancedSettings: boolean;
-  status: GenerationStatus;
-  progress: number;
-  statusText: string;
-  result: PersistedResult | null;
-  error: string | null;
-  savedAt: number;
-}
-
-const ACTIVE_TASK_KEY = "gg_active_task";
-const UI_STATE_KEY = "mg_ui_state_v1";
-const HISTORY_KEY = "mg_history_v1";
-const MAX_HISTORY_ITEMS = 100;
-
-interface ActiveTask {
-  task_id: string;
-  type: GenerationType;
-  modelKey: VideoModel | ImageModel;
-  mode: VideoMode | ImageMode;
-  prompt: string;
-  modelName: string;
-  width: number;
-  height: number;
-  seed: number;
-  startedAt: number;
-}
-
-function saveActiveTask(t: ActiveTask) {
-  localStorage.setItem(ACTIVE_TASK_KEY, JSON.stringify(t));
-}
-
-function clearActiveTask() {
-  localStorage.removeItem(ACTIVE_TASK_KEY);
-}
-
-function getActiveTask(): ActiveTask | null {
-  try {
-    const raw = localStorage.getItem(ACTIVE_TASK_KEY);
-    return raw ? (JSON.parse(raw) as ActiveTask) : null;
-  } catch {
-    return null;
+function getStatusText(stage: string | null, generationType: GenerationType): string {
+  if (!stage) return "Initializing…";
+  if (stage === "generating") {
+    return generationType === "video" ? "Generating video…" : "Generating image…";
   }
+  return STAGE_LABELS[stage] ?? `Processing: ${stage}`;
 }
 
-function loadUiState(): PersistedUiState | null {
-  try {
-    const raw = localStorage.getItem(UI_STATE_KEY);
-    if (!raw) return null;
-    return JSON.parse(raw) as PersistedUiState;
-  } catch {
-    return null;
-  }
-}
+// ─── Polling interval ─────────────────────────────────────────────────────────
 
-function patchUiState(patch: Partial<PersistedUiState>) {
-  try {
-    const current = loadUiState() ?? ({} as PersistedUiState);
-    const next = {
-      ...current,
-      ...patch,
-      savedAt: Date.now(),
-    };
-    localStorage.setItem(UI_STATE_KEY, JSON.stringify(next));
-  } catch {
-    // Best-effort local persistence
-  }
-}
+const POLL_INTERVAL_MS = 2000;
+const MAX_POLL_ERRORS = 5;
 
-function deserializeHistory(raw: string): HistoryItem[] {
-  try {
-    const parsed = JSON.parse(raw) as Array<Record<string, unknown>>;
-    return parsed
-      .map((item) => ({
-        ...(item as Omit<HistoryItem, "createdAt" | "updatedAt">),
-        createdAt: new Date(String(item.createdAt ?? Date.now())),
-        updatedAt: item.updatedAt ? new Date(String(item.updatedAt)) : undefined,
-      }))
-      .filter((item) => Boolean(item.id) && Boolean(item.prompt));
-  } catch {
-    return [];
-  }
-}
+// ─── Component ────────────────────────────────────────────────────────────────
 
-function loadHistory(): HistoryItem[] {
-  const raw = localStorage.getItem(HISTORY_KEY);
-  if (!raw) return [];
-  return deserializeHistory(raw);
-}
-
-function saveHistory(history: HistoryItem[]) {
-  localStorage.setItem(HISTORY_KEY, JSON.stringify(history.slice(0, MAX_HISTORY_ITEMS)));
-}
-
-async function generateMediaAPI(
-  onProgress: (p: number) => void,
-  onStatusText: (text: string) => void,
-  params: any,
-  onTaskCreated?: (task_id: string) => void,
-  onTaskSnapshot?: (snapshot: PollSnapshot) => void,
-  signal?: AbortSignal,
-): Promise<{ url: string; thumbnailUrl?: string }> {
-  const modelId: ModelId = params.type === "video" ? params.videoModel : params.imageModel;
-  const mode = params.type === "video" ? params.videoMode : params.imageMode;
-
-  const values = {
-    ...params,
-    num_frames: params.numFrames,
-    steps: params.type === "video" ? params.videoSteps : params.imageSteps,
-    cfg_scale: params.type === "video" ? params.cfgScaleVideo : params.cfgScaleImage,
-    guidance_scale: params.type === "video" ? params.guidanceScale : params.imageGuidanceScale,
-    output_format: params.outputFormat,
-    reference_image: params.referenceImage,
-    init_image: params.referenceImage,
-    first_frame_image: params.firstFrameImage,
-    last_frame_image: params.lastFrameImage,
-    arbitrary_frames: params.arbitraryFrames.map((f: any) => ({
-      frame_index: f.frameIndex,
-      image: f.image,
-    })),
-  };
-
-  const payload = configManager.buildPayload(modelId, mode, values);
-  const validation = configManager.validateValues(modelId, mode, payload);
-  if (!validation.valid) {
-    throw new Error(`Validation failed: ${validation.errors.join(", ")}`);
-  }
-
-  if (!API_URL) {
-    throw new Error("Backend not configured. Set VITE_API_URL in .env and rebuild the app.");
-  }
-
-  await ensureGenerationSession();
-  const genRes = await sessionFetch(
-    "/generate",
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    },
-    { retryOn401: true }
-  );
-
-  if (!genRes.ok) {
-    const err = await readApiError(genRes, "Generate request failed.");
-    const detail = err.detail;
-    const code = err.code;
-    const userAction = err.userAction;
-    if (genRes.status === 503 && code === "queue_overloaded") {
-      throw new Error("Queue overloaded: all safe video workers are busy. Retry in 30s.");
-    }
-    if (genRes.status === 422) {
-      throw new Error(`Validation error: ${detail} ${userAction}`.trim());
-    }
-    throw new Error(`Generate failed (${genRes.status}): ${detail} ${userAction}`.trim());
-  }
-
-  const { task_id } = await genRes.json() as { task_id: string };
-  onTaskCreated?.(task_id);
-  onProgress(5);
-
-  return pollTask(task_id, params.type, onProgress, onStatusText, onTaskSnapshot, signal);
-}
-
-async function pollTask(
-  task_id: string,
-  type: GenerationType,
-  onProgress: (p: number) => void,
-  onStatusText: (text: string) => void,
-  onTaskSnapshot?: (snapshot: PollSnapshot) => void,
-  signal?: AbortSignal,
-): Promise<{ url: string; thumbnailUrl?: string }> {
-  const POLL_INTERVAL_MS = 3000;
-  const MAX_POLLS = 400;
-
-  for (let poll = 0; poll < MAX_POLLS; poll++) {
-    if (poll > 0) {
-      await new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(resolve, POLL_INTERVAL_MS);
-        signal?.addEventListener("abort", () => {
-          clearTimeout(timer);
-          reject(new DOMException("Polling aborted", "AbortError"));
-        }, { once: true });
-      });
-    }
-    if (signal?.aborted) throw new DOMException("Polling aborted", "AbortError");
-    const statusRes = await sessionFetch(`/status/${task_id}`, { signal }, { retryOn401: true });
-    if (!statusRes.ok) {
-      const err = await readApiError(statusRes, "Status check failed.");
-      throw new Error(`Status check failed (${statusRes.status}): ${err.detail} ${err.userAction}`.trim());
-    }
-    const { status, progress, error_msg, stage, stage_detail, result_url, preview_url } = await statusRes.json() as {
-      status: string;
-      progress: number;
-      error_msg?: string;
-      stage?: string;
-      stage_detail?: string;
-      result_url?: string;
-      preview_url?: string;
-    };
-
-    const normalizedStatus: PollStatus = (
-      status === "done" || status === "failed" || status === "processing"
-        ? status
-        : "pending"
-    );
-    const normalizedProgress = normalizedStatus === "done" ? 100 : Math.max(5, Math.min(99, progress ?? 0));
-    onProgress(normalizedProgress);
-    onTaskSnapshot?.({
-      taskId: task_id,
-      status: normalizedStatus,
-      progress: normalizedProgress,
-      stage,
-      stageDetail: stage_detail,
-      errorMsg: error_msg,
-      resultUrl: result_url,
-      previewUrl: preview_url,
-    });
-
-    if (normalizedStatus === "failed") throw new Error(error_msg ?? "Generation failed on the server");
-
-    const stageText = stage_detail || stage;
-    onStatusText(stageText || (normalizedStatus === "pending" ? "Pending in queue..." : getStatusText(progress ?? 0, type)));
-
-    if (normalizedStatus === "done") {
-      const resultUrl = result_url || `${API_URL}/results/${task_id}`;
-      const previewUrl = preview_url || `${API_URL}/preview/${task_id}`;
-      return { url: resultUrl, thumbnailUrl: type === "video" ? previewUrl : undefined };
-    }
-  }
-  throw new Error("Generation timed out after polling limit reached");
-}
-function calcEstSeconds(
-  type: GenerationType,
-  videoFrames?: number,
-  imageSteps?: number
-): number {
-  if (type === "video") {
-    // num_frames / fps * complexity_factor
-    const frames = videoFrames || 81;
-    return Math.round((frames / 16) * 3.5);
-  } else {
-    // steps * step_time
-    const steps = imageSteps || 30;
-    return Math.round(steps * 0.4);
-  }
-}
-
-// в”Ђв”Ђв”Ђ Main Component в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 export function MediaGenApp() {
   const { addToGallery } = useGallery();
-  const persistedUi = loadUiState();
 
-  const [prompt, setPrompt] = useState<string>(() => persistedUi?.prompt ?? localStorage.getItem("mg_prompt") ?? "");
+  // ── Generation type & model ─────────────────────────────────────────────────
+  const [generationType, setGenerationType] = useState<GenerationType>("video");
+  const [videoModel, setVideoModel] = useState<VideoModel>("anisora");
+  const [imageModel, setImageModel] = useState<ImageModel>("pony");
 
-  const [generationType, setGenerationType] = useState<GenerationType>(() => persistedUi?.generationType ?? "video");
-  const [videoModel, setVideoModel] = useState<VideoModel>(() => persistedUi?.videoModel ?? "anisora");
-  const [imageModel, setImageModel] = useState<ImageModel>(() => persistedUi?.imageModel ?? "pony");
+  // ── Mode ────────────────────────────────────────────────────────────────────
+  const [videoMode, setVideoMode] = useState<VideoMode>("t2v");
+  const [imageMode, setImageMode] = useState<ImageMode>("txt2img");
 
-  const [videoMode, setVideoMode] = useState<VideoMode>(() => persistedUi?.videoMode ?? "t2v");
-  const [imageMode, setImageMode] = useState<ImageMode>(() => persistedUi?.imageMode ?? "txt2img");
+  // ── Advanced settings toggle ────────────────────────────────────────────────
+  const [useAdvancedSettings, setUseAdvancedSettings] = useState(false);
 
-  const [negativePrompt, setNegativePrompt] = useState(() => persistedUi?.negativePrompt ?? "");
-  const [width, setWidth] = useState(() => persistedUi?.width ?? 512);
-  const [height, setHeight] = useState(() => persistedUi?.height ?? 512);
-  const [seed, setSeed] = useState<number>(() => persistedUi?.seed ?? -1);
-  const [outputFormat, setOutputFormat] = useState(() => persistedUi?.outputFormat ?? "mp4");
+  // ── Common params ───────────────────────────────────────────────────────────
+  const [prompt, setPrompt] = useState("");
+  const [negativePrompt, setNegativePrompt] = useState("");
+  const [width, setWidth] = useState(720);
+  const [height, setHeight] = useState(1280);
+  const [seed, setSeed] = useState(-1);
+  const [outputFormat, setOutputFormat] = useState("mp4");
 
+  // ── Reference images (single) ───────────────────────────────────────────────
   const [referenceImage, setReferenceImage] = useState<string | null>(null);
+
+  // ── Multi-frame references ──────────────────────────────────────────────────
   const [firstFrameImage, setFirstFrameImage] = useState<string | null>(null);
   const [lastFrameImage, setLastFrameImage] = useState<string | null>(null);
-  const [arbitraryFrames, setArbitraryFrames] = useState<
-    Array<{ id: string; frameIndex: number; image: string }>
-  >([]);
 
-  const [numFrames, setNumFrames] = useState(() => persistedUi?.numFrames ?? 81);
-  const [videoSteps, setVideoSteps] = useState(() => persistedUi?.videoSteps ?? 8);
-  const [guidanceScale, setGuidanceScale] = useState(() => persistedUi?.guidanceScale ?? 1.0);
-  const [fps, setFps] = useState(() => persistedUi?.fps ?? 16);
-  const [motionScore, setMotionScore] = useState(() => persistedUi?.motionScore ?? 3.0);
-  const [cfgScaleVideo, setCfgScaleVideo] = useState(() => persistedUi?.cfgScaleVideo ?? 1.0);
-  const [referenceStrength, setReferenceStrength] = useState(() => persistedUi?.referenceStrength ?? 0.85);
-  const [lightingVariant, setLightingVariant] = useState<"high_noise" | "low_noise">(
-    () => persistedUi?.lightingVariant ?? "low_noise"
-  );
-  const [denoisingStrength, setDenoisingStrength] = useState(() => persistedUi?.denoisingStrength ?? 0.7);
+  // ── Arbitrary frames ────────────────────────────────────────────────────────
+  const [arbitraryFrames, setArbitraryFrames] = useState<ArbitraryFrameItem[]>([]);
 
-  const [imageSteps, setImageSteps] = useState(() => persistedUi?.imageSteps ?? 30);
-  const [cfgScaleImage, setCfgScaleImage] = useState(() => persistedUi?.cfgScaleImage ?? 6);
-  const [clipSkip, setClipSkip] = useState(() => persistedUi?.clipSkip ?? 2);
-  const [sampler, setSampler] = useState(() => persistedUi?.sampler ?? "Euler a");
-  const [imageGuidanceScale, setImageGuidanceScale] = useState(() => persistedUi?.imageGuidanceScale ?? 3.5);
-  const [imgDenoisingStrength, setImgDenoisingStrength] = useState(() => persistedUi?.imgDenoisingStrength ?? 0.7);
+  // ── Video params ────────────────────────────────────────────────────────────
+  const [numFrames, setNumFrames] = useState(81);
+  const [videoSteps, setVideoSteps] = useState(8);
+  const [guidanceScale, setGuidanceScale] = useState(1.0);
+  const [fps, setFps] = useState(16);
+  const [motionScore, setMotionScore] = useState(3.0);
+  const [cfgScaleVideo, setCfgScaleVideo] = useState(1.0);
+  const [referenceStrength, setReferenceStrength] = useState(0.85);
+  const [lightingVariant, setLightingVariant] = useState<"high_noise" | "low_noise">("low_noise");
+  const [denoisingStrength, setDenoisingStrength] = useState(0.7);
 
-  const [useAdvancedSettings, setUseAdvancedSettings] = useState(() => persistedUi?.useAdvancedSettings ?? false);
+  // ── Image params ────────────────────────────────────────────────────────────
+  const [imageSteps, setImageSteps] = useState(30);
+  const [cfgScaleImage, setCfgScaleImage] = useState(6.0);
+  const [clipSkip, setClipSkip] = useState(2);
+  const [sampler, setSampler] = useState("Euler a");
+  const [imageGuidanceScale, setImageGuidanceScale] = useState(3.5);
+  const [imgDenoisingStrength, setImgDenoisingStrength] = useState(0.7);
 
-  const [status, setStatus] = useState<GenerationStatus>(() => persistedUi?.status ?? "idle");
-  const [progress, setProgress] = useState(() => persistedUi?.progress ?? 0);
-  const [statusText, setStatusText] = useState(() => persistedUi?.statusText ?? "");
-  const [result, setResult] = useState<PersistedResult | null>(() => persistedUi?.result ?? null);
-  const [error, setError] = useState<string | null>(() => persistedUi?.error ?? null);
+  // ── Generation state ────────────────────────────────────────────────────────
+  const [status, setStatus] = useState<GenerationStatus>("idle");
+  const [progress, setProgress] = useState(0);
+  const [statusText, setStatusText] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<{
+    url: string;
+    thumbnailUrl?: string;
+    seed: number;
+    width: number;
+    height: number;
+    prompt: string;
+    model: string;
+    type: GenerationType;
+  } | null>(null);
 
-  const [history, setHistory] = useState<HistoryItem[]>(() => loadHistory());
+  // ── History ─────────────────────────────────────────────────────────────────
+  const [history, setHistory] = useState<HistoryItem[]>([]);
   const [showHistory, setShowHistory] = useState(false);
 
-  const resumeStartedRef = useRef(false);
-  const pollAbortRef = useRef<AbortController | null>(null);
-  const skipModelDefaultsRef = useRef(true);
+  // ── Refs for cleanup ────────────────────────────────────────────────────────
+  const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const abortRef = useRef(false);
 
+  // ── Cleanup on unmount ──────────────────────────────────────────────────────
   useEffect(() => {
-    return () => { pollAbortRef.current?.abort(); };
-  }, []);
-
-  const anisoraFixed = configManager.getFixedParameters("anisora");
-  const phr00tFixed = configManager.getFixedParameters("phr00t");
-  const anisoraStepsDefault = Number(anisoraFixed.steps?.value ?? 8);
-  const anisoraGuidanceDefault = Number(anisoraFixed.guidance_scale?.value ?? 1.0);
-  const phr00tStepsDefault = Number(phr00tFixed.steps?.value ?? 4);
-  const phr00tCfgDefault = Number(phr00tFixed.cfg_scale?.value ?? 1.0);
-
-  const setGenerationTypePersisted = (next: GenerationType) => {
-    setGenerationType(next);
-    patchUiState({ generationType: next });
-  };
-
-  const setVideoModelPersisted = (next: VideoModel) => {
-    setVideoModel(next);
-    patchUiState({ videoModel: next });
-  };
-
-  const setImageModelPersisted = (next: ImageModel) => {
-    setImageModel(next);
-    patchUiState({ imageModel: next });
-  };
-
-  const setVideoModePersisted = (next: VideoMode) => {
-    setVideoMode(next);
-    patchUiState({ videoMode: next });
-  };
-
-  const setImageModePersisted = (next: ImageMode) => {
-    setImageMode(next);
-    patchUiState({ imageMode: next });
-  };
-
-  const upsertHistoryItem = (item: HistoryItem) => {
-    setHistory((prev) => {
-      const rest = prev.filter((h) => h.id !== item.id);
-      return [item, ...rest].slice(0, MAX_HISTORY_ITEMS);
-    });
-  };
-
-  const patchHistoryItem = (id: string, patch: Partial<HistoryItem>) => {
-    setHistory((prev) => {
-      let found = false;
-      const next = prev.map((item) => {
-        if (item.id !== id) return item;
-        found = true;
-        return { ...item, ...patch, updatedAt: new Date() };
-      });
-      return found ? next : prev;
-    });
-  };
-
-  useEffect(() => {
-    localStorage.setItem("mg_prompt", prompt);
-  }, [prompt]);
-
-  useEffect(() => {
-    saveHistory(history);
-  }, [history]);
-
-  useEffect(() => {
-    let cancelled = false;
-    const modelLabel = (model: string): string => {
-      const key = model.toLowerCase();
-      if (key === "anisora") return "Index-AniSora V3.2";
-      if (key === "phr00t") return "Phr00t WAN 2.2 Rapid";
-      if (key === "pony") return "Pony Diffusion V6 XL";
-      if (key === "flux") return "Flux.1 [dev] nf4";
-      return model;
-    };
-
-    (async () => {
-      try {
-        await ensureGenerationSession();
-        const resp = await sessionFetch(
-          "/gallery?page=1&page_size=30&sort_by=created_at&sort_order=desc",
-          {},
-          { retryOn401: true },
-        );
-        if (!resp.ok) return;
-        const payload = await resp.json() as {
-          items: Array<{
-            id: string;
-            prompt: string;
-            model: string;
-            type: GenerationType;
-            width: number;
-            height: number;
-            seed: number;
-            created_at: string;
-            preview_url?: string;
-            result_url?: string;
-          }>;
-        };
-        if (cancelled || !Array.isArray(payload.items)) return;
-
-        setHistory((prev) => {
-          const knownIds = new Set(prev.map((item) => item.id));
-          const additions = payload.items
-            .filter((item) => !knownIds.has(item.id))
-            .map((item) => ({
-              id: item.id,
-              taskId: item.id,
-              prompt: item.prompt,
-              type: item.type,
-              model: modelLabel(item.model),
-              thumbnailUrl: item.preview_url || item.result_url,
-              width: item.width,
-              height: item.height,
-              seed: item.seed,
-              createdAt: new Date(item.created_at),
-              updatedAt: new Date(item.created_at),
-              status: "done" as const,
-            }));
-          if (additions.length === 0) return prev;
-          return [...additions, ...prev]
-            .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
-            .slice(0, MAX_HISTORY_ITEMS);
-        });
-      } catch {
-        // Best-effort history hydration from server.
-      }
-    })();
-
     return () => {
-      cancelled = true;
+      abortRef.current = true;
+      if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
     };
   }, []);
 
-  useEffect(() => {
-    const persisted: PersistedUiState = {
-      generationType,
-      videoModel,
-      imageModel,
-      videoMode,
-      imageMode,
+  // ── Derived model ID for configManager ──────────────────────────────────────
+  const currentModelId: ModelId =
+    generationType === "video" ? videoModel : imageModel;
+  const currentMode =
+    generationType === "video" ? videoMode : imageMode;
+  const currentModelLabel =
+    generationType === "video"
+      ? videoModel === "anisora"
+        ? "AniSora V3.2"
+        : "Phr00t WAN 2.2"
+      : imageModel === "pony"
+        ? "Pony V6 XL"
+        : "Flux.1 dev";
+
+  const estSeconds = configManager.calculateEstimate(currentModelId, {
+    num_frames: numFrames,
+    fps,
+    steps: generationType === "video" ? videoSteps : imageSteps,
+  });
+
+  // ── Build API payload from current state ────────────────────────────────────
+  const buildCurrentPayload = useCallback(() => {
+    const values: Record<string, any> = {
       prompt,
-      negativePrompt,
+      negative_prompt: negativePrompt,
       width,
       height,
       seed,
-      outputFormat,
-      numFrames,
-      videoSteps,
-      guidanceScale,
-      fps,
-      motionScore,
-      cfgScaleVideo,
-      referenceStrength,
-      lightingVariant,
-      denoisingStrength,
-      imageSteps,
-      cfgScaleImage,
-      clipSkip,
-      sampler,
-      imageGuidanceScale,
-      imgDenoisingStrength,
-      useAdvancedSettings,
-      status,
-      progress,
-      statusText,
-      result,
-      error,
-      savedAt: Date.now(),
+      output_format: outputFormat,
     };
-    localStorage.setItem(UI_STATE_KEY, JSON.stringify(persisted));
-  }, [
-    generationType,
-    videoModel,
-    imageModel,
-    videoMode,
-    imageMode,
-    prompt,
-    negativePrompt,
-    width,
-    height,
-    seed,
-    outputFormat,
-    numFrames,
-    videoSteps,
-    guidanceScale,
-    fps,
-    motionScore,
-    cfgScaleVideo,
-    referenceStrength,
-    lightingVariant,
-    denoisingStrength,
-    imageSteps,
-    cfgScaleImage,
-    clipSkip,
-    sampler,
-    imageGuidanceScale,
-    imgDenoisingStrength,
-    useAdvancedSettings,
-    status,
-    progress,
-    statusText,
-    result,
-    error,
-  ]);
 
-  useEffect(() => {
-    if (status === "generating") {
-      setStatusText(getStatusText(progress, generationType));
-    }
-  }, [progress, status, generationType]);
-
-  useEffect(() => {
-    if (skipModelDefaultsRef.current) {
-      skipModelDefaultsRef.current = false;
-      return;
-    }
     if (generationType === "video") {
-      if (videoModel === "anisora") {
-        setVideoSteps(anisoraStepsDefault);
-        setGuidanceScale(anisoraGuidanceDefault);
-        setFps(16);
-        setMotionScore(3.0);
-      } else if (videoModel === "phr00t") {
-        setVideoSteps(phr00tStepsDefault);
-        setCfgScaleVideo(phr00tCfgDefault);
-        setFps(16);
+      values.num_frames = numFrames;
+      values.fps = fps;
+      values.steps = videoSteps;
+      values.guidance_scale = guidanceScale;
+      values.cfg_scale = cfgScaleVideo;
+      values.reference_strength = referenceStrength;
+      values.lighting_variant = lightingVariant;
+      values.denoising_strength = denoisingStrength;
+
+      if (videoMode === "i2v" && referenceImage) {
+        values.reference_image = referenceImage;
+      }
+      if (videoMode === "first_last_frame") {
+        values.first_frame_image = firstFrameImage;
+        values.last_frame_image = lastFrameImage;
+      }
+      if (videoMode === "arbitrary_frame" && arbitraryFrames.length > 0) {
+        values.arbitrary_frames = arbitraryFrames.map((f) => ({
+          frame_index: f.frameIndex,
+          image: f.image,
+          strength: referenceStrength,
+        }));
       }
     } else {
-      if (imageModel === "pony") {
-        setImageSteps(30);
-        setCfgScaleImage(6);
-        setClipSkip(2);
-        setSampler("Euler a");
-      } else if (imageModel === "flux") {
-        setImageSteps(25);
-        setImageGuidanceScale(3.5);
-        setSampler("Euler");
+      values.steps = imageSteps;
+      values.cfg_scale = cfgScaleImage;
+      values.clip_skip = clipSkip;
+      values.sampler = sampler;
+      values.guidance_scale = imageGuidanceScale;
+      values.denoising_strength = imgDenoisingStrength;
+
+      if (imageMode === "img2img" && referenceImage) {
+        values.reference_image = referenceImage;
       }
     }
+
+    return configManager.buildPayload(currentModelId, currentMode, values);
   }, [
-    generationType,
-    videoModel,
-    imageModel,
-    anisoraStepsDefault,
-    anisoraGuidanceDefault,
-    phr00tStepsDefault,
-    phr00tCfgDefault,
+    prompt, negativePrompt, width, height, seed, outputFormat,
+    generationType, currentModelId, currentMode,
+    numFrames, fps, videoSteps, guidanceScale, cfgScaleVideo,
+    referenceStrength, lightingVariant, denoisingStrength,
+    videoMode, referenceImage, firstFrameImage, lastFrameImage,
+    arbitraryFrames,
+    imageSteps, cfgScaleImage, clipSkip, sampler, imageGuidanceScale,
+    imgDenoisingStrength, imageMode,
   ]);
 
-  useEffect(() => {
-    if (resumeStartedRef.current) return;
-    const saved = getActiveTask();
-    if (!saved || !saved.task_id) return;
+  // ── Poll status loop ────────────────────────────────────────────────────────
+  const startPolling = useCallback(
+    (taskId: string, resolvedSeed: number) => {
+      let consecutiveErrors = 0;
 
-    resumeStartedRef.current = true;
+      const poll = async () => {
+        if (abortRef.current) return;
+        try {
+          const resp = await sessionFetch(`/status/${taskId}`, {}, { retryOn401: true });
+          if (!resp.ok) {
+            const err = await readApiError(resp, "Status check failed");
+            consecutiveErrors++;
+            if (consecutiveErrors >= MAX_POLL_ERRORS) {
+              stopPolling();
+              setStatus("error");
+              setError(err.detail);
+            }
+            return;
+          }
 
-    if (Date.now() - saved.startedAt > 25 * 60 * 1000) {
-      clearActiveTask();
-      return;
-    }
+          consecutiveErrors = 0;
+          const data = await resp.json();
 
-    pollAbortRef.current?.abort();
-    const ac = new AbortController();
-    pollAbortRef.current = ac;
+          // Update progress & stage
+          setProgress(data.progress ?? 0);
+          setStatusText(getStatusText(data.stage, generationType));
 
-    setStatus("generating");
-    const resumeProgress = Math.max(progress, persistedUi?.progress ?? 0, 5);
-    setProgress(resumeProgress);
-    setStatusText((prev) => prev || persistedUi?.statusText || getStatusText(resumeProgress, saved.type));
-    setError(null);
-    setResult(null);
+          if (data.status === "done") {
+            stopPolling();
 
-    upsertHistoryItem({
-      id: saved.task_id,
-      taskId: saved.task_id,
-      prompt: saved.prompt,
-      type: saved.type,
-      model: saved.modelName,
-      thumbnailUrl: undefined,
-      width: saved.width,
-      height: saved.height,
-      seed: saved.seed,
-      createdAt: new Date(saved.startedAt),
-      updatedAt: new Date(),
-      status: "pending",
-    });
+            // Build result URL — use result_url from status if available,
+            // otherwise construct from /results/{task_id}
+            const API_URL = ((import.meta as any).env.VITE_API_URL as string | undefined)?.replace(/\/$/, "") ?? "";
+            const resultUrl = data.result_url ?? `${API_URL}/results/${taskId}`;
+            const previewUrl = data.preview_url;
 
-    pollTask(saved.task_id, saved.type, setProgress, setStatusText, (snapshot) => {
-      patchHistoryItem(saved.task_id, {
-        status: snapshot.status === "processing" ? "pending" : snapshot.status,
-        error: snapshot.status === "failed" ? snapshot.errorMsg : undefined,
-        thumbnailUrl: snapshot.previewUrl,
-      });
-    }, ac.signal)
-      .then(({ url: resultUrl, thumbnailUrl }) => {
-        const newResult = {
-          url: resultUrl,
-          thumbnailUrl,
-          seed: saved.seed,
-          width: saved.width,
-          height: saved.height,
-          prompt: saved.prompt,
-          model: saved.modelName,
-          type: saved.type,
-        };
-        setResult(newResult);
-        setStatus("done");
-        setProgress(100);
-        clearActiveTask();
+            setResult({
+              url: resultUrl,
+              thumbnailUrl: previewUrl ?? undefined,
+              seed: resolvedSeed,
+              width,
+              height,
+              prompt,
+              model: currentModelLabel,
+              type: generationType,
+            });
+            setStatus("done");
+            setProgress(100);
 
-        patchHistoryItem(saved.task_id, {
-          status: "done",
-          thumbnailUrl: thumbnailUrl || resultUrl,
-          error: undefined,
-        });
+            // Save to gallery
+            addToGallery({
+              id: taskId,
+              url: resultUrl,
+              thumbnailUrl: previewUrl ?? undefined,
+              prompt,
+              type: generationType,
+              model: currentModelLabel,
+              width,
+              height,
+              seed: resolvedSeed,
+              createdAt: new Date(),
+            });
 
-        const galleryItem: GalleryItem = {
-          id: saved.task_id,
-          url: resultUrl,
-          thumbnailUrl,
-          prompt: saved.prompt,
-          type: saved.type,
-          model: saved.modelName,
-          width: saved.width,
-          height: saved.height,
-          seed: saved.seed,
-          createdAt: new Date(saved.startedAt),
-        };
-        addToGallery(galleryItem);
-      })
-      .catch((err) => {
-        if ((err as { name?: string })?.name === "AbortError") return;
-        clearActiveTask();
-        setStatus("error");
-        const message = err instanceof Error ? err.message : "Generation failed";
-        setError(message);
-        patchHistoryItem(saved.task_id, { status: "failed", error: message });
-      });
-  }, [addToGallery]);
+            // Update history item status
+            setHistory((prev) =>
+              prev.map((h) =>
+                h.taskId === taskId ? { ...h, status: "done" as const, thumbnailUrl: previewUrl ?? resultUrl } : h
+              )
+            );
+          } else if (data.status === "failed") {
+            stopPolling();
+            setStatus("error");
+            setError(data.error_msg ?? "Generation failed on the server.");
 
-  const estSeconds = calcEstSeconds(
-    generationType,
-    generationType === "video" ? numFrames : undefined,
-    generationType === "image" ? imageSteps : undefined
+            // Update history item status
+            setHistory((prev) =>
+              prev.map((h) =>
+                h.taskId === taskId
+                  ? { ...h, status: "failed" as const, error: data.error_msg ?? "Failed" }
+                  : h
+              )
+            );
+          }
+        } catch (err) {
+          consecutiveErrors++;
+          if (consecutiveErrors >= MAX_POLL_ERRORS) {
+            stopPolling();
+            setStatus("error");
+            setError("Connection to server lost. Please retry.");
+          }
+        }
+      };
+
+      // First poll immediately
+      poll();
+      pollIntervalRef.current = setInterval(poll, POLL_INTERVAL_MS);
+    },
+    [generationType, width, height, prompt, currentModelLabel, addToGallery]
   );
 
-  const handleGenerate = async () => {
-    if (!prompt.trim()) return;
-
-    if (generationType === "video") {
-      if (videoMode === "i2v" && !referenceImage) {
-        return;
-      }
-      if (videoMode === "first_last_frame" && (!firstFrameImage || !lastFrameImage)) {
-        return;
-      }
-    } else if (imageMode === "img2img" && !referenceImage) {
-      return;
+  const stopPolling = useCallback(() => {
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current);
+      pollIntervalRef.current = null;
     }
+  }, []);
 
+  // ── Generate handler ────────────────────────────────────────────────────────
+  const handleGenerate = useCallback(async () => {
+    if (!prompt.trim()) return;
     if (status === "generating") return;
 
-    const finalSeed = useAdvancedSettings ? seed : -1;
-    const finalNegativePrompt = useAdvancedSettings ? negativePrompt : "";
-    const resolvedSeed = finalSeed === -1 ? Math.floor(Math.random() * 2147483647) : finalSeed;
-
+    abortRef.current = false;
     setStatus("generating");
     setProgress(0);
-    setStatusText(getStatusText(0, generationType));
+    setStatusText("Initializing…");
     setError(null);
     setResult(null);
-    let capturedTaskId = "";
+
+    const resolvedSeed = seed === -1 ? Math.floor(Math.random() * 2147483647) : seed;
+
+    // Add to history immediately as "pending"
+    const historyItem: HistoryItem = {
+      id: Date.now().toString(),
+      prompt,
+      type: generationType,
+      model: currentModelLabel,
+      width,
+      height,
+      seed: resolvedSeed,
+      createdAt: new Date(),
+      status: "pending",
+    };
+    setHistory((prev) => [historyItem, ...prev.slice(0, 49)]);
 
     try {
-      const modelName =
-        generationType === "video"
-          ? videoModel === "anisora"
-            ? "Index-AniSora V3.2"
-            : "Phr00t WAN 2.2 Rapid"
-          : imageModel === "pony"
-            ? "Pony Diffusion V6 XL"
-            : "Flux.1 [dev] nf4";
+      // 1. Ensure session
+      await ensureGenerationSession();
 
-      pollAbortRef.current?.abort();
-      const ac = new AbortController();
-      pollAbortRef.current = ac;
+      // 2. Build payload
+      const payload = buildCurrentPayload();
+      // Override seed with resolved value
+      payload.seed = resolvedSeed;
 
-      clearActiveTask();
-      const { url: resultUrl, thumbnailUrl } = await generateMediaAPI(
-        (p) => setProgress(p),
-        (text) => setStatusText(text),
+      // 3. POST /generate
+      const resp = await sessionFetch(
+        "/generate",
         {
-          type: generationType,
-          useAdvancedSettings,
-          prompt,
-          negativePrompt: finalNegativePrompt,
-          width,
-          height,
-          seed: resolvedSeed,
-          outputFormat,
-          videoModel,
-          videoMode,
-          numFrames,
-          videoSteps,
-          fps,
-          guidanceScale,
-          cfgScaleVideo,
-          motionScore,
-          lightingVariant,
-          denoisingStrength,
-          referenceImage,
-          referenceStrength,
-          firstFrameImage,
-          lastFrameImage,
-          arbitraryFrames,
-          imageModel,
-          imageMode,
-          imageSteps,
-          cfgScaleImage,
-          imageGuidanceScale,
-          clipSkip,
-          sampler,
-          imgDenoisingStrength,
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
         },
-        (task_id) => {
-          capturedTaskId = task_id;
-          const pendingTask: ActiveTask = {
-            task_id,
-            type: generationType,
-            modelKey: generationType === "video" ? videoModel : imageModel,
-            mode: generationType === "video" ? videoMode : imageMode,
-            prompt,
-            modelName,
-            width,
-            height,
-            seed: resolvedSeed,
-            startedAt: Date.now(),
-          };
-          saveActiveTask(pendingTask);
-          upsertHistoryItem({
-            id: task_id,
-            taskId: task_id,
-            prompt,
-            type: generationType,
-            model: modelName,
-            thumbnailUrl: undefined,
-            width,
-            height,
-            seed: resolvedSeed,
-            createdAt: new Date(),
-            updatedAt: new Date(),
-            status: "pending",
-          });
-        },
-        (snapshot) => {
-          patchHistoryItem(snapshot.taskId, {
-            status: snapshot.status === "processing" ? "pending" : snapshot.status,
-            error: snapshot.status === "failed" ? snapshot.errorMsg : undefined,
-            thumbnailUrl: snapshot.previewUrl,
-          });
-        },
-        ac.signal
+        { retryOn401: true }
       );
 
-      clearActiveTask();
-      const newResult = {
-        url: resultUrl,
-        thumbnailUrl,
-        seed: resolvedSeed,
-        width,
-        height,
-        prompt,
-        model: modelName,
-        type: generationType,
-      };
-
-      setResult(newResult);
-      setStatus("done");
-      setProgress(100);
-
-      const itemId = capturedTaskId || Date.now().toString();
-      patchHistoryItem(itemId, {
-        status: "done",
-        thumbnailUrl: thumbnailUrl || resultUrl,
-        error: undefined,
-      });
-      if (!capturedTaskId) {
-        upsertHistoryItem({
-          id: itemId,
-          taskId: itemId,
-          prompt,
-          type: generationType,
-          model: modelName,
-          thumbnailUrl: thumbnailUrl || resultUrl,
-          width,
-          height,
-          seed: resolvedSeed,
-          createdAt: new Date(),
-          updatedAt: new Date(),
-          status: "done",
-        });
+      if (!resp.ok) {
+        const apiErr = await readApiError(resp, "Generation request failed");
+        throw new Error(`${apiErr.detail} ${apiErr.userAction}`.trim());
       }
 
-      const galleryItem: GalleryItem = {
-        id: itemId,
-        url: resultUrl,
-        thumbnailUrl,
-        prompt,
-        type: generationType,
-        model: modelName,
-        width,
-        height,
-        seed: resolvedSeed,
-        createdAt: new Date(),
-      };
-      addToGallery(galleryItem);
-    } catch (err) {
-      if ((err as { name?: string })?.name === "AbortError") return;
-      clearActiveTask();
+      const data = await resp.json();
+      const taskId = data.task_id as string;
+
+      // Update history item with task ID
+      setHistory((prev) =>
+        prev.map((h) => (h.id === historyItem.id ? { ...h, taskId } : h))
+      );
+
+      // 4. Start polling
+      startPolling(taskId, resolvedSeed);
+    } catch (err: any) {
       setStatus("error");
-      const message = err instanceof Error ? err.message : "Connection to inference server failed.";
-      setError(message);
-      if (capturedTaskId) {
-        patchHistoryItem(capturedTaskId, { status: "failed", error: message });
-      }
-    }
-  };
+      setError(err?.message ?? "Failed to start generation.");
 
-  const handleRetry = () => {
+      // Update history item as failed
+      setHistory((prev) =>
+        prev.map((h) =>
+          h.id === historyItem.id
+            ? { ...h, status: "failed" as const, error: err?.message }
+            : h
+        )
+      );
+    }
+  }, [
+    prompt, status, seed, generationType, currentModelLabel,
+    width, height, buildCurrentPayload, startPolling,
+  ]);
+
+  // ── Retry / Regenerate handlers ─────────────────────────────────────────────
+  const handleRetry = useCallback(() => {
+    stopPolling();
     setStatus("idle");
     setError(null);
-  };
+  }, [stopPolling]);
 
-  const handleRegenerate = () => {
+  const handleRegenerate = useCallback(() => {
+    stopPolling();
     handleGenerate();
-  };
+  }, [stopPolling, handleGenerate]);
 
-  const handleReuseHistory = (item: HistoryItem) => {
+  // ── History reuse ───────────────────────────────────────────────────────────
+  const handleReuseHistory = useCallback((item: HistoryItem) => {
     setPrompt(item.prompt);
-    setGenerationTypePersisted(item.type);
-    if (item.type === "video") {
-      if (item.model.toLowerCase().includes("phr00t")) {
-        setVideoModelPersisted("phr00t");
-      } else {
-        setVideoModelPersisted("anisora");
-      }
-    } else {
-      if (item.model.toLowerCase().includes("flux")) {
-        setImageModelPersisted("flux");
-      } else {
-        setImageModelPersisted("pony");
-      }
+    if (item.type) {
+      setGenerationType(item.type);
     }
-    setWidth(item.width);
-    setHeight(item.height);
     setShowHistory(false);
-  };
+  }, []);
 
-  const handleArbitraryFrameAdd = (frameIndex: number, image: string) => {
+  // ── Arbitrary frame handlers ────────────────────────────────────────────────
+  const handleArbitraryFrameAdd = useCallback((frameIndex: number, image: string) => {
     setArbitraryFrames((prev) => [
       ...prev,
       { id: Date.now().toString(), frameIndex, image },
     ]);
-  };
+  }, []);
 
-  const handleArbitraryFrameRemove = (id: string) => {
+  const handleArbitraryFrameRemove = useCallback((id: string) => {
     setArbitraryFrames((prev) => prev.filter((f) => f.id !== id));
-  };
+  }, []);
 
-  const handleArbitraryFrameUpdate = (id: string, frameIndex: number) => {
+  const handleArbitraryFrameUpdate = useCallback((id: string, frameIndex: number) => {
     setArbitraryFrames((prev) =>
       prev.map((f) => (f.id === id ? { ...f, frameIndex } : f))
     );
-  };
+  }, []);
 
-  const handleVideoModeChange = (mode: VideoMode) => {
-    setVideoModePersisted(mode);
-    setReferenceImage(null);
-    setFirstFrameImage(null);
-    setLastFrameImage(null);
-    setArbitraryFrames([]);
-  };
-
-  const handleImageModeChange = (mode: ImageMode) => {
-    setImageModePersisted(mode);
-    setReferenceImage(null);
-  };
+  // ── Render ──────────────────────────────────────────────────────────────────
   return (
     <div
       className="h-screen flex flex-col overflow-hidden"
@@ -995,35 +467,28 @@ export function MediaGenApp() {
         color: "#E5E7EB",
       }}
     >
-      {/* в”Ђв”Ђ Navbar в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ */}
+      {/* Navbar */}
       <Navbar
         onHistoryClick={() => setShowHistory(true)}
         historyCount={history.length}
       />
 
-      {/* в”Ђв”Ђ Main layout в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ */}
+      {/* Main layout */}
       <div className="flex-1 flex overflow-hidden min-h-0">
         {/* Left: Control Panel */}
         <ControlPanel
-          // Type & Model
           generationType={generationType}
-          setGenerationType={setGenerationTypePersisted}
+          setGenerationType={setGenerationType}
           videoModel={videoModel}
-          setVideoModel={setVideoModelPersisted}
+          setVideoModel={setVideoModel}
           imageModel={imageModel}
-          setImageModel={setImageModelPersisted}
-          
-          // Mode
+          setImageModel={setImageModel}
           videoMode={videoMode}
-          setVideoMode={handleVideoModeChange}
+          setVideoMode={setVideoMode}
           imageMode={imageMode}
-          setImageMode={handleImageModeChange}
-          
-          // Advanced Settings Control
+          setImageMode={setImageMode}
           useAdvancedSettings={useAdvancedSettings}
           setUseAdvancedSettings={setUseAdvancedSettings}
-          
-          // Common params
           prompt={prompt}
           setPrompt={setPrompt}
           negativePrompt={negativePrompt}
@@ -1036,23 +501,19 @@ export function MediaGenApp() {
           setSeed={setSeed}
           outputFormat={outputFormat}
           setOutputFormat={setOutputFormat}
-          
-          // Reference images
           referenceImage={referenceImage}
-          onImageUpload={(data) => setReferenceImage(data)}
+          onImageUpload={setReferenceImage}
           onImageRemove={() => setReferenceImage(null)}
           firstFrameImage={firstFrameImage}
           lastFrameImage={lastFrameImage}
-          onFirstFrameUpload={(data) => setFirstFrameImage(data)}
-          onLastFrameUpload={(data) => setLastFrameImage(data)}
+          onFirstFrameUpload={setFirstFrameImage}
+          onLastFrameUpload={setLastFrameImage}
           onFirstFrameRemove={() => setFirstFrameImage(null)}
           onLastFrameRemove={() => setLastFrameImage(null)}
           arbitraryFrames={arbitraryFrames}
           onArbitraryFrameAdd={handleArbitraryFrameAdd}
           onArbitraryFrameRemove={handleArbitraryFrameRemove}
           onArbitraryFrameUpdate={handleArbitraryFrameUpdate}
-          
-          // Video params
           numFrames={numFrames}
           setNumFrames={setNumFrames}
           videoSteps={videoSteps}
@@ -1071,8 +532,6 @@ export function MediaGenApp() {
           setLightingVariant={setLightingVariant}
           denoisingStrength={denoisingStrength}
           setDenoisingStrength={setDenoisingStrength}
-          
-          // Image params
           imageSteps={imageSteps}
           setImageSteps={setImageSteps}
           cfgScaleImage={cfgScaleImage}
@@ -1085,8 +544,6 @@ export function MediaGenApp() {
           setImageGuidanceScale={setImageGuidanceScale}
           imgDenoisingStrength={imgDenoisingStrength}
           setImgDenoisingStrength={setImgDenoisingStrength}
-          
-          // Actions
           onGenerate={handleGenerate}
           status={status}
           estSeconds={estSeconds}
@@ -1101,7 +558,7 @@ export function MediaGenApp() {
           error={error}
           referenceImage={referenceImage}
           generationType={generationType}
-          mode={generationType === "video" ? videoMode : imageMode}
+          mode={currentMode}
           onRetry={handleRetry}
           onRegenerate={handleRegenerate}
           estSeconds={estSeconds}
@@ -1114,13 +571,8 @@ export function MediaGenApp() {
         onClose={() => setShowHistory(false)}
         history={history}
         onReuse={handleReuseHistory}
-        onClear={() => {
-          setHistory([]);
-          saveHistory([]);
-        }}
+        onClear={() => setHistory([])}
       />
     </div>
   );
 }
-
-

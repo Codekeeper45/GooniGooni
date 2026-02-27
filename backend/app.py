@@ -1592,9 +1592,9 @@ def fastapi_app():
                     user_action="Verify account id and retry.",
                 ),
             )
-        deploy_account_async(account_id)
+        acc_store.enable_account(account_id)
         results_vol.commit()
-        return {"id": account_id, "status": "checking", "message": "Deploying before enabling..."}
+        return {"id": account_id, "status": "ready", "message": "Account enabled and returned to rotation."}
 
     # ── POST /admin/accounts/{id}/deploy ─────────────────────────────────────
     @api.post("/admin/accounts/{account_id}/deploy", tags=["Admin"])

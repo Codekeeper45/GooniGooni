@@ -31,6 +31,36 @@ _ALLOWED_TRANSITIONS = {
     "disabled": {"disabled", "ready", "checking"},
 }
 
+# ── Error classification ────────────────────────────────────────────────────
+_QUOTA_PATTERNS = ("quota", "limit exceeded", "insufficient credits", "rate limit")
+_AUTH_PATTERNS = ("authentication", "unauthorized", "invalid token", "auth failed")
+_TIMEOUT_PATTERNS = ("timeout", "timed out")
+_CONTAINER_PATTERNS = ("container", "deployment failed")
+_HEALTH_PATTERNS = ("health check", "endpoint not responding")
+
+
+def _classify_error(error: str) -> tuple[str, str]:
+    """
+    Classify an error message into (failure_type, recovery_policy).
+
+    Returns:
+        tuple of (failure_type, recovery_policy) where:
+        - failure_type: quota_exceeded | auth_failed | timeout | container_failed | health_check_failed | unknown
+        - recovery_policy: manual_only | auto_recover
+    """
+    lower = error.lower()
+    if any(p in lower for p in _QUOTA_PATTERNS):
+        return "quota_exceeded", "manual_only"
+    if any(p in lower for p in _AUTH_PATTERNS):
+        return "auth_failed", "manual_only"
+    if any(p in lower for p in _TIMEOUT_PATTERNS):
+        return "timeout", "auto_recover"
+    if any(p in lower for p in _CONTAINER_PATTERNS):
+        return "container_failed", "auto_recover"
+    if any(p in lower for p in _HEALTH_PATTERNS):
+        return "health_check_failed", "auto_recover"
+    return "unknown", "auto_recover"
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -93,24 +123,30 @@ def init_accounts_table() -> None:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS modal_accounts (
-                id           TEXT PRIMARY KEY,
-                label        TEXT NOT NULL,
-                token_id     TEXT NOT NULL,
-                token_secret TEXT NOT NULL,
-                workspace    TEXT,
-                status       TEXT NOT NULL DEFAULT 'pending',
-                added_at     TEXT NOT NULL,
-                last_used    TEXT,
-                last_error   TEXT,
-                use_count    INTEGER NOT NULL DEFAULT 0,
-                failed_at    TEXT,
-                fail_count   INTEGER NOT NULL DEFAULT 0
+                id                  TEXT PRIMARY KEY,
+                label               TEXT NOT NULL,
+                token_id            TEXT NOT NULL,
+                token_secret        TEXT NOT NULL,
+                workspace           TEXT,
+                status              TEXT NOT NULL DEFAULT 'pending',
+                added_at            TEXT NOT NULL,
+                last_used           TEXT,
+                last_error          TEXT,
+                use_count           INTEGER NOT NULL DEFAULT 0,
+                failed_at           TEXT,
+                fail_count          INTEGER NOT NULL DEFAULT 0,
+                failure_type        TEXT,
+                last_health_check   TEXT,
+                health_check_result TEXT
             )
             """
         )
         for ddl in (
             "ALTER TABLE modal_accounts ADD COLUMN failed_at TEXT",
             "ALTER TABLE modal_accounts ADD COLUMN fail_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE modal_accounts ADD COLUMN failure_type TEXT",
+            "ALTER TABLE modal_accounts ADD COLUMN last_health_check TEXT",
+            "ALTER TABLE modal_accounts ADD COLUMN health_check_result TEXT",
         ):
             try:
                 conn.execute(ddl)
@@ -222,11 +258,32 @@ def update_account_status(
         )
 
 
-def mark_account_failed(account_id: str, error: str, max_fail_count: int = 6) -> None:
+def mark_account_failed(
+    account_id: str,
+    error: str,
+    max_fail_count: int = 6,
+    failure_type: Optional[str] = None,
+) -> None:
     """
     Mark account failed and increment failure counter.
-    If fail_count reaches max_fail_count, account is disabled automatically.
+
+    Error classification:
+    - quota_exceeded / auth_failed → immediately disabled (manual_only)
+    - timeout / container_failed / health_check_failed / unknown → fail_count logic (auto_recover)
+
+    If fail_count reaches max_fail_count for auto_recover errors,
+    account is disabled automatically.
     """
+    if failure_type is None:
+        failure_type, _ = _classify_error(error)
+
+    _, recovery_policy = _classify_error(error) if failure_type in ("quota_exceeded", "auth_failed") else (failure_type, "auto_recover")
+    # Re-derive policy from the failure_type directly
+    if failure_type in ("quota_exceeded", "auth_failed"):
+        recovery_policy = "manual_only"
+    else:
+        recovery_policy = "auto_recover"
+
     now = _now_iso()
     with _lock, _db() as conn:
         row = conn.execute(
@@ -238,23 +295,31 @@ def mark_account_failed(account_id: str, error: str, max_fail_count: int = 6) ->
 
         prev_status = row["status"]
         prev_fail_count = int(row["fail_count"] or 0)
-        new_fail_count = prev_fail_count + 1
-        next_status = "disabled" if new_fail_count >= max_fail_count else "failed"
+
+        if recovery_policy == "manual_only":
+            # Quota / auth errors → immediately disable
+            next_status = "disabled"
+            new_fail_count = prev_fail_count + 1
+        else:
+            # Temporary errors → fail_count threshold logic
+            new_fail_count = prev_fail_count + 1
+            next_status = "disabled" if new_fail_count >= max_fail_count else "failed"
 
         conn.execute(
             """
             UPDATE modal_accounts
-            SET status=?, last_error=?, failed_at=?, fail_count=?
+            SET status=?, last_error=?, failed_at=?, fail_count=?, failure_type=?
             WHERE id=?
             """,
-            (next_status, error, now, new_fail_count, account_id),
+            (next_status, error, now, new_fail_count, failure_type, account_id),
         )
         logger.warning(
-            "account_mark_failed account_id=%s prev=%s new=%s fail_count=%s error=%s",
+            "account_mark_failed account_id=%s prev=%s new=%s fail_count=%s failure_type=%s error=%s",
             account_id,
             prev_status,
             next_status,
             new_fail_count,
+            failure_type,
             error,
         )
 
@@ -263,6 +328,9 @@ def recover_failed_accounts(cooldown_seconds: int = 300) -> int:
     """
     Auto-recover failed accounts after cooldown to avoid permanent brick state.
     Returns number of recovered accounts.
+
+    Accounts with failure_type in ('quota_exceeded', 'auth_failed') are excluded
+    from auto-recovery — they require manual intervention via enable_account().
     """
     if cooldown_seconds <= 0:
         return 0
@@ -273,9 +341,11 @@ def recover_failed_accounts(cooldown_seconds: int = 300) -> int:
     with _lock, _db() as conn:
         rows = conn.execute(
             """
-            SELECT id, failed_at
+            SELECT id, failed_at, failure_type
             FROM modal_accounts
-            WHERE status='failed' AND failed_at IS NOT NULL
+            WHERE status='failed'
+              AND failed_at IS NOT NULL
+              AND (failure_type IS NULL OR failure_type NOT IN ('quota_exceeded', 'auth_failed'))
             """
         ).fetchall()
 
@@ -293,7 +363,7 @@ def recover_failed_accounts(cooldown_seconds: int = 300) -> int:
                 conn.execute(
                     """
                     UPDATE modal_accounts
-                    SET status='ready', last_error=NULL, failed_at=NULL
+                    SET status='ready', last_error=NULL, failed_at=NULL, failure_type=NULL
                     WHERE id=?
                     """,
                     (row["id"],),
@@ -330,4 +400,39 @@ def disable_account(account_id: str) -> None:
 
 
 def enable_account(account_id: str) -> None:
-    update_account_status(account_id, "ready", error=None)
+    """Re-enable a disabled account, clearing failure metadata."""
+    with _lock, _db() as conn:
+        row = conn.execute(
+            "SELECT status FROM modal_accounts WHERE id=?", (account_id,)
+        ).fetchone()
+        if row is None:
+            return
+        conn.execute(
+            """
+            UPDATE modal_accounts
+            SET status='ready', last_error=NULL, failed_at=NULL, failure_type=NULL, fail_count=0
+            WHERE id=?
+            """,
+            (account_id,),
+        )
+        logger.info(
+            "account_enabled account_id=%s prev=%s new=ready",
+            account_id, row["status"],
+        )
+
+
+def update_health_check(
+    account_id: str,
+    result: str,
+) -> None:
+    """Cache health check result for an account."""
+    now = _now_iso()
+    with _lock, _db() as conn:
+        conn.execute(
+            """
+            UPDATE modal_accounts
+            SET last_health_check=?, health_check_result=?
+            WHERE id=?
+            """,
+            (now, result, account_id),
+        )

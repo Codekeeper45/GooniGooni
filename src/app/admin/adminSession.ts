@@ -1,5 +1,5 @@
 const ADMIN_API_URL_KEY = "gg_admin_api_url";
-const REQUEST_TIMEOUT_MS = 12000;
+const REQUEST_TIMEOUT_MS = 30000;
 
 export interface AdminSession {
   apiUrl: string;
@@ -80,13 +80,14 @@ export async function revokeAdminSession(apiUrl: string): Promise<void> {
 /** Helper — makes a fetch call to /admin/* with cookie-backed session. */
 export async function adminFetch(
   path: string,
-  options: RequestInit = {}
+  options: RequestInit = {},
+  timeoutMs: number = REQUEST_TIMEOUT_MS,
 ): Promise<Response> {
   const session = getSession();
   if (!session) throw new Error("Not authenticated");
   const url = `${normalizeApiUrl(session.apiUrl)}${path}`;
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     return await fetch(url, {
       ...options,

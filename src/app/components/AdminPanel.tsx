@@ -6,21 +6,35 @@ interface Account {
   id: string;
   label: string;
   workspace: string | null;
-  status: "pending" | "ready" | "failed" | "disabled";
+  status: "pending" | "checking" | "ready" | "failed" | "disabled";
   use_count: number;
   last_used: string | null;
   last_error: string | null;
   added_at: string;
+  failure_type: string | null;
+  last_health_check: string | null;
+  health_check_result: string | null;
+  fail_count: number;
 }
 
 // ─── Status badge config ──────────────────────────────────────────────────────
 
 const STATUS_CONFIG = {
   pending:  { label: "⏳ Deploying",  color: "#f59e0b", bg: "rgba(245,158,11,0.15)" },
+  checking: { label: "🔍 Checking",  color: "#f59e0b", bg: "rgba(245,158,11,0.15)" },
   ready:    { label: "✅ Ready",       color: "#10b981", bg: "rgba(16,185,129,0.15)" },
   failed:   { label: "❌ Failed",      color: "#ef4444", bg: "rgba(239,68,68,0.15)"  },
   disabled: { label: "⚫ Disabled",   color: "#6b7280", bg: "rgba(107,114,128,0.15)"},
 } as const;
+
+const FAILURE_TYPE_CONFIG: Record<string, { label: string; color: string; bg: string; icon: string }> = {
+  quota_exceeded:      { label: "Quota",     color: "#ef4444", bg: "rgba(239,68,68,0.12)",  icon: "💰" },
+  auth_failed:         { label: "Auth",      color: "#ef4444", bg: "rgba(239,68,68,0.12)",  icon: "🔑" },
+  timeout:             { label: "Timeout",   color: "#f59e0b", bg: "rgba(245,158,11,0.12)", icon: "⏱️" },
+  container_failed:    { label: "Container", color: "#f59e0b", bg: "rgba(245,158,11,0.12)", icon: "📦" },
+  health_check_failed: { label: "Health",    color: "#f59e0b", bg: "rgba(245,158,11,0.12)", icon: "🏥" },
+  unknown:             { label: "Unknown",   color: "#6b7280", bg: "rgba(107,114,128,0.12)",icon: "❓" },
+};
 
 // ─── API helper ───────────────────────────────────────────────────────────────
 
@@ -97,10 +111,10 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onClose }) => {
     fetchAccounts();
   }, [fetchAccounts]);
 
-  // Auto-refresh while any account is in 'pending' state
+  // Auto-refresh while any account is in 'pending' or 'checking' state
   useEffect(() => {
-    const hasPending = accounts.some((a) => a.status === "pending");
-    if (!hasPending) return;
+    const hasActive = accounts.some((a) => a.status === "pending" || a.status === "checking");
+    if (!hasActive) return;
     const timer = setInterval(fetchAccounts, 5000);
     return () => clearInterval(timer);
   }, [accounts, fetchAccounts]);
@@ -339,9 +353,26 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onClose }) => {
                         }}>
                           {sc.label}
                         </span>
+                        {acct.failure_type && FAILURE_TYPE_CONFIG[acct.failure_type] && (
+                          <span style={{
+                            ...styles.badge,
+                            color: FAILURE_TYPE_CONFIG[acct.failure_type].color,
+                            background: FAILURE_TYPE_CONFIG[acct.failure_type].bg,
+                            marginLeft: "0.35rem",
+                            fontSize: "0.65rem",
+                          }}>
+                            {FAILURE_TYPE_CONFIG[acct.failure_type].icon} {FAILURE_TYPE_CONFIG[acct.failure_type].label}
+                          </span>
+                        )}
                         {acct.last_error && (
                           <p style={styles.errorText} title={acct.last_error}>
                             {acct.last_error.slice(0, 60)}…
+                          </p>
+                        )}
+                        {acct.last_health_check && (
+                          <p style={{ margin: "0.15rem 0 0", fontSize: "0.65rem", color: "#6b7280" }}>
+                            Health: {acct.health_check_result === "ok" ? "✅" : "❌"}{" "}
+                            {new Date(acct.last_health_check).toLocaleTimeString()}
                           </p>
                         )}
                       </td>

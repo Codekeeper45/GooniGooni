@@ -64,7 +64,7 @@ def deploy_account(account_id: str) -> None:
             env=env,
             capture_output=True,
             text=True,
-            timeout=300,  # 5 min deploy timeout
+            timeout=120,  # 2 min deploy timeout (reduced from 5 min)
         )
 
         if result.returncode == 0:
@@ -77,13 +77,13 @@ def deploy_account(account_id: str) -> None:
                 _commit_volume()
                 return
 
-            ok, health_error = _wait_for_workspace_health(workspace)
+            ok, health_error = _wait_for_workspace_health(workspace, account_id=account_id)
             if not ok:
-                acc_store.update_account_status(
+                failure_type, _ = acc_store._classify_error(health_error or "health check failed")
+                acc_store.mark_account_failed(
                     account_id,
-                    "failed",
-                    workspace=workspace,
-                    error=health_error,
+                    health_error or "health check failed",
+                    failure_type=failure_type,
                 )
                 _commit_volume()
                 return
@@ -92,16 +92,29 @@ def deploy_account(account_id: str) -> None:
             _commit_volume()
         else:
             error = (result.stderr or result.stdout or "Unknown deploy error")[:500]
-            acc_store.update_account_status(account_id, "failed", error=error)
+            failure_type, _ = acc_store._classify_error(error)
+            acc_store.mark_account_failed(
+                account_id,
+                error,
+                failure_type=failure_type,
+            )
             _commit_volume()
 
     except subprocess.TimeoutExpired:
-        acc_store.update_account_status(
-            account_id, "failed", error="Deploy timed out after 5 minutes"
+        acc_store.mark_account_failed(
+            account_id,
+            "Deploy timed out after 2 minutes",
+            failure_type="timeout",
         )
         _commit_volume()
     except Exception as exc:
-        acc_store.update_account_status(account_id, "failed", error=str(exc))
+        error = str(exc)
+        failure_type, _ = acc_store._classify_error(error)
+        acc_store.mark_account_failed(
+            account_id,
+            error,
+            failure_type=failure_type,
+        )
         _commit_volume()
 
 
@@ -156,9 +169,34 @@ def _extract_workspace(output: str) -> Optional[str]:
 
 def _wait_for_workspace_health(
     workspace: str,
-    attempts: int = 12,
+    account_id: Optional[str] = None,
+    attempts: int = 6,
     interval_seconds: float = 5.0,
+    cache_ttl_seconds: int = 300,
 ) -> tuple[bool, Optional[str]]:
+    """
+    Wait for workspace health check to pass.
+
+    If account_id is provided, health check results are cached in the DB.
+    A cached positive result younger than cache_ttl_seconds is returned
+    immediately without making HTTP requests.
+    """
+    # Check cache first
+    if account_id:
+        account = acc_store.get_account(account_id)
+        if account and account.get("last_health_check") and account.get("health_check_result") == "ok":
+            from datetime import datetime, timezone
+            try:
+                cached_at = datetime.fromisoformat(account["last_health_check"])
+                if cached_at.tzinfo is None:
+                    cached_at = cached_at.replace(tzinfo=timezone.utc)
+                age = (datetime.now(timezone.utc) - cached_at).total_seconds()
+                if age < cache_ttl_seconds:
+                    logger.info("workspace health check cache hit: %s (age=%.0fs)", workspace, age)
+                    return True, None
+            except Exception:
+                pass  # Cache miss on malformed timestamp
+
     url = f"https://{workspace}--gooni-api.modal.run/health"
     timeout = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0)
     last_error = "health-check did not run"
@@ -170,10 +208,17 @@ def _wait_for_workspace_health(
                 payload = response.json()
                 if payload.get("ok") is True:
                     logger.info("workspace health check passed: %s", workspace)
+                    if account_id:
+                        acc_store.update_health_check(account_id, "ok")
                     return True, None
             last_error = f"health-check status={response.status_code}"
         except Exception as exc:
             last_error = f"health-check error: {exc}"
         if attempt < attempts:
             time.sleep(interval_seconds)
+
+    # Cache negative result
+    if account_id:
+        acc_store.update_health_check(account_id, f"failed: {last_error}")
+
     return False, last_error
