@@ -26,7 +26,7 @@ FROM nginx:1.27-alpine AS production
 
 # Remove default nginx static content
 RUN rm -rf /usr/share/nginx/html/*
-RUN apk add --no-cache wget
+RUN apk add --no-cache wget python3 py3-pip
 
 # Copy built app
 COPY --from=builder /app/dist /usr/share/nginx/html
@@ -34,10 +34,19 @@ COPY --from=builder /app/dist /usr/share/nginx/html
 # Copy our nginx configuration
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
+# Local admin backend (same container, proxied by nginx at /api/*)
+COPY backend /app/backend
+COPY backend/admin_requirements.txt /app/backend/admin_requirements.txt
+RUN pip install --no-cache-dir --break-system-packages -r /app/backend/admin_requirements.txt
+
+# Entrypoint starts local admin API first, then nginx in foreground
+COPY docker/start.sh /start.sh
+RUN chmod +x /start.sh
+
 # Expose port 80 (HTTPS is handled by Cloud LB or certbot outside container)
 EXPOSE 80
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD wget -q --spider http://localhost/health || exit 1
 
-CMD ["nginx", "-g", "daemon off;"]
+CMD ["/start.sh"]

@@ -9,7 +9,7 @@ Owner: Codekeeper45
 - Host name: `openclaw-server`
 - Zone: `us-east1-b`
 - External IP: `34.73.173.191`
-- Runtime: Docker container `gooni-gooni`
+- Runtime: Docker container `gooni-gooni` (`nginx + local admin-api`)
 - App URL: `http://34.73.173.191/`
 - Admin URL: `http://34.73.173.191/admin`
 - Health URL: `http://34.73.173.191/health`
@@ -78,7 +78,7 @@ gcloud compute ssh openclaw-server --zone=us-east1-b --command "cd ~/gooni-gooni
 
 ### Restart frontend container on VM
 ```bash
-gcloud compute ssh openclaw-server --zone=us-east1-b --command "sudo docker stop gooni-gooni >/dev/null 2>&1 || true; sudo docker rm gooni-gooni >/dev/null 2>&1 || true; sudo docker run -d --name gooni-gooni --restart unless-stopped -p 80:80 gooni-gooni:local"
+gcloud compute ssh openclaw-server --zone=us-east1-b --command "sudo mkdir -p /opt/gooni/results; sudo docker stop gooni-gooni >/dev/null 2>&1 || true; sudo docker rm gooni-gooni >/dev/null 2>&1 || true; sudo docker run -d --name gooni-gooni --restart unless-stopped -p 80:80 -v /opt/gooni/results:/results -e ADMIN_LOGIN=<LOGIN> -e ADMIN_PASSWORD_HASH=<PBKDF2_HASH> -e ADMIN_COOKIE_SECURE=0 -e ADMIN_COOKIE_SAMESITE=lax gooni-gooni:local"
 ```
 
 ### Check container status and logs
@@ -89,7 +89,7 @@ gcloud compute ssh openclaw-server --zone=us-east1-b --command "sudo docker logs
 
 ### End-to-end VM deploy (single command)
 ```bash
-gcloud compute ssh openclaw-server --zone=us-east1-b --command "bash -lc 'set -e; cd ~/gooni-gooni; git fetch --all --prune; git checkout 001-fix-vram-oom; git pull --ff-only origin 001-fix-vram-oom; sudo docker build --pull -t gooni-gooni:local --build-arg VITE_API_URL=https://yapparov-emir-f--gooni-api.modal.run .; sudo docker stop gooni-gooni >/dev/null 2>&1 || true; sudo docker rm gooni-gooni >/dev/null 2>&1 || true; sudo docker run -d --name gooni-gooni --restart unless-stopped -p 80:80 gooni-gooni:local; sleep 5; sudo docker ps --filter name=gooni-gooni --format \"table {{.Names}}\\t{{.Image}}\\t{{.Status}}\"'"
+gcloud compute ssh openclaw-server --zone=us-east1-b --command "bash -lc 'set -e; cd ~/gooni-gooni; git fetch --all --prune; git checkout 001-fix-vram-oom; git pull --ff-only origin 001-fix-vram-oom; sudo docker build --pull -t gooni-gooni:local --build-arg VITE_API_URL=https://yapparov-emir-f--gooni-api.modal.run .; sudo mkdir -p /opt/gooni/results; sudo docker stop gooni-gooni >/dev/null 2>&1 || true; sudo docker rm gooni-gooni >/dev/null 2>&1 || true; sudo docker run -d --name gooni-gooni --restart unless-stopped -p 80:80 -v /opt/gooni/results:/results -e ADMIN_LOGIN=<LOGIN> -e ADMIN_PASSWORD_HASH=<PBKDF2_HASH> -e ADMIN_COOKIE_SECURE=0 -e ADMIN_COOKIE_SAMESITE=lax gooni-gooni:local; sleep 5; sudo docker ps --filter name=gooni-gooni --format \"table {{.Names}}\\t{{.Image}}\\t{{.Status}}\"'"
 ```
 
 ## 3. Secrets inventory (where they live)
@@ -114,9 +114,9 @@ modal secret list
 
 ### Current admin auth flow
 - Admin UI does not ask for backend URL.
-- Admin API is called via same-origin `/api` on VM.
+- Admin API is called via same-origin `/api` on VM and served by local admin backend in the same container.
 - If UI is opened directly on `*.modal.run`, frontend falls back to direct `/admin/*` endpoints.
-- Admin session uses secure httpOnly cookie `gg_admin_session`.
+- Admin session uses httpOnly cookie `gg_admin_session` (set `ADMIN_COOKIE_SECURE=1` when running behind HTTPS).
 
 ## 4. Secret creation/rotation
 
@@ -155,7 +155,7 @@ curl -sS https://yapparov-emir-f--gooni-api.modal.run/health
 ### B) Deploy frontend container to VM
 From local machine:
 ```bash
-gcloud compute ssh openclaw-server --zone=us-east1-b --command "bash -lc 'set -e; cd ~/gooni-gooni; git fetch --all --prune; git checkout 001-fix-vram-oom; git pull --ff-only origin 001-fix-vram-oom; sudo docker build --pull -t gooni-gooni:local --build-arg VITE_API_URL=https://yapparov-emir-f--gooni-api.modal.run .; sudo docker stop gooni-gooni >/dev/null 2>&1 || true; sudo docker rm gooni-gooni >/dev/null 2>&1 || true; sudo docker run -d --name gooni-gooni --restart unless-stopped -p 80:80 gooni-gooni:local; sleep 8; sudo docker ps --filter name=gooni-gooni --format \"table {{.Names}}\\t{{.Image}}\\t{{.Status}}\"'"
+gcloud compute ssh openclaw-server --zone=us-east1-b --command "bash -lc 'set -e; cd ~/gooni-gooni; git fetch --all --prune; git checkout 001-fix-vram-oom; git pull --ff-only origin 001-fix-vram-oom; sudo docker build --pull -t gooni-gooni:local --build-arg VITE_API_URL=https://yapparov-emir-f--gooni-api.modal.run .; sudo mkdir -p /opt/gooni/results; sudo docker stop gooni-gooni >/dev/null 2>&1 || true; sudo docker rm gooni-gooni >/dev/null 2>&1 || true; sudo docker run -d --name gooni-gooni --restart unless-stopped -p 80:80 -v /opt/gooni/results:/results -e ADMIN_LOGIN=<LOGIN> -e ADMIN_PASSWORD_HASH=<PBKDF2_HASH> -e ADMIN_COOKIE_SECURE=0 -e ADMIN_COOKIE_SAMESITE=lax gooni-gooni:local; sleep 8; sudo docker ps --filter name=gooni-gooni --format \"table {{.Names}}\\t{{.Image}}\\t{{.Status}}\"'"
 ```
 
 Verify:
