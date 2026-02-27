@@ -94,7 +94,7 @@ export function AdminDashboard() {
       nav("/admin");
       return;
     }
-    ensureAdminSession(session).catch(() => {
+    ensureAdminSession().catch(() => {
       clearSession();
       nav("/admin");
     });
@@ -186,7 +186,7 @@ export function AdminDashboard() {
       if (error instanceof DOMException && error.name === "AbortError") {
         showToast("Таймаут запроса: сервер не ответил вовремя", false);
       } else {
-        showToast("Сетевая ошибка: проверьте API URL/CORS и доступность бэкенда", false);
+        showToast("Сетевая ошибка: проверьте доступность backend /api", false);
       }
     } finally {
       setAddLoading(false);
@@ -194,9 +194,7 @@ export function AdminDashboard() {
   }
 
   async function handleLogout() {
-    if (session) {
-      await revokeAdminSession(session).catch(() => undefined);
-    }
+    await revokeAdminSession().catch(() => undefined);
     clearSession();
     nav("/admin");
   }
@@ -255,7 +253,7 @@ export function AdminDashboard() {
           <span style={{ fontSize: 24 }}>ADMIN</span>
           <div>
             <div style={{ fontWeight: 700, fontSize: 18 }}>Gooni Admin</div>
-            <div style={{ fontSize: 12, color: "rgba(255,255,255,0.4)" }}>{session.apiUrl}</div>
+            <div style={{ fontSize: 12, color: "rgba(255,255,255,0.4)" }}>{window.location.origin}</div>
           </div>
         </div>
         <div style={{ display: "flex", gap: 8 }}>

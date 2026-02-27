@@ -173,7 +173,7 @@ def test_verify_admin_login_password_rejects_invalid(monkeypatch):
     assert exc.value.detail["code"] == "admin_credentials_invalid"
 
 
-def test_verify_admin_login_password_legacy_mode(monkeypatch):
+def test_verify_admin_login_password_requires_explicit_env(monkeypatch):
     from admin_security import verify_admin_login_password
 
     monkeypatch.delenv("ADMIN_LOGIN", raising=False)
@@ -181,5 +181,7 @@ def test_verify_admin_login_password_legacy_mode(monkeypatch):
     monkeypatch.setenv("ADMIN_KEY", "x" * 24)
 
     req = DummyRequest()
-    ip = verify_admin_login_password(req, "admin", "x" * 24)
-    assert ip == "127.0.0.1"
+    with pytest.raises(HTTPException) as exc:
+        verify_admin_login_password(req, "admin", "x" * 24)
+    assert exc.value.status_code == 403
+    assert exc.value.detail["code"] == "admin_misconfigured"

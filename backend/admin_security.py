@@ -333,13 +333,7 @@ def verify_admin_login_password(request: Request, login: str, password: str, act
     expected_login = _os.environ.get("ADMIN_LOGIN", "")
     expected_password_hash = _os.environ.get("ADMIN_PASSWORD_HASH", "")
 
-    # Transitional fallback for old setups: allow ADMIN_KEY as password for login=admin.
-    # This keeps existing deployments reachable until ADMIN_LOGIN/ADMIN_PASSWORD_HASH
-    # are configured.
-    legacy_key = _os.environ.get("ADMIN_KEY", "")
-    legacy_mode = bool(not expected_login and not expected_password_hash and legacy_key)
-
-    if not expected_login and not legacy_mode:
+    if not expected_login:
         _log_action(ip, action, "admin_login_misconfigured", success=False)
         raise _admin_error(
             code="admin_misconfigured",
@@ -348,7 +342,7 @@ def verify_admin_login_password(request: Request, login: str, password: str, act
             status_code=status.HTTP_403_FORBIDDEN,
         )
 
-    if not expected_password_hash and not legacy_mode:
+    if not expected_password_hash:
         _log_action(ip, action, "admin_password_misconfigured", success=False)
         raise _admin_error(
             code="admin_misconfigured",
@@ -366,12 +360,8 @@ def verify_admin_login_password(request: Request, login: str, password: str, act
             status_code=status.HTTP_403_FORBIDDEN,
         )
 
-    if legacy_mode:
-        login_ok = hmac.compare_digest(login.encode("utf-8"), b"admin")
-        password_ok = hmac.compare_digest(password.encode("utf-8"), legacy_key.encode("utf-8"))
-    else:
-        login_ok = hmac.compare_digest(login.encode("utf-8"), expected_login.encode("utf-8"))
-        password_ok = _verify_admin_password(password, expected_password_hash)
+    login_ok = hmac.compare_digest(login.encode("utf-8"), expected_login.encode("utf-8"))
+    password_ok = _verify_admin_password(password, expected_password_hash)
     if not (login_ok and password_ok):
         _log_action(ip, action, "bad_login_password", success=False)
         raise _admin_error(

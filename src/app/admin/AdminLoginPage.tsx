@@ -9,8 +9,6 @@ import {
 
 export function AdminLoginPage() {
   const nav = useNavigate();
-  const saved = getSession();
-  const [apiUrl, setApiUrl] = useState(saved?.apiUrl ?? "");
   const [login, setLogin] = useState("admin");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -20,7 +18,7 @@ export function AdminLoginPage() {
   useEffect(() => {
     const existing = getSession();
     if (!existing) return;
-    ensureAdminSession(existing)
+    ensureAdminSession()
       .then(() => nav("/admin/dashboard"))
       .catch(() => clearSession());
   }, [nav]);
@@ -29,22 +27,17 @@ export function AdminLoginPage() {
     e.preventDefault();
     setError("");
 
-    const url = apiUrl.trim().replace(/\/$/, "");
     const userLogin = login.trim();
     const userPassword = password;
 
-    if (!url || !userLogin || !userPassword) {
+    if (!userLogin || !userPassword) {
       setError("Fill all fields");
-      return;
-    }
-    if (!url.startsWith("https://") && !url.startsWith("http://")) {
-      setError("URL must start with http:// or https://");
       return;
     }
 
     try {
       setLoading(true);
-      await createAdminSession(url, userLogin, userPassword);
+      await createAdminSession(userLogin, userPassword);
       nav("/admin/dashboard");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Authentication failed");
@@ -105,44 +98,11 @@ export function AdminLoginPage() {
             Gooni Admin
           </h1>
           <p style={{ color: "rgba(255,255,255,0.45)", margin: "6px 0 0", fontSize: 14 }}>
-            Account and deploy control panel
+            Login with your admin credentials
           </p>
         </div>
 
         <form onSubmit={handleLogin}>
-          <div style={{ marginBottom: 18 }}>
-            <label
-              style={{
-                display: "block",
-                color: "rgba(255,255,255,0.7)",
-                fontSize: 13,
-                marginBottom: 6,
-                fontWeight: 600,
-              }}
-            >
-              Modal Backend URL
-            </label>
-            <input
-              type="url"
-              value={apiUrl}
-              onChange={(e) => setApiUrl(e.target.value)}
-              placeholder="https://workspace--gooni-api.modal.run"
-              autoComplete="off"
-              required
-              style={{
-                width: "100%",
-                boxSizing: "border-box",
-                padding: "12px 14px",
-                background: "rgba(255,255,255,0.08)",
-                border: "1px solid rgba(255,255,255,0.18)",
-                borderRadius: 10,
-                color: "#fff",
-                fontSize: 14,
-                outline: "none",
-              }}
-            />
-          </div>
-
           <div style={{ marginBottom: 18 }}>
             <label
               style={{
@@ -268,7 +228,7 @@ export function AdminLoginPage() {
         </form>
 
         <p style={{ textAlign: "center", marginTop: 24, color: "rgba(255,255,255,0.3)", fontSize: 12 }}>
-          Credentials are validated on backend. Browser keeps only session cookie.
+          Admin session is stored in secure cookie only.
         </p>
       </div>
     </div>
