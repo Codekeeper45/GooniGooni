@@ -23,7 +23,7 @@ class FluxPipeline(BasePipeline):
         self._img2img = None
 
     def load(self, cache_path: str) -> None:
-        if self._loaded:
+        if self._is_loaded_for_cache(cache_path):
             return
 
         from diffusers import FluxPipeline as FluxTxt2Img
@@ -54,7 +54,7 @@ class FluxPipeline(BasePipeline):
             self._img2img.vae.enable_slicing()
             self._img2img.vae.enable_tiling()
 
-        self._loaded = True
+        self._mark_loaded_for_cache(cache_path)
 
     def generate(self, request: dict, task_id: str, results_path: str) -> tuple[str, str]:
         if not self._loaded:

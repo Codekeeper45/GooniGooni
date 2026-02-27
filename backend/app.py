@@ -1,11 +1,11 @@
-﻿"""
-Gooni Gooni Backend вЂ” Modal Application
+"""
+Gooni Gooni Backend — Modal Application
 ========================================
 Deploys a FastAPI server on Modal with:
-  вЂў Async video generation (A10G) вЂ” anisora, phr00t
-  вЂў Async image generation (A10G) вЂ” pony, flux
-  вЂў REST API with API-key auth
-  вЂў SQLite gallery in the results Volume
+  • Async video generation (A10G) — anisora, phr00t
+  • Async image generation (A10G) — pony, flux
+  • REST API with API-key auth
+  • SQLite gallery in the results Volume
 
 Deploy:
     modal deploy backend/app.py
@@ -23,11 +23,11 @@ from typing import Optional
 
 import modal
 
-# в”Ђв”Ђв”Ђ Modal App в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+# ─── Modal App ────────────────────────────────────────────────────────────────
 
 app = modal.App("gooni-gooni-backend")
 
-# в”Ђв”Ђв”Ђ Persistent Volumes в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+# ─── Persistent Volumes ───────────────────────────────────────────────────────
 
 model_cache_vol = modal.Volume.from_name("model-cache", create_if_missing=True)
 results_vol = modal.Volume.from_name("results", create_if_missing=True)
@@ -53,7 +53,7 @@ IMAGE_FUNCTION_TIMEOUT = int(os.environ.get("IMAGE_TIMEOUT", "300"))
 VIDEO_FUNCTION_CPU = float(os.environ.get("VIDEO_CPU", "4"))
 IMAGE_FUNCTION_CPU = float(os.environ.get("IMAGE_CPU", "4"))
 
-# в”Ђв”Ђв”Ђ Modal Secrets в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+# ─── Modal Secrets ────────────────────────────────────────────────────────────
 # Create via: modal secret create gooni-api-key API_KEY=your-secret-key
 
 api_secret = modal.Secret.from_name("gooni-api-key")
@@ -62,7 +62,7 @@ hf_secret = modal.Secret.from_name("huggingface")
 accounts_secret = modal.Secret.from_name("gooni-accounts")
 
 
-# в”Ђв”Ђв”Ђ Docker Images в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+# ─── Docker Images ────────────────────────────────────────────────────────────
 
 _base_pkgs = [
     "fastapi>=0.111",
@@ -76,7 +76,7 @@ _base_pkgs = [
     "ftfy>=6.2.0",
 ]
 
-# Video generation image (A10G вЂ” 24 GB)
+# Video generation image (A10G — 24 GB)
 video_image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install(
@@ -136,7 +136,7 @@ api_image = (
     .add_local_dir(str(Path(__file__).parent), remote_path="/root")  # backend/ .py files
 )
 
-# в”Ђв”Ђв”Ђ Volume mounts helper в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+# ─── Volume mounts helper ─────────────────────────────────────────────────────
 
 _volumes = {
     MODEL_CACHE_PATH: model_cache_vol,
@@ -149,6 +149,30 @@ _video_lock = threading.Lock()
 _image_lock = threading.Lock()
 _degraded_state_lock = threading.Lock()
 _degraded_active_model: Optional[str] = None
+
+
+def _gpu_budget_gb(gpu_class: str) -> float:
+    try:
+        from config import GPU_VRAM_BUDGET_GB
+
+        return float(GPU_VRAM_BUDGET_GB.get(gpu_class.upper(), 24.0))
+    except Exception:
+        return 24.0
+
+
+def _map_worker_error(exc: Exception, gpu_class: str) -> tuple[str, str]:
+    from config import OOM_ERROR_CODE
+
+    message = str(exc)
+    lowered = message.lower()
+    if "out of memory" in lowered or "cuda oom" in lowered:
+        budget_gb = _gpu_budget_gb(gpu_class)
+        return (
+            f"{OOM_ERROR_CODE}: GPU memory budget exceeded ({gpu_class} {budget_gb:.0f} GB). "
+            "Reduce resolution, frames, or steps and retry.",
+            "gpu_oom",
+        )
+    return message, type(exc).__name__
 
 
 def _get_video_pipeline(model_id_key: str, *, degraded_mode: bool = False):
@@ -164,6 +188,16 @@ def _get_video_pipeline(model_id_key: str, *, degraded_mode: bool = False):
             BasePipeline.clear_all_pipelines(_video_pipeline_cache)
             _degraded_active_model = None
         if model_id_key in _video_pipeline_cache:
+            try:
+                import storage
+
+                storage.record_operational_event(
+                    "pipeline_cache_hit",
+                    model=model_id_key,
+                    lane_mode="degraded_shared" if degraded_mode else "dedicated",
+                )
+            except Exception:
+                pass
             if degraded_mode:
                 _degraded_active_model = model_id_key
             return _video_pipeline_cache[model_id_key]
@@ -189,6 +223,16 @@ def _get_video_pipeline(model_id_key: str, *, degraded_mode: bool = False):
 
         pipeline.load(MODEL_CACHE_PATH)
         _video_pipeline_cache[model_id_key] = pipeline
+        try:
+            import storage
+
+            storage.record_operational_event(
+                "pipeline_cache_miss",
+                model=model_id_key,
+                lane_mode="degraded_shared" if degraded_mode else "dedicated",
+            )
+        except Exception:
+            pass
         if degraded_mode:
             _degraded_active_model = model_id_key
         return pipeline
@@ -197,6 +241,16 @@ def _get_video_pipeline(model_id_key: str, *, degraded_mode: bool = False):
 def _get_image_pipeline(model_id_key: str):
     with _image_lock:
         if model_id_key in _image_pipeline_cache:
+            try:
+                import storage
+
+                storage.record_operational_event(
+                    "pipeline_cache_hit",
+                    model=model_id_key,
+                    lane_mode="dedicated",
+                )
+            except Exception:
+                pass
             return _image_pipeline_cache[model_id_key]
 
         if model_id_key == "pony":
@@ -214,9 +268,19 @@ def _get_image_pipeline(model_id_key: str):
 
         pipeline.load(MODEL_CACHE_PATH)
         _image_pipeline_cache[model_id_key] = pipeline
+        try:
+            import storage
+
+            storage.record_operational_event(
+                "pipeline_cache_miss",
+                model=model_id_key,
+                lane_mode="dedicated",
+            )
+        except Exception:
+            pass
         return pipeline
 
-# в”Ђв”Ђв”Ђ Video Generation Function в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+# ─── Video Generation Function ────────────────────────────────────────────────
 
 def _execute_video_generation(
     request_dict: dict,
@@ -270,7 +334,6 @@ def _execute_video_generation(
 
     model_id_key = request_dict["model"]
     request_dict["_lane_mode"] = lane_mode
-
     if lane_mode == "degraded_shared":
         with _degraded_state_lock:
             cross_switch = _degraded_active_model not in (None, model_id_key)
@@ -371,12 +434,13 @@ def _execute_video_generation(
         )
         return {"result_path": result_path, "preview_path": preview_path}
     except Exception as exc:
+        mapped_error_msg, mapped_stage_detail = _map_worker_error(exc, VIDEO_GPU_CLASS)
         _update_status(
             task_id,
             "failed",
-            error_msg=str(exc),
+            error_msg=mapped_error_msg,
             stage="failed",
-            stage_detail=f"{type(exc).__name__}",
+            stage_detail=mapped_stage_detail,
             lane_mode=lane_mode,
             fallback_reason=fallback_reason,
         )
@@ -407,6 +471,16 @@ def _execute_video_generation(
                 lane_mode=lane_mode,
                 value=round(allocated_gib, 3),
             )
+            budget_gib = _gpu_budget_gb(VIDEO_GPU_CLASS)
+            if allocated_gib > budget_gib:
+                _record_event(
+                    "vram_budget_exceeded",
+                    task_id=task_id,
+                    model=model_id_key,
+                    lane_mode=lane_mode,
+                    value=round(allocated_gib, 3),
+                    reason=f"budget={budget_gib:.1f}",
+                )
         if lane_mode == "degraded_shared":
             storage.release_degraded_task(task_id)
             _commit_after_write()
@@ -492,7 +566,7 @@ def run_phr00t_generation(request_dict: dict, task_id: str) -> dict:
     )
 
 
-# в”Ђв”Ђв”Ђ Image Generation Functions в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+# ─── Image Generation Functions ─────────────────────────────────────────────
 
 def _execute_image_generation(
     request_dict: dict,
@@ -510,6 +584,10 @@ def _execute_image_generation(
         storage.update_task_status(*args, **kwargs)
         results_vol.commit()
 
+    def _record_event(*args, **kwargs) -> None:
+        storage.record_operational_event(*args, **kwargs)
+        results_vol.commit()
+
     results_vol.reload()
     storage.init_db()
     model_id_key = request_dict["model"]
@@ -523,13 +601,12 @@ def _execute_image_generation(
         lane_mode=lane_mode,
         fallback_reason=fallback_reason,
     )
-    storage.record_operational_event(
+    _record_event(
         "pipeline_resolve_started",
         task_id=task_id,
         model=model_id_key,
         lane_mode=lane_mode,
     )
-    results_vol.commit()
 
     try:
         _update_status(
@@ -551,13 +628,12 @@ def _execute_image_generation(
             lane_mode=lane_mode,
             fallback_reason=fallback_reason,
         )
-        storage.record_operational_event(
+        _record_event(
             "pipeline_ready",
             task_id=task_id,
             model=model_id_key,
             lane_mode=lane_mode,
         )
-        results_vol.commit()
 
         if request_dict.get("_warmup_only"):
             _update_status(
@@ -569,13 +645,12 @@ def _execute_image_generation(
                 lane_mode=lane_mode,
                 fallback_reason=fallback_reason,
             )
-            storage.record_operational_event(
+            _record_event(
                 "lane_warmed",
                 task_id=task_id,
                 model=model_id_key,
                 lane_mode=lane_mode,
             )
-            results_vol.commit()
             return {"warmed": True}
 
         _update_status(
@@ -616,25 +691,53 @@ def _execute_image_generation(
         )
         return {"result_path": result_path, "preview_path": preview_path}
     except Exception as exc:
+        mapped_error_msg, mapped_stage_detail = _map_worker_error(exc, IMAGE_GPU_CLASS)
         _update_status(
             task_id,
             "failed",
-            error_msg=str(exc),
+            error_msg=mapped_error_msg,
             stage="failed",
-            stage_detail=f"{type(exc).__name__}",
+            stage_detail=mapped_stage_detail,
             lane_mode=lane_mode,
             fallback_reason=fallback_reason,
         )
         raise
     finally:
+        allocated_gib = None
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                allocated_gib = torch.cuda.memory_allocated() / (1024 ** 3)
+                print(f"[VRAM] After generation: {allocated_gib:.2f} GiB (lane={lane_mode}, model={model_id_key})")
+        except Exception:
+            pass
+
         BasePipeline.clear_gpu_memory(sync=False)
-        storage.record_operational_event(
+        _record_event(
             "memory_cleanup",
             task_id=task_id,
             model=model_id_key,
             lane_mode=lane_mode,
         )
-        results_vol.commit()
+        if allocated_gib is not None:
+            _record_event(
+                "memory_post_generation",
+                task_id=task_id,
+                model=model_id_key,
+                lane_mode=lane_mode,
+                value=round(allocated_gib, 3),
+            )
+            budget_gib = _gpu_budget_gb(IMAGE_GPU_CLASS)
+            if allocated_gib > budget_gib:
+                _record_event(
+                    "vram_budget_exceeded",
+                    task_id=task_id,
+                    model=model_id_key,
+                    lane_mode=lane_mode,
+                    value=round(allocated_gib, 3),
+                    reason=f"budget={budget_gib:.1f}",
+                )
 
 
 @app.function(
@@ -697,7 +800,7 @@ def run_flux_generation(request_dict: dict, task_id: str) -> dict:
     )
 
 
-# в”Ђв”Ђв”Ђ FastAPI Server в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+# ─── FastAPI Server ───────────────────────────────────────────────────────────
 
 @app.function(
     image=api_image,
@@ -713,7 +816,8 @@ def cleanup_stale_tasks() -> None:
     storage.init_db()
     max_age_hours = int(os.environ.get("STALE_TASK_HOURS", "2"))
     updated = storage.mark_stale_tasks_failed(max_age_hours=max_age_hours)
-    if updated > 0:
+    cleaned = storage.cleanup_expired_artifacts()
+    if updated > 0 or cleaned > 0:
         results_vol.commit()
 
 
@@ -727,7 +831,7 @@ def cleanup_stale_tasks() -> None:
 @modal.concurrent(max_inputs=50)
 @modal.fastapi_endpoint(method="GET", label="gooni-api-health")
 def health():
-    """Quick health check вЂ” no auth required."""
+    """Quick health check — no auth required."""
     import sys as _sys
     if "/root" not in _sys.path:
         _sys.path.insert(0, "/root")

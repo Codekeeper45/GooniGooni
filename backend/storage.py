@@ -14,7 +14,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Generator, Optional
 
-from config import DB_PATH, RESULTS_PATH, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE
+from config import (
+    DB_PATH,
+    RESULTS_PATH,
+    DEFAULT_PAGE_SIZE,
+    MAX_PAGE_SIZE,
+    ARTIFACT_TTL_DAYS,
+)
 from schemas import GalleryItemResponse, StatusResponse, TaskStatus
 
 
@@ -41,6 +47,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     stage_detail TEXT,
     lane_mode   TEXT,
     fallback_reason TEXT,
+    generation_session_token TEXT,
+    artifact_expires_at TEXT,
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL
 );
@@ -133,12 +141,20 @@ def init_db() -> None:
             "ALTER TABLE tasks ADD COLUMN stage_detail TEXT",
             "ALTER TABLE tasks ADD COLUMN lane_mode TEXT",
             "ALTER TABLE tasks ADD COLUMN fallback_reason TEXT",
+            "ALTER TABLE tasks ADD COLUMN generation_session_token TEXT",
+            "ALTER TABLE tasks ADD COLUMN artifact_expires_at TEXT",
         ):
             try:
                 conn.execute(ddl)
             except sqlite3.OperationalError:
                 # Column already exists on upgraded databases.
                 pass
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tasks_session_active ON tasks(generation_session_token, status)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tasks_artifact_expiry ON tasks(artifact_expires_at)"
+        )
 
 
 def _public_base_url() -> Optional[str]:
@@ -335,26 +351,54 @@ def create_task(
     seed: int,
     lane_mode: Optional[str] = None,
     fallback_reason: Optional[str] = None,
+    generation_session_token: Optional[str] = None,
+    artifact_ttl_days: Optional[int] = None,
 ) -> str:
     """Insert a new task row and return the generated task_id."""
     task_id = str(uuid.uuid4())
     now = _now_iso()
+    ttl_days = ARTIFACT_TTL_DAYS if artifact_ttl_days is None else max(int(artifact_ttl_days), 1)
+    artifact_expires_at = (
+        datetime.now(timezone.utc) + timedelta(days=ttl_days)
+    ).isoformat()
     with _db() as conn:
         conn.execute(
             """
             INSERT INTO tasks
               (id, status, progress, model, type, mode, prompt, negative_prompt,
-               parameters, width, height, seed, lane_mode, fallback_reason, created_at, updated_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+               parameters, width, height, seed, lane_mode, fallback_reason,
+               generation_session_token, artifact_expires_at, created_at, updated_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 task_id, "pending", 0, model, gen_type, mode,
                 prompt, negative_prompt,
                 json.dumps(parameters),
-                width, height, seed, lane_mode, fallback_reason, now, now,
+                width, height, seed, lane_mode, fallback_reason,
+                generation_session_token, artifact_expires_at, now, now,
             ),
         )
     return task_id
+
+
+def count_active_tasks_for_session(session_token: str) -> int:
+    """
+    Return number of active tasks for a generation session token.
+    Active statuses are: pending, processing.
+    """
+    if not session_token:
+        return 0
+    with _db() as conn:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS cnt
+            FROM tasks
+            WHERE generation_session_token=?
+              AND status IN ('pending', 'processing')
+            """,
+            (session_token,),
+        ).fetchone()
+    return int(row["cnt"] if row else 0)
 
 
 def update_task_status(
@@ -582,6 +626,53 @@ def mark_stale_tasks_failed(max_age_hours: int = 2) -> int:
     return updated
 
 
+def cleanup_expired_artifacts(now: Optional[datetime] = None) -> int:
+    """
+    Remove expired result/preview files and detach their paths from DB rows.
+    Returns number of tasks updated.
+    """
+    now_dt = now or datetime.now(timezone.utc)
+    candidates: list[tuple[str, Optional[str], Optional[str]]] = []
+    with _db() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, result_path, preview_path, artifact_expires_at
+            FROM tasks
+            WHERE status='done'
+              AND result_path IS NOT NULL
+              AND artifact_expires_at IS NOT NULL
+            """
+        ).fetchall()
+        for row in rows:
+            try:
+                expires_at = datetime.fromisoformat(row["artifact_expires_at"])
+                if expires_at.tzinfo is None:
+                    expires_at = expires_at.replace(tzinfo=timezone.utc)
+            except Exception:
+                continue
+            if expires_at <= now_dt:
+                candidates.append((row["id"], row["result_path"], row["preview_path"]))
+
+        for task_id, _, _ in candidates:
+            conn.execute(
+                """
+                UPDATE tasks
+                SET result_path=NULL, preview_path=NULL, updated_at=?
+                WHERE id=?
+                """,
+                (_now_iso(), task_id),
+            )
+
+    for _, result_path, preview_path in candidates:
+        for path in (result_path, preview_path):
+            if path and os.path.exists(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+    return len(candidates)
+
+
 def list_tasks(status: Optional[str] = None, limit: int = 50) -> list[dict[str, Any]]:
     with _db() as conn:
         if status:
@@ -665,6 +756,125 @@ def record_operational_event(
         )
 
 
+def get_sc_metrics(hours: int = 24) -> dict[str, Any]:
+    """
+    Rolling-window metrics used for success-criteria tracking.
+    """
+    cutoff_dt = datetime.now(timezone.utc) - timedelta(hours=max(int(hours), 1))
+    cutoff = cutoff_dt.isoformat()
+    with _db() as conn:
+        total_tasks = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM tasks WHERE created_at >= ?",
+                (cutoff,),
+            ).fetchone()[0]
+        )
+        terminal_tasks = int(
+            conn.execute(
+                """
+                SELECT COUNT(*) FROM tasks
+                WHERE created_at >= ?
+                  AND status IN ('done', 'failed')
+                """,
+                (cutoff,),
+            ).fetchone()[0]
+        )
+        accepted_rows = conn.execute(
+            """
+            SELECT value FROM operational_events
+            WHERE event_type='generation_accepted'
+              AND created_at >= ?
+            """,
+            (cutoff,),
+        ).fetchall()
+        freshness_rows = conn.execute(
+            """
+            SELECT value FROM operational_events
+            WHERE event_type='status_freshness_seconds'
+              AND created_at >= ?
+            """,
+            (cutoff,),
+        ).fetchall()
+        fallback_needed = int(
+            conn.execute(
+                """
+                SELECT COUNT(*) FROM operational_events
+                WHERE event_type='fallback_activated'
+                  AND created_at >= ?
+                """,
+                (cutoff,),
+            ).fetchone()[0]
+        )
+        fallback_success = int(
+            conn.execute(
+                """
+                SELECT COUNT(*) FROM operational_events
+                WHERE event_type='fallback_success'
+                  AND created_at >= ?
+                """,
+                (cutoff,),
+            ).fetchone()[0]
+        )
+        resume_attempts = int(
+            conn.execute(
+                """
+                SELECT COUNT(*) FROM operational_events
+                WHERE event_type='resume_attempt'
+                  AND created_at >= ?
+                """,
+                (cutoff,),
+            ).fetchone()[0]
+        )
+        resume_success = int(
+            conn.execute(
+                """
+                SELECT COUNT(*) FROM operational_events
+                WHERE event_type='resume_success'
+                  AND created_at >= ?
+                """,
+                (cutoff,),
+            ).fetchone()[0]
+        )
+
+    def _as_floats(rows: list[sqlite3.Row]) -> list[float]:
+        values: list[float] = []
+        for row in rows:
+            raw = row["value"]
+            if raw is None:
+                continue
+            try:
+                values.append(float(raw))
+            except Exception:
+                continue
+        return values
+
+    accepted_vals = _as_floats(accepted_rows)
+    freshness_vals = _as_floats(freshness_rows)
+    avg_accept_latency = round(sum(accepted_vals) / len(accepted_vals), 4) if accepted_vals else None
+    avg_status_freshness = round(sum(freshness_vals) / len(freshness_vals), 4) if freshness_vals else None
+
+    terminal_rate = round((terminal_tasks / total_tasks), 4) if total_tasks > 0 else None
+    fallback_success_rate = round((fallback_success / fallback_needed), 4) if fallback_needed > 0 else None
+    resume_success_rate = round((resume_success / resume_attempts), 4) if resume_attempts > 0 else None
+
+    return {
+        "window_hours": max(int(hours), 1),
+        "total_tasks": total_tasks,
+        "terminal_tasks": terminal_tasks,
+        "terminal_rate": terminal_rate,
+        "accept_latency_avg_seconds": avg_accept_latency,
+        "accept_latency_samples": len(accepted_vals),
+        "status_freshness_avg_seconds": avg_status_freshness,
+        "status_freshness_samples": len(freshness_vals),
+        "fallback_needed": fallback_needed,
+        "fallback_success": fallback_success,
+        "fallback_success_rate": fallback_success_rate,
+        "resume_attempts": resume_attempts,
+        "resume_success": resume_success,
+        "resume_success_rate": resume_success_rate,
+    }
+
+
 def list_operational_events(limit: int = 100) -> list[dict[str, Any]]:
     with _db() as conn:
         rows = conn.execute(
@@ -697,11 +907,30 @@ def get_operational_snapshot() -> dict[str, Any]:
                 "SELECT COUNT(*) FROM operational_events WHERE event_type='fallback_activated'"
             ).fetchone()[0]
         )
+        fallback_success_count = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM operational_events WHERE event_type='fallback_success'"
+            ).fetchone()[0]
+        )
+        pipeline_cache_hit_count = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM operational_events WHERE event_type='pipeline_cache_hit'"
+            ).fetchone()[0]
+        )
+        pipeline_cache_miss_count = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM operational_events WHERE event_type='pipeline_cache_miss'"
+            ).fetchone()[0]
+        )
     return {
         "queue_depth": queue_depth,
         "queue_overloaded_count": overload_count,
         "queue_timeout_count": timeout_count,
         "fallback_count": fallback_count,
+        "fallback_success_count": fallback_success_count,
+        "pipeline_cache_hit_count": pipeline_cache_hit_count,
+        "pipeline_cache_miss_count": pipeline_cache_miss_count,
+        "sc_metrics_24h": get_sc_metrics(hours=24),
     }
 
 

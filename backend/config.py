@@ -58,6 +58,13 @@ IMAGE_CONCURRENCY = int(os.environ.get("IMAGE_CONCURRENCY", "2"))
 VIDEO_TIMEOUT = int(os.environ.get("VIDEO_TIMEOUT", "900"))   # 15 min
 IMAGE_TIMEOUT = int(os.environ.get("IMAGE_TIMEOUT", "300"))   # 5 min
 
+GPU_VRAM_BUDGET_GB = {
+    "A10G": 24.0,
+    "L4": 24.0,
+    "T4": 16.0,
+}
+OOM_ERROR_CODE = "gpu_memory_exceeded"
+
 # Dedicated video lane policy (AniSora / Phr00t keep warm independently)
 VIDEO_LANE_WARM_MIN_CONTAINERS = int(os.environ.get("VIDEO_LANE_WARM_MIN_CONTAINERS", "1"))
 VIDEO_LANE_WARM_MAX_CONTAINERS = int(os.environ.get("VIDEO_LANE_WARM_MAX_CONTAINERS", "1"))
@@ -85,6 +92,11 @@ VIDEO_FIXED_CONSTRAINTS = {
 # ─── Gallery defaults ──────────────────────────────────────────────────────────
 DEFAULT_PAGE_SIZE = 20
 MAX_PAGE_SIZE = 100
+
+# Unified flow defaults (spec-aligned)
+ARTIFACT_TTL_DAYS = int(os.environ.get("ARTIFACT_TTL_DAYS", "30"))
+GEN_SESSION_MAX_ACTIVE_TASKS = int(os.environ.get("GEN_SESSION_MAX_ACTIVE_TASKS", "2"))
+NO_READY_ACCOUNT_WAIT_SECONDS = int(os.environ.get("NO_READY_ACCOUNT_WAIT_SECONDS", "30"))
 
 # ─── Model metadata (schema exposed via /models endpoint) ──────────────────────
 MODELS_SCHEMA = [

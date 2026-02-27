@@ -32,7 +32,7 @@ class PonyPipeline(BasePipeline):
         self._img2img = None
 
     def load(self, cache_path: str) -> None:
-        if self._loaded:
+        if self._is_loaded_for_cache(cache_path):
             return
 
         from diffusers import AutoencoderKL, StableDiffusionXLPipeline, StableDiffusionXLImg2ImgPipeline
@@ -66,7 +66,7 @@ class PonyPipeline(BasePipeline):
                 pipe.vae.enable_slicing()
                 pipe.vae.enable_tiling()
 
-        self._loaded = True
+        self._mark_loaded_for_cache(cache_path)
 
     def _apply_sampler(self, pipe, sampler_name: str) -> None:
         from diffusers import schedulers as sched

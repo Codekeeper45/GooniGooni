@@ -137,3 +137,13 @@ def test_attempt_parameters_final_attempt_uses_safe_preset():
     assert steps == 30
     assert cfg == 6.5
     assert denoise == 0.7
+
+
+def test_cache_guard_helpers_track_loaded_cache_path():
+    pipe = PonyPipeline("hf/repo")
+
+    assert pipe._is_loaded_for_cache("/cache/a") is False
+    pipe._mark_loaded_for_cache("/cache/a")
+    assert pipe._is_loaded_for_cache("/cache/a") is True
+    assert pipe._is_loaded_for_cache("/cache/b") is False
+    assert getattr(pipe, "_full_load_count", 0) == 1

@@ -44,7 +44,7 @@ export function MediaGenApp() {
     sampler, setSampler,
     imageGuidanceScale, setImageGuidanceScale,
     imgDenoisingStrength, setImgDenoisingStrength,
-    status, progress, statusText, error, result, estSeconds,
+    status, progress, statusText, stageDetail, error, result, estSeconds,
     generate, retry, regenerate,
     history,
   } = useGeneration();
@@ -170,6 +170,7 @@ export function MediaGenApp() {
           status={status}
           progress={progress}
           statusText={statusText}
+          stageDetail={stageDetail}
           result={result}
           error={error}
           referenceImage={referenceImage}

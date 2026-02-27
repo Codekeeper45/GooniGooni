@@ -200,6 +200,31 @@ curl -i https://yapparov-emir-f--gooni-api.modal.run/health
 curl -i https://yapparov-emir-f--gooni-api.modal.run/models -H "X-API-Key: <API_KEY>"
 ```
 
+### D) Unified pipeline flow smoke (single source of truth)
+```bash
+# 1) create guest generation session
+curl -i -X POST http://34.73.173.191/api/auth/session -c /tmp/gg.cookies
+
+# 2) submit generation
+curl -i -X POST http://34.73.173.191/api/generate \
+  -H "Content-Type: application/json" \
+  -b /tmp/gg.cookies \
+  -d '{"model":"pony","type":"image","mode":"txt2img","prompt":"smoke","width":512,"height":512,"steps":8,"seed":1}'
+
+# 3) poll status until done|failed
+curl -i http://34.73.173.191/api/status/<task_id> -b /tmp/gg.cookies
+
+# 4) fetch artifacts only via gateway URLs
+curl -i http://34.73.173.191/api/results/<task_id> -b /tmp/gg.cookies
+curl -i http://34.73.173.191/api/preview/<task_id> -b /tmp/gg.cookies
+```
+
+Expected contract:
+- `task_id` is opaque for frontend/client.
+- status payload contains `task_id,status,progress,stage,stage_detail`.
+- terminal errors use `{code, detail, user_action}`.
+- media URLs from status must stay gateway-safe (`/api/results/...`, `/api/preview/...`) in browser flow.
+
 ## 10. Rollback
 
 ### VM rollback to previous commit/branch

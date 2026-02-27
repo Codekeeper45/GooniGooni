@@ -5,6 +5,7 @@ Uses a temporary SQLite database — no GPU, no Modal, no real files.
 import os
 import sys
 import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -247,6 +248,98 @@ class TestListGallery:
 
 # ─── delete_gallery_item ──────────────────────────────────────────────────────
 
+class TestSessionAndRetentionHelpers:
+    def test_count_active_tasks_for_session(self):
+        session_token = "sess-1"
+
+        t1 = storage.create_task(
+            model="pony",
+            gen_type="image",
+            mode="txt2img",
+            prompt="p1",
+            negative_prompt="",
+            parameters={},
+            width=512,
+            height=512,
+            seed=1,
+            generation_session_token=session_token,
+        )
+        storage.update_task_status(t1, "processing", progress=10)
+
+        storage.create_task(
+            model="flux",
+            gen_type="image",
+            mode="txt2img",
+            prompt="p2",
+            negative_prompt="",
+            parameters={},
+            width=512,
+            height=512,
+            seed=2,
+            generation_session_token=session_token,
+        )
+
+        t3 = storage.create_task(
+            model="pony",
+            gen_type="image",
+            mode="txt2img",
+            prompt="p3",
+            negative_prompt="",
+            parameters={},
+            width=512,
+            height=512,
+            seed=3,
+            generation_session_token=session_token,
+        )
+        storage.update_task_status(t3, "done", progress=100)
+
+        assert storage.count_active_tasks_for_session(session_token) == 2
+
+    def test_cleanup_expired_artifacts_detaches_paths_and_deletes_files(self):
+        tid = storage.create_task(
+            model="pony",
+            gen_type="image",
+            mode="txt2img",
+            prompt="expire",
+            negative_prompt="",
+            parameters={},
+            width=512,
+            height=512,
+            seed=1,
+            generation_session_token="sess-2",
+            artifact_ttl_days=1,
+        )
+
+        result_path = Path(storage.result_file_path(tid, "png"))
+        preview_path = Path(storage.preview_file_path(tid))
+        result_path.write_bytes(b"fake-image")
+        preview_path.write_bytes(b"fake-preview")
+
+        storage.update_task_status(
+            tid,
+            "done",
+            progress=100,
+            result_path=str(result_path),
+            preview_path=str(preview_path),
+        )
+
+        expired_at = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+        with storage._db() as conn:  # test-only access to storage context manager
+            conn.execute(
+                "UPDATE tasks SET artifact_expires_at=? WHERE id=?",
+                (expired_at, tid),
+            )
+
+        cleaned = storage.cleanup_expired_artifacts(now=datetime.now(timezone.utc))
+        assert cleaned == 1
+        assert not result_path.exists()
+        assert not preview_path.exists()
+
+        raw = storage.get_raw_task(tid)
+        assert raw is not None
+        assert raw["result_path"] is None
+        assert raw["preview_path"] is None
+
 class TestDeleteGalleryItem:
     def test_delete_existing_task(self):
         tid = storage.create_task(
@@ -283,3 +376,130 @@ class TestDegradedQueueHelpers:
         events = storage.list_operational_events(limit=5)
         assert len(events) == 1
         assert events[0]["event_type"] == "queue_overloaded"
+
+
+class TestTerminalStateIntegrity:
+    def test_done_state_keeps_artifact_paths_retrievable(self):
+        tid = storage.create_task(
+            model="pony",
+            gen_type="image",
+            mode="txt2img",
+            prompt="terminal done",
+            negative_prompt="",
+            parameters={"steps": 20},
+            width=512,
+            height=512,
+            seed=111,
+        )
+        result_path = storage.result_file_path(tid, "png")
+        preview_path = storage.preview_file_path(tid)
+        storage.update_task_status(
+            tid,
+            "done",
+            progress=100,
+            result_path=result_path,
+            preview_path=preview_path,
+            stage="done",
+            stage_detail="artifact_write",
+        )
+
+        status_row = storage.get_task(tid)
+        raw_row = storage.get_raw_task(tid)
+        assert status_row is not None
+        assert status_row.status.value == "done"
+        assert status_row.progress == 100
+        assert raw_row is not None
+        assert raw_row["result_path"] == result_path
+        assert raw_row["preview_path"] == preview_path
+
+    def test_failed_state_preserves_error_without_artifact_paths(self):
+        tid = storage.create_task(
+            model="anisora",
+            gen_type="video",
+            mode="t2v",
+            prompt="terminal failed",
+            negative_prompt="",
+            parameters={"steps": 8},
+            width=512,
+            height=512,
+            seed=222,
+        )
+        storage.update_task_status(
+            tid,
+            "failed",
+            progress=0,
+            error_msg="Worker start timeout",
+            stage="failed",
+            stage_detail="worker_start_timeout",
+        )
+
+        status_row = storage.get_task(tid)
+        raw_row = storage.get_raw_task(tid)
+        assert status_row is not None
+        assert status_row.status.value == "failed"
+        assert status_row.error_msg == "Worker start timeout"
+        assert raw_row is not None
+        assert raw_row["result_path"] is None
+        assert raw_row["preview_path"] is None
+
+
+class TestSuccessCriteriaMetrics:
+    def test_sc_metrics_aggregate_latency_fallback_and_resume(self):
+        tid_done = storage.create_task(
+            model="pony",
+            gen_type="image",
+            mode="txt2img",
+            prompt="done",
+            negative_prompt="",
+            parameters={},
+            width=512,
+            height=512,
+            seed=1,
+        )
+        tid_failed = storage.create_task(
+            model="anisora",
+            gen_type="video",
+            mode="t2v",
+            prompt="failed",
+            negative_prompt="",
+            parameters={},
+            width=512,
+            height=512,
+            seed=2,
+        )
+        storage.update_task_status(tid_done, "done", progress=100)
+        storage.update_task_status(tid_failed, "failed", error_msg="err")
+
+        storage.record_operational_event("generation_accepted", task_id=tid_done, value=1.5)
+        storage.record_operational_event("generation_accepted", task_id=tid_failed, value=2.5)
+        storage.record_operational_event("status_freshness_seconds", task_id=tid_done, value=1.0)
+        storage.record_operational_event("status_freshness_seconds", task_id=tid_failed, value=3.0)
+        storage.record_operational_event("fallback_activated", task_id=tid_failed)
+        storage.record_operational_event("fallback_success", task_id=tid_done)
+        storage.record_operational_event("resume_attempt", task_id=tid_done)
+        storage.record_operational_event("resume_success", task_id=tid_done)
+
+        metrics = storage.get_sc_metrics(hours=24)
+        assert metrics["total_tasks"] == 2
+        assert metrics["terminal_tasks"] == 2
+        assert metrics["terminal_rate"] == 1.0
+        assert metrics["accept_latency_avg_seconds"] == 2.0
+        assert metrics["accept_latency_samples"] == 2
+        assert metrics["status_freshness_avg_seconds"] == 2.0
+        assert metrics["status_freshness_samples"] == 2
+        assert metrics["fallback_needed"] == 1
+        assert metrics["fallback_success"] == 1
+        assert metrics["fallback_success_rate"] == 1.0
+        assert metrics["resume_attempts"] == 1
+        assert metrics["resume_success"] == 1
+        assert metrics["resume_success_rate"] == 1.0
+
+    def test_sc_metrics_empty_window_returns_none_rates(self):
+        metrics = storage.get_sc_metrics(hours=24)
+        assert metrics["total_tasks"] == 0
+        assert metrics["terminal_tasks"] == 0
+        assert metrics["terminal_rate"] is None
+        assert metrics["accept_latency_avg_seconds"] is None
+        assert metrics["fallback_success_rate"] is None
+        assert metrics["resume_success_rate"] is None
+

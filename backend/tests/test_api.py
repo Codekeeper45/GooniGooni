@@ -194,6 +194,87 @@ class TestGenerationSessionContracts:
 
         assert overloaded, "Expected at least one deterministic 503 queue_overloaded response"
 
+    def test_generate_acceptance_contract_all_models(self, raw_client):
+        session_r = raw_client.post("/auth/session")
+        assert session_r.status_code == 204
+
+        payloads = [
+            {
+                "model": "anisora",
+                "type": "video",
+                "mode": "t2v",
+                "prompt": "contract anisora",
+                "width": 512,
+                "height": 512,
+                "num_frames": 17,
+                "fps": 8,
+                "steps": 8,
+                "seed": 1,
+            },
+            {
+                "model": "phr00t",
+                "type": "video",
+                "mode": "t2v",
+                "prompt": "contract phr00t",
+                "width": 512,
+                "height": 512,
+                "num_frames": 17,
+                "fps": 8,
+                "steps": 4,
+                "cfg_scale": 1.0,
+                "seed": 2,
+            },
+            {
+                "model": "pony",
+                "type": "image",
+                "mode": "txt2img",
+                "prompt": "contract pony",
+                "width": 512,
+                "height": 512,
+                "steps": 8,
+                "seed": 3,
+            },
+            {
+                "model": "flux",
+                "type": "image",
+                "mode": "txt2img",
+                "prompt": "contract flux",
+                "width": 512,
+                "height": 512,
+                "steps": 8,
+                "seed": 4,
+            },
+        ]
+
+        for payload in payloads:
+            r = raw_client.post("/generate", json=payload)
+            assert r.status_code in (200, 503), (payload["model"], r.status_code, r.text)
+            body = r.json()
+            if r.status_code == 200:
+                assert "task_id" in body
+                assert body.get("status") == "pending"
+            else:
+                assert {"code", "detail", "user_action"}.issubset(set(body.keys()))
+
+    def test_generate_validation_error_envelope_contract(self, raw_client):
+        session_r = raw_client.post("/auth/session")
+        assert session_r.status_code == 204
+
+        invalid_payload = {
+            "model": "anisora",
+            "type": "video",
+            "mode": "t2v",
+            "prompt": "invalid steps",
+            "width": 512,
+            "height": 512,
+            "steps": 20,
+            "seed": 123,
+        }
+        r = raw_client.post("/generate", json=invalid_payload)
+        assert r.status_code == 422, r.text
+        body = r.json()
+        assert {"code", "detail", "user_action"}.issubset(set(body.keys()))
+
 
 class TestAdminSessionContracts:
     @pytest.fixture(autouse=True)
@@ -307,6 +388,19 @@ class TestCors:
         assert r.status_code in (200, 204)
         assert r.headers.get("access-control-allow-origin") == origin
         assert r.headers.get("access-control-allow-credentials") == "true"
+
+    def test_preflight_rejects_disallowed_origin(self, base_url):
+        bad_origin = "https://evil.example.com"
+        r = httpx.options(
+            f"{base_url}/admin/accounts",
+            headers={
+                "Origin": bad_origin,
+                "Access-Control-Request-Method": "GET",
+            },
+            timeout=10.0,
+        )
+        assert r.status_code in (200, 204, 400)
+        assert r.headers.get("access-control-allow-origin") != bad_origin
 
 
 class TestGenerateFlow:
@@ -446,4 +540,47 @@ class TestGenerateFlow:
         assert seen and seen[0] == "pending", f"Unexpected initial status sequence: {seen}"
         assert "processing" in seen, f"Expected status transition to include 'processing': {seen}"
         assert final_status in {"done", "failed"}, f"No terminal status reached: {seen}"
+
+    def test_worker_start_timeout_transition_contract(self, client):
+        """
+        Optional live contract for worker-start timeout transition.
+        Enable only when environment intentionally reproduces worker pickup timeout:
+          TEST_FORCE_WORKER_TIMEOUT=1
+        """
+        if os.environ.get("TEST_FORCE_WORKER_TIMEOUT") != "1":
+            pytest.skip("Set TEST_FORCE_WORKER_TIMEOUT=1 to run worker-timeout contract test")
+
+        payload = {
+            "model": "anisora",
+            "type": "video",
+            "mode": "t2v",
+            "prompt": "force worker start timeout contract",
+            "width": 512,
+            "height": 512,
+            "num_frames": 17,
+            "fps": 8,
+            "steps": 8,
+            "seed": 77,
+        }
+        gen_r = client.post("/generate", json=payload)
+        assert gen_r.status_code == 200, gen_r.text
+        task_id = gen_r.json()["task_id"]
+
+        deadline = time.time() + VIDEO_FLOW_TIMEOUT_SECONDS
+        terminal = None
+        terminal_payload = None
+        while time.time() < deadline:
+            st_r = client.get(f"/status/{task_id}", timeout=15)
+            assert st_r.status_code == 200, st_r.text
+            data = st_r.json()
+            if data.get("status") in {"done", "failed"}:
+                terminal = data.get("status")
+                terminal_payload = data
+                break
+            time.sleep(POLL_INTERVAL_SECONDS)
+
+        assert terminal == "failed", f"Expected failed timeout terminal state, got: {terminal_payload}"
+        detail = (terminal_payload or {}).get("stage_detail", "")
+        message = (terminal_payload or {}).get("error_msg", "")
+        assert ("worker_start_timeout" in detail) or ("Worker start timeout" in message)
 

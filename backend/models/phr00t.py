@@ -25,7 +25,7 @@ class Phr00tPipeline(BasePipeline):
         self._i2v_pipeline = None
 
     def load(self, cache_path: str) -> None:
-        if self._loaded:
+        if self._is_loaded_for_cache(cache_path):
             return
 
         from huggingface_hub import hf_hub_download
@@ -54,7 +54,7 @@ class Phr00tPipeline(BasePipeline):
             self._i2v_pipeline.vae.enable_slicing()
             self._i2v_pipeline.vae.enable_tiling()
 
-        self._loaded = True
+        self._mark_loaded_for_cache(cache_path)
 
     def generate(self, request: dict, task_id: str, results_path: str) -> tuple[str, str]:
         if not self._loaded:

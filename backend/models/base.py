@@ -46,6 +46,18 @@ class BasePipeline(abc.ABC):
 
     # ─── Shared helpers ───────────────────────────────────────────────────────
 
+    def _is_loaded_for_cache(self, cache_path: str) -> bool:
+        """Skip expensive reload when warm container already loaded same cache path."""
+        return bool(
+            getattr(self, "_loaded", False)
+            and getattr(self, "_loaded_cache_path", None) == cache_path
+        )
+
+    def _mark_loaded_for_cache(self, cache_path: str) -> None:
+        self._loaded = True
+        self._loaded_cache_path = cache_path
+        self._full_load_count = int(getattr(self, "_full_load_count", 0)) + 1
+
     @staticmethod
     def decode_image(data_uri: str) -> Image.Image:
         """Decode a base64 data URI into a PIL Image."""

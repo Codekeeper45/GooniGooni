@@ -121,6 +121,7 @@ interface GenerationContextType {
   status: GenerationStatus;
   progress: number;
   statusText: string;
+  stageDetail: string;
   error: string | null;
   result: any;
   taskId: string | null;
@@ -208,6 +209,7 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
   const [status, setStatus] = useState<GenerationStatus>(savedState?.status ?? "idle");
   const [progress, setProgress] = useState(savedState?.progress ?? 0);
   const [statusText, setStatusText] = useState(savedState?.statusText ?? "");
+  const [stageDetail, setStageDetail] = useState(savedState?.stageDetail ?? "");
   const [error, setError] = useState<string | null>(savedState?.error ?? null);
   const [result, setResult] = useState<any>(savedState?.result ?? null);
   const [taskId, setTaskId] = useState<string | null>(savedState?.taskId ?? null);
@@ -224,7 +226,7 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
       referenceImage, firstFrameImage, lastFrameImage, arbitraryFrames,
       numFrames, videoSteps, guidanceScale, fps, motionScore, cfgScaleVideo, referenceStrength, lightingVariant, denoisingStrength,
       imageSteps, cfgScaleImage, clipSkip, sampler, imageGuidanceScale, imgDenoisingStrength,
-      status, progress, statusText, error, result, taskId, history
+      status, progress, statusText, stageDetail, error, result, taskId, history
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   }, [
@@ -233,7 +235,7 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
     referenceImage, firstFrameImage, lastFrameImage, arbitraryFrames,
     numFrames, videoSteps, guidanceScale, fps, motionScore, cfgScaleVideo, referenceStrength, lightingVariant, denoisingStrength,
     imageSteps, cfgScaleImage, clipSkip, sampler, imageGuidanceScale, imgDenoisingStrength,
-    status, progress, statusText, error, result, taskId, history
+    status, progress, statusText, stageDetail, error, result, taskId, history
   ]);
 
   // ── Derived ─────────────────────────────────────────────────────────────────
@@ -257,15 +259,17 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
     }
   }, []);
 
-  const startPolling = useCallback((tid: string, resolvedSeed: number) => {
+  const startPolling = useCallback((tid: string, resolvedSeed: number, options?: { resume?: boolean }) => {
     let consecutiveErrors = 0;
     const startedAtMs = Date.now();
     let queuedAtMs: number | null = null;
+    let includeResumeFlag = options?.resume === true;
     setTaskId(tid);
 
-    const failPolling = (message: string) => {
+        const failPolling = (message: string) => {
       stopPolling();
       setStatus("error");
+      setStageDetail("failed");
       setError(message);
       setHistory(prev =>
         prev.map(h =>
@@ -279,16 +283,19 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
     const poll = async () => {
       if (abortRef.current) return;
       try {
-        const resp = await sessionFetch(`/status/${tid}`, {}, { retryOn401: true });
+        const statusPath = includeResumeFlag ? `/status/${tid}?resume=1` : `/status/${tid}`;
+        const resp = await sessionFetch(statusPath, {}, { retryOn401: true });
+        includeResumeFlag = false;
         if (!resp.ok) {
           const apiErr = await readApiError(resp, "Status check failed.");
+          const message = `${apiErr.detail} ${apiErr.userAction}`.trim();
           if (FATAL_POLL_HTTP_CODES.has(resp.status)) {
-            failPolling(apiErr.detail || "Generation failed.");
+            failPolling(message || "Generation failed.");
             return;
           }
           consecutiveErrors++;
           if (consecutiveErrors >= MAX_POLL_ERRORS) {
-            failPolling(apiErr.detail || "Connection to server lost.");
+            failPolling(message || "Connection to server lost.");
           }
           return;
         }
@@ -298,6 +305,7 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
         const currentProgress = Number(data.progress ?? 0);
         setProgress(currentProgress);
         setStatusText(getStatusText(data.stage, generationType));
+        setStageDetail(typeof data.stage_detail === "string" ? data.stage_detail : "");
 
         if (
           data.status === "pending" &&
@@ -333,6 +341,7 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
           setResult(res);
           setStatus("done");
           setProgress(100);
+          setStageDetail("ok");
 
           addToGallery({
             id: tid,
@@ -349,10 +358,10 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
         } else if (data.status === "failed") {
           failPolling(data.error_msg ?? "Generation failed.");
         }
-      } catch {
+      } catch (err: any) {
         consecutiveErrors++;
         if (consecutiveErrors >= MAX_POLL_ERRORS) {
-          failPolling("Polling error.");
+          failPolling(err?.message || "Polling error.");
         }
       }
     };
@@ -364,7 +373,7 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
   // Resume polling on mount if taskId is set and status is generating
   useEffect(() => {
     if (status === "generating" && taskId) {
-      startPolling(taskId, seed);
+      startPolling(taskId, seed, { resume: true });
     }
     return () => {
       abortRef.current = true;
@@ -379,6 +388,7 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
     setStatus("generating");
     setProgress(0);
     setStatusText("Initializing…");
+    setStageDetail("");
     setError(null);
     setResult(null);
 
@@ -414,7 +424,7 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
 
       if (!resp.ok) {
         const apiErr = await readApiError(resp, "Fail");
-        throw new Error(apiErr.detail);
+        throw new Error(`${apiErr.detail} ${apiErr.userAction}`.trim());
       }
 
       const data = await resp.json();
@@ -424,6 +434,7 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
       startPolling(tid, resolvedSeed);
     } catch (err: any) {
       setStatus("error");
+      setStageDetail("failed");
       setError(err.message);
       setHistory(prev => prev.map(h => h.id === historyItem.id ? { ...h, status: "failed", error: err.message } : h));
     }
@@ -478,7 +489,7 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
     sampler, setSampler,
     imageGuidanceScale, setImageGuidanceScale,
     imgDenoisingStrength, setImgDenoisingStrength,
-    status, progress, statusText, error, result, taskId, estSeconds,
+    status, progress, statusText, stageDetail, error, result, taskId, estSeconds,
     generate, retry, regenerate,
     history, setHistory
   };

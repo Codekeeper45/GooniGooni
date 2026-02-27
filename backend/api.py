@@ -16,9 +16,10 @@ Usage inside app.py:
 from __future__ import annotations
 
 import os
+import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status, Body
 from fastapi.exceptions import RequestValidationError
@@ -41,6 +42,9 @@ from config import (
     DEGRADED_QUEUE_MAX_DEPTH,
     DEGRADED_QUEUE_MAX_WAIT_SECONDS,
     DEGRADED_QUEUE_OVERLOAD_CODE,
+    GEN_SESSION_MAX_ACTIVE_TASKS,
+    NO_READY_ACCOUNT_WAIT_SECONDS,
+    ARTIFACT_TTL_DAYS,
 )
 from router import router as account_router, NoReadyAccountError, MAX_FALLBACKS
 from deployer import deploy_account_async, deploy_all_accounts, get_missing_shared_env_keys
@@ -154,6 +158,48 @@ def _fallback_reason_from_error(exc: Exception) -> str:
     return "capacity"
 
 
+def _is_remote_public_task_id(task_id: str) -> bool:
+    return "::" in task_id
+
+
+def _split_remote_public_task_id(task_id: str) -> tuple[str, str]:
+    workspace, remote_task_id = task_id.split("::", 1)
+    return workspace.strip(), remote_task_id.strip()
+
+
+def _compose_remote_public_task_id(workspace: str, remote_task_id: str) -> str:
+    return f"{workspace}::{remote_task_id}"
+
+
+def _remote_workspace_base_url(workspace: str) -> str:
+    return f"https://{workspace}--gooni-api.modal.run"
+
+
+def _extract_generation_session_token(session_or_api_key: str) -> Optional[str]:
+    """
+    verify_generation_session returns either:
+      - generation session token
+      - API key (header/query fallback path)
+    Here we only need the actual generation session token.
+    """
+    active, _, _ = storage.validate_generation_session(session_or_api_key)
+    return session_or_api_key if active else None
+
+
+def _gateway_media_urls(request: Request, task_id: str) -> tuple[str, str]:
+    base_url = str(request.base_url).rstrip("/")
+    return (f"{base_url}/results/{task_id}", f"{base_url}/preview/{task_id}")
+
+
+def _no_ready_wait_remaining(deadline: float, now: Optional[float] = None) -> float:
+    current = time.monotonic() if now is None else now
+    return max(0.0, deadline - current)
+
+
+def _no_ready_wait_expired(deadline: float, now: Optional[float] = None) -> bool:
+    return _no_ready_wait_remaining(deadline, now=now) <= 0.0
+
+
 # ─── Cookie helpers ───────────────────────────────────────────────────────────
 
 _COOKIE_SECURE = True
@@ -260,6 +306,7 @@ def create_app(results_vol=None) -> FastAPI:
         *,
         force_degraded_reason: Optional[str] = None,
         warmup_only: bool = False,
+        generation_session_token: Optional[str] = None,
     ) -> GenerateResponse:
         import random
         # Late import to access Modal spawnable functions
@@ -283,6 +330,8 @@ def create_app(results_vol=None) -> FastAPI:
             prompt=req.prompt, negative_prompt=req.negative_prompt,
             parameters=params, width=req.width, height=req.height,
             seed=resolved_seed, lane_mode=lane_mode, fallback_reason=force_degraded_reason,
+            generation_session_token=generation_session_token,
+            artifact_ttl_days=ARTIFACT_TTL_DAYS,
         )
         req_dict = _normalize_request_dict(req)
         req_dict["seed"] = resolved_seed
@@ -494,14 +543,36 @@ def create_app(results_vol=None) -> FastAPI:
         return {"ok": True, "enabled": True, "scheduled": scheduled, "errors": errors}
 
     @api.post("/generate", response_model=GenerateResponse, tags=["Generation"])
-    async def generate(req: GenerateRequest, _: str = Depends(verify_generation_session)):
+    async def generate(req: GenerateRequest, session_or_api_key: str = Depends(verify_generation_session)):
         import httpx
+
+        request_started_at = time.monotonic()
         _vol_reload()
+        session_token = _extract_generation_session_token(session_or_api_key)
+        if session_token:
+            active_tasks = storage.count_active_tasks_for_session(session_token)
+            if active_tasks >= GEN_SESSION_MAX_ACTIVE_TASKS:
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail={
+                        **_error_payload(
+                            "active_task_limit_exceeded",
+                            "Too many active generation tasks for this session.",
+                            "Wait for current tasks to finish, then retry.",
+                        ),
+                        "metadata": {
+                            "active_tasks": active_tasks,
+                            "limit": GEN_SESSION_MAX_ACTIVE_TASKS,
+                        },
+                    },
+                )
+
         tried_accounts: list[str] = []
         last_error = ""
         api_key_env = os.environ.get("API_KEY", "")
         headers = {"X-API-Key": api_key_env} if api_key_env else {}
         req_payload = _normalize_request_dict(req)
+        deadline = time.monotonic() + max(NO_READY_ACCOUNT_WAIT_SECONDS, 0)
 
         for attempt in range(MAX_FALLBACKS + 1):
             try:
@@ -510,7 +581,7 @@ def create_app(results_vol=None) -> FastAPI:
                 workspace = account.get("workspace")
                 if not workspace:
                     raise Exception("Account has no workspace configured.")
-                remote_url = f"https://{workspace}--gooni-api.modal.run/generate_direct"
+                remote_url = f"{_remote_workspace_base_url(workspace)}/generate_direct"
                 async with httpx.AsyncClient(timeout=httpx.Timeout(connect=4.0, read=60.0, write=60.0, pool=5.0)) as client:
                     resp = await client.post(remote_url, json=req_payload, headers=headers)
                     if resp.status_code == 422:
@@ -527,11 +598,56 @@ def create_app(results_vol=None) -> FastAPI:
                         raise Exception(f"remote_{resp.status_code}:{resp.text[:200]}")
                     data = resp.json()
                 account_router.mark_success(account["id"])
+                public_task_id = _compose_remote_public_task_id(workspace, data["task_id"])
+                storage.record_operational_event(
+                    "assignment_submitted",
+                    task_id=public_task_id,
+                    model=req.model.value,
+                    lane_mode="remote",
+                    value=account["id"],
+                    reason=workspace,
+                )
+                storage.record_operational_event(
+                    "generation_accepted",
+                    task_id=public_task_id,
+                    model=req.model.value,
+                    lane_mode="remote",
+                    value=round(time.monotonic() - request_started_at, 4),
+                )
+                if attempt > 0:
+                    storage.record_operational_event(
+                        "fallback_success",
+                        task_id=public_task_id,
+                        model=req.model.value,
+                        lane_mode="remote",
+                        value=attempt,
+                        reason="fallback_recovered",
+                    )
                 _vol_commit()
-                return GenerateResponse(task_id=f"{workspace}::{data['task_id']}", status=TaskStatus.pending)
+                return GenerateResponse(
+                    task_id=public_task_id,
+                    status=TaskStatus.pending,
+                )
 
             except NoReadyAccountError:
-                break
+                remaining = _no_ready_wait_remaining(deadline)
+                if not _no_ready_wait_expired(deadline):
+                    await asyncio.sleep(min(1.0, remaining))
+                    continue
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail={
+                        **_error_payload(
+                            "no_ready_accounts",
+                            "No ready execution accounts are currently available.",
+                            "Retry shortly.",
+                        ),
+                        "metadata": {
+                            "waited_seconds": NO_READY_ACCOUNT_WAIT_SECONDS,
+                            "tried_accounts": len(tried_accounts),
+                        },
+                    },
+                )
             except HTTPException:
                 raise
             except Exception as exc:
@@ -541,22 +657,106 @@ def create_app(results_vol=None) -> FastAPI:
 
         if last_error:
             storage.record_operational_event("fallback_activated", model=req.model.value, lane_mode="degraded_shared" if req.type.value == "video" else None, reason=_fallback_reason_from_error(Exception(last_error)))
-        return await _spawn_local_generation(req)
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail={
+                    **_error_payload(
+                        "remote_dispatch_failed",
+                        "Failed to dispatch generation to ready worker accounts.",
+                        "Retry shortly.",
+                    ),
+                    "metadata": {
+                        "tried_accounts": len(tried_accounts),
+                        "last_error": last_error[:200],
+                    },
+                },
+            )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=_error_payload(
+                "no_ready_accounts",
+                "No ready execution accounts are currently available.",
+                "Retry shortly.",
+            ),
+        )
 
     # ── Status ────────────────────────────────────────────────────────────────
     @api.get("/status/{task_id}", response_model=StatusResponse, tags=["Generation"])
-    async def get_status(task_id: str, _: str = Depends(verify_generation_session)):
-        if "::" in task_id:
+    async def get_status(
+        request: Request,
+        task_id: str,
+        resume: bool = Query(False),
+        _: str = Depends(verify_generation_session),
+    ):
+        if resume:
+            storage.record_operational_event(
+                "resume_attempt",
+                task_id=task_id,
+            )
+        if _is_remote_public_task_id(task_id):
             import httpx
-            workspace, remote_task_id = task_id.split("::", 1)
+            workspace, remote_task_id = _split_remote_public_task_id(task_id)
             api_key = os.environ.get("API_KEY", "")
             try:
                 async with httpx.AsyncClient(timeout=httpx.Timeout(connect=5.0, read=20.0, write=20.0, pool=5.0)) as client:
-                    resp = await client.get(f"https://{workspace}--gooni-api.modal.run/status/{remote_task_id}", headers={"X-API-Key": api_key})
+                    resp = await client.get(f"{_remote_workspace_base_url(workspace)}/status/{remote_task_id}", headers={"X-API-Key": api_key})
                     if resp.status_code == 404:
                         raise HTTPException(status_code=404, detail=_error_payload("task_not_found", "Remote task not found.", "Verify task id and retry."))
                     resp.raise_for_status()
-                    return resp.json()
+                    raw = resp.json()
+                    if not isinstance(raw, dict):
+                        raw = {}
+
+                    status_value = str(raw.get("status") or "pending")
+                    progress_value = int(raw.get("progress") or 0)
+                    stage_value = raw.get("stage")
+                    stage_detail_value = raw.get("stage_detail")
+                    error_msg_value = raw.get("error_msg")
+                    diagnostics_value = raw.get("diagnostics") if isinstance(raw.get("diagnostics"), dict) else None
+                    result_url, preview_url = _gateway_media_urls(request, task_id)
+
+                    if status_value != "done":
+                        result_url = None
+                        preview_url = None
+                    if resume:
+                        storage.record_operational_event(
+                            "resume_success",
+                            task_id=task_id,
+                            lane_mode="remote",
+                            model=None,
+                            reason=status_value,
+                        )
+                    updated_at_value = raw.get("updated_at")
+                    if isinstance(updated_at_value, str):
+                        try:
+                            updated_at_dt = datetime.fromisoformat(updated_at_value)
+                            if updated_at_dt.tzinfo is None:
+                                updated_at_dt = updated_at_dt.replace(tzinfo=datetime.now().astimezone().tzinfo)
+                            freshness_seconds = max(
+                                0.0,
+                                (datetime.now(updated_at_dt.tzinfo) - updated_at_dt).total_seconds(),
+                            )
+                            storage.record_operational_event(
+                                "status_freshness_seconds",
+                                task_id=task_id,
+                                lane_mode="remote",
+                                value=round(freshness_seconds, 4),
+                            )
+                        except Exception:
+                            pass
+                    _vol_commit()
+
+                    return StatusResponse(
+                        task_id=task_id,
+                        status=TaskStatus(status_value),
+                        progress=max(0, min(progress_value, 100)),
+                        stage=stage_value,
+                        stage_detail=stage_detail_value,
+                        diagnostics=diagnostics_value,
+                        result_url=result_url,
+                        preview_url=preview_url,
+                        error_msg=error_msg_value,
+                    )
             except HTTPException:
                 raise
             except Exception as e:
@@ -577,18 +777,52 @@ def create_app(results_vol=None) -> FastAPI:
                 result = storage.get_task(task_id) or result
             elif age >= pending_start_warning:
                 result = result.model_copy(update={"stage": "queued", "stage_detail": f"Awaiting GPU worker pickup ({int(age)}s). Queue delay detected."})
+
+        if result.updated_at is not None:
+            freshness_seconds = max(
+                0.0,
+                (datetime.now(result.updated_at.tzinfo) - result.updated_at).total_seconds(),
+            )
+            storage.record_operational_event(
+                "status_freshness_seconds",
+                task_id=task_id,
+                lane_mode=result.lane_mode,
+                model=None,
+                value=round(freshness_seconds, 4),
+            )
+        if resume:
+            storage.record_operational_event(
+                "resume_success",
+                task_id=task_id,
+                lane_mode=result.lane_mode,
+                model=None,
+                reason=result.status.value,
+            )
+        _vol_commit()
+
+        result_url, preview_url = _gateway_media_urls(request, task_id)
+        if result.status == TaskStatus.done:
+            result = result.model_copy(
+                update={
+                    "task_id": task_id,
+                    "result_url": result.result_url or result_url,
+                    "preview_url": result.preview_url or preview_url,
+                }
+            )
+        else:
+            result = result.model_copy(update={"task_id": task_id})
         return result
 
     # ── Results & Preview ─────────────────────────────────────────────────────
     @api.get("/results/{task_id}", tags=["Generation"])
     async def get_result(task_id: str, _: str = Depends(verify_generation_session)):
-        if "::" in task_id:
+        if _is_remote_public_task_id(task_id):
             import httpx
-            workspace, remote_task_id = task_id.split("::", 1)
+            workspace, remote_task_id = _split_remote_public_task_id(task_id)
             api_key = os.environ.get("API_KEY", "")
             try:
                 async with httpx.AsyncClient(timeout=httpx.Timeout(connect=5.0, read=120.0, write=30.0, pool=5.0)) as client:
-                    resp = await client.get(f"https://{workspace}--gooni-api.modal.run/results/{remote_task_id}", headers={"X-API-Key": api_key})
+                    resp = await client.get(f"{_remote_workspace_base_url(workspace)}/results/{remote_task_id}", headers={"X-API-Key": api_key})
                     if resp.status_code == 404:
                         raise HTTPException(status_code=404, detail=_error_payload("result_not_found", "Remote result not found.", "Verify task id or regenerate."))
                     resp.raise_for_status()
@@ -617,13 +851,13 @@ def create_app(results_vol=None) -> FastAPI:
 
     @api.get("/preview/{task_id}", tags=["Generation"])
     async def get_preview(task_id: str, _: str = Depends(verify_generation_session)):
-        if "::" in task_id:
+        if _is_remote_public_task_id(task_id):
             import httpx
-            workspace, remote_task_id = task_id.split("::", 1)
+            workspace, remote_task_id = _split_remote_public_task_id(task_id)
             api_key = os.environ.get("API_KEY", "")
             try:
                 async with httpx.AsyncClient(timeout=httpx.Timeout(connect=5.0, read=60.0, write=20.0, pool=5.0)) as client:
-                    resp = await client.get(f"https://{workspace}--gooni-api.modal.run/preview/{remote_task_id}", headers={"X-API-Key": api_key})
+                    resp = await client.get(f"{_remote_workspace_base_url(workspace)}/preview/{remote_task_id}", headers={"X-API-Key": api_key})
                     if resp.status_code == 404:
                         raise HTTPException(status_code=404, detail=_error_payload("preview_not_found", "Remote preview not found.", "Verify task id or regenerate."))
                     resp.raise_for_status()

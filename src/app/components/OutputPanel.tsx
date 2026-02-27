@@ -15,6 +15,7 @@ interface OutputPanelProps {
   status: GenerationStatus;
   progress: number;
   statusText: string;
+  stageDetail?: string;
   result: {
     url: string;
     thumbnailUrl?: string;
@@ -105,6 +106,7 @@ function IdleState({ generationType }: { generationType: GenerationType }) {
 function GeneratingState({
   progress,
   statusText,
+  stageDetail,
   referenceImage,
   generationType,
   mode,
@@ -112,6 +114,7 @@ function GeneratingState({
 }: {
   progress: number;
   statusText: string;
+  stageDetail?: string;
   referenceImage: string | null;
   generationType: GenerationType;
   mode: VideoMode | ImageMode;
@@ -213,6 +216,11 @@ function GeneratingState({
           <p className="text-xs" style={{ color: "#4B5563" }}>
             ~{remaining}s remaining
           </p>
+          {stageDetail ? (
+            <p className="text-[11px]" style={{ color: "#6B7280" }}>
+              {stageDetail}
+            </p>
+          ) : null}
         </div>
 
         {/* Wide progress bar */}
@@ -427,7 +435,7 @@ function ErrorState({
 
 // ── Main export ───────────────────────────────────────────────────────────────
 export function OutputPanel({
-  status, progress, statusText, result, error,
+  status, progress, statusText, stageDetail, result, error,
   referenceImage, generationType, mode, onRetry, onRegenerate, estSeconds,
 }: OutputPanelProps) {
   return (
@@ -459,6 +467,7 @@ export function OutputPanel({
             <GeneratingState
               progress={progress}
               statusText={statusText}
+              stageDetail={stageDetail}
               referenceImage={referenceImage}
               generationType={generationType}
               mode={mode}

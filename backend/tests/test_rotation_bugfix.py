@@ -351,3 +351,21 @@ class TestPreservation_FailCountThreshold:
         row = accounts.get_account(aid)
         assert row["status"] == "failed"
         assert row["fail_count"] == 1
+
+
+class TestNoReadyWaitHelpers:
+    """No-ready wait timeout helpers should behave deterministically."""
+
+    def test_wait_remaining_never_negative(self):
+        import api as backend_api
+
+        assert backend_api._no_ready_wait_remaining(10.0, now=9.0) == 1.0
+        assert backend_api._no_ready_wait_remaining(10.0, now=10.0) == 0.0
+        assert backend_api._no_ready_wait_remaining(10.0, now=11.5) == 0.0
+
+    def test_wait_expired_flags_deadline_crossing(self):
+        import api as backend_api
+
+        assert backend_api._no_ready_wait_expired(10.0, now=9.99) is False
+        assert backend_api._no_ready_wait_expired(10.0, now=10.0) is True
+        assert backend_api._no_ready_wait_expired(10.0, now=10.5) is True

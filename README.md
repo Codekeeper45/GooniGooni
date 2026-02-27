@@ -43,4 +43,29 @@ Rollback to previous backend revision if any of the following appears after depl
 - Keeping two dedicated warm lanes reduces switch latency but increases baseline GPU cost.
 - Disabling warm lanes reduces baseline cost but increases cold-start latency and degraded-mode usage.
 - Recommended baseline: keep warm lanes enabled for primary traffic hours; monitor diagnostics and adjust.
+
+## Unified Pipeline Flow Contract
+
+The user flow is identical for all pipelines (`anisora`, `phr00t`, `pony`, `flux`):
+
+1. Frontend submits prompt + parameters to `POST /generate`.
+2. Backend validates payload and routes to a ready worker account via account rotation.
+3. Client polls `GET /status/{task_id}` until terminal status.
+4. On `done`, artifacts are fetched from `GET /results/{task_id}` and `GET /preview/{task_id}`.
+
+`task_id` must be treated as opaque on the frontend. Remote tasks may internally use `workspace::task_id`.
+
+## Structured Error Envelope
+
+Generation, gallery, and auth-related API failures return a single envelope:
+
+```json
+{
+  "code": "error_code",
+  "detail": "Human-readable problem description",
+  "user_action": "What user should do next"
+}
+```
+
+Frontend must show both `detail` and `user_action` to avoid silent failures and undefined retry behavior.
   

@@ -22,9 +22,11 @@ class AnisoraPipeline(BasePipeline):
         self._i2v = None
 
     def load(self, cache_path: str) -> None:
+        if self._is_loaded_for_cache(cache_path):
+            return
         # Defer heavy loading until mode is known.
         self._cache_path = cache_path
-        self._loaded = True
+        self._mark_loaded_for_cache(cache_path)
 
     def _common_kwargs(self) -> dict:
         kwargs = {
