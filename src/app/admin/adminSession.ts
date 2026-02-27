@@ -1,9 +1,32 @@
-const ADMIN_SESSION_KEY = "gg_admin_session";
 const REQUEST_TIMEOUT_MS = 30000;
 const ADMIN_API_BASE = "/api";
 
 export interface AdminSession {
   authenticated: true;
+}
+
+export interface AdminErrorPayload {
+  status: number;
+  code?: string;
+  detail: string;
+}
+
+const ADMIN_SESSION_ERROR_CODES = new Set([
+  "admin_session_missing",
+  "admin_session_expired",
+  "admin_session_invalid",
+]);
+
+export class AdminHttpError extends Error {
+  readonly status: number;
+  readonly code?: string;
+
+  constructor(payload: AdminErrorPayload) {
+    super(payload.detail);
+    this.name = "AdminHttpError";
+    this.status = payload.status;
+    this.code = payload.code;
+  }
 }
 
 function getAdminApiUrl(path: string, base: string = ADMIN_API_BASE): string {
@@ -43,34 +66,49 @@ async function fetchAdmin(path: string, init: RequestInit): Promise<Response> {
 }
 
 export function getSession(): AdminSession | null {
-  try {
-    return localStorage.getItem(ADMIN_SESSION_KEY) === "1" ? { authenticated: true } : null;
-  } catch {
-    return null;
-  }
+  return { authenticated: true };
 }
 
 export function saveSession(): void {
-  localStorage.setItem(ADMIN_SESSION_KEY, "1");
+  // server-side cookie is the source of truth
 }
 
 export function clearSession(): void {
-  localStorage.removeItem(ADMIN_SESSION_KEY);
+  // server-side cookie is the source of truth
 }
 
 export function isLoggedIn(): boolean {
-  return !!getSession();
+  return true;
 }
 
-async function parseError(response: Response): Promise<string> {
+export function isAdminSessionErrorCode(code?: string): boolean {
+  return !!code && ADMIN_SESSION_ERROR_CODES.has(code);
+}
+
+async function parseErrorPayload(response: Response): Promise<AdminErrorPayload> {
   try {
     const payload = await response.json();
-    if (payload?.detail?.detail) return payload.detail.detail as string;
-    if (typeof payload?.detail === "string") return payload.detail;
+    if (payload?.detail && typeof payload.detail === "object") {
+      return {
+        status: response.status,
+        code: typeof payload.detail.code === "string" ? payload.detail.code : undefined,
+        detail:
+          typeof payload.detail.detail === "string"
+            ? payload.detail.detail
+            : `HTTP ${response.status}`,
+      };
+    }
+    if (typeof payload?.detail === "string") {
+      return { status: response.status, detail: payload.detail };
+    }
   } catch {
     // ignore parse errors
   }
-  return `HTTP ${response.status}`;
+  return { status: response.status, detail: `HTTP ${response.status}` };
+}
+
+export async function readAdminErrorPayload(response: Response): Promise<AdminErrorPayload> {
+  return parseErrorPayload(response);
 }
 
 export async function createAdminSession(login: string, password: string): Promise<void> {
@@ -81,9 +119,8 @@ export async function createAdminSession(login: string, password: string): Promi
     credentials: "include",
   });
   if (!response.ok) {
-    throw new Error(await parseError(response));
+    throw new AdminHttpError(await parseErrorPayload(response));
   }
-  saveSession();
 }
 
 export async function ensureAdminSession(): Promise<void> {
@@ -92,7 +129,7 @@ export async function ensureAdminSession(): Promise<void> {
     credentials: "include",
   });
   if (!response.ok) {
-    throw new Error(await parseError(response));
+    throw new AdminHttpError(await parseErrorPayload(response));
   }
 }
 
@@ -108,9 +145,6 @@ export async function adminFetch(
   options: RequestInit = {},
   timeoutMs: number = REQUEST_TIMEOUT_MS,
 ): Promise<Response> {
-  const session = getSession();
-  if (!session) throw new Error("Not authenticated");
-
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 

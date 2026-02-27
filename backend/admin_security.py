@@ -20,8 +20,11 @@ from fastapi import HTTPException, Header, Request, status
 logger = logging.getLogger("admin_security")
 
 _rate_lock = threading.Lock()
-RATE_LIMIT = 30
 RATE_WINDOW = 60.0
+RATE_LIMIT_AUTH = 20
+RATE_LIMIT_WRITE = 30
+RATE_LIMIT_READ = 60
+RATE_LIMIT_SESSION_READ = 120
 ADMIN_SESSION_COOKIE = "gg_admin_session"
 ADMIN_IDLE_TIMEOUT_SECONDS = 12 * 3600
 
@@ -42,10 +45,12 @@ def _admin_error(
     detail: str,
     user_action: str,
     status_code: int = status.HTTP_401_UNAUTHORIZED,
+    headers: dict[str, str] | None = None,
 ) -> HTTPException:
     return HTTPException(
         status_code=status_code,
         detail={"code": code, "detail": detail, "user_action": user_action},
+        headers=headers,
     )
 
 
@@ -103,12 +108,18 @@ def _ensure_rate_limit_table(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS admin_rate_limits (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             ip TEXT NOT NULL,
+            action_bucket TEXT NOT NULL DEFAULT 'admin_read',
             ts REAL NOT NULL
         )
         """
     )
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(admin_rate_limits)").fetchall()}
+    if "action_bucket" not in columns:
+        conn.execute(
+            "ALTER TABLE admin_rate_limits ADD COLUMN action_bucket TEXT NOT NULL DEFAULT 'admin_read'"
+        )
     conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_admin_rate_limits_ip_ts ON admin_rate_limits(ip, ts)"
+        "CREATE INDEX IF NOT EXISTS idx_admin_rate_limits_ip_bucket_ts ON admin_rate_limits(ip, action_bucket, ts)"
     )
 
 
@@ -126,9 +137,31 @@ def _clear_rate_limit_state_for_tests() -> None:
         pass
 
 
-def _rate_check(ip: str) -> None:
+def _rate_bucket_and_limit(action: str) -> tuple[str, int]:
+    action_l = (action or "").lower()
+    if "admin_session_get" in action_l:
+        return "admin_session_read", RATE_LIMIT_SESSION_READ
+    if "admin_login" in action_l or "admin_session_create" in action_l:
+        return "admin_auth", RATE_LIMIT_AUTH
+    if any(
+        token in action_l
+        for token in (
+            "add_account",
+            "delete_account",
+            "deploy",
+            "disable_account",
+            "enable_account",
+            "admin_session_delete",
+        )
+    ):
+        return "admin_write", RATE_LIMIT_WRITE
+    return "admin_read", RATE_LIMIT_READ
+
+
+def _rate_check(ip: str, *, action: str = "unknown") -> None:
     now = time.time()
     threshold = now - RATE_WINDOW
+    bucket, limit = _rate_bucket_and_limit(action)
     with _rate_lock:
         conn = sqlite3.connect(_get_db_path(), timeout=5.0)
         try:
@@ -137,18 +170,29 @@ def _rate_check(ip: str) -> None:
             _ensure_rate_limit_table(conn)
             conn.execute("DELETE FROM admin_rate_limits WHERE ts < ?", (threshold,))
             current_hits = conn.execute(
-                "SELECT COUNT(*) FROM admin_rate_limits WHERE ip=? AND ts>=?",
-                (ip, threshold),
+                "SELECT COUNT(*) FROM admin_rate_limits WHERE ip=? AND action_bucket=? AND ts>=?",
+                (ip, bucket, threshold),
             ).fetchone()[0]
-            if current_hits >= RATE_LIMIT:
+            if current_hits >= limit:
+                oldest_ts = conn.execute(
+                    "SELECT MIN(ts) FROM admin_rate_limits WHERE ip=? AND action_bucket=? AND ts>=?",
+                    (ip, bucket, threshold),
+                ).fetchone()[0]
+                retry_after = 1
+                if oldest_ts is not None:
+                    retry_after = max(1, int((oldest_ts + RATE_WINDOW) - now) + 1)
                 conn.commit()
                 raise _admin_error(
                     code="admin_rate_limited",
                     detail="Too many admin requests. Try again later.",
                     user_action="Wait a minute and retry.",
                     status_code=429,
+                    headers={"Retry-After": str(retry_after)},
                 )
-            conn.execute("INSERT INTO admin_rate_limits(ip, ts) VALUES(?, ?)", (ip, now))
+            conn.execute(
+                "INSERT INTO admin_rate_limits(ip, action_bucket, ts) VALUES(?, ?, ?)",
+                (ip, bucket, now),
+            )
             conn.commit()
         finally:
             conn.close()
@@ -216,7 +260,7 @@ def get_admin_auth(action: str = "unknown"):
     async def _dep(request: Request, x_admin_key: str = Header("", alias="x-admin-key")) -> str:
         ip = _get_client_ip(request)
 
-        _rate_check(ip)
+        _rate_check(ip, action=action)
 
         expected = _os.environ.get("ADMIN_KEY", "")
         # Backward-compatible path: explicit header auth.
@@ -288,7 +332,7 @@ def verify_admin_key_header(action: str = "admin_session_create"):
 
     async def _dep(request: Request, x_admin_key: str = Header("", alias="x-admin-key")) -> str:
         ip = _get_client_ip(request)
-        _rate_check(ip)
+        _rate_check(ip, action=action)
 
         import os as _os
 
@@ -327,7 +371,7 @@ def verify_admin_login_password(request: Request, login: str, password: str, act
     import os as _os
 
     ip = _get_client_ip(request)
-    _rate_check(ip)
+    _rate_check(ip, action=action)
 
     expected_login = _os.environ.get("ADMIN_LOGIN", "")
     expected_password_hash = _os.environ.get("ADMIN_PASSWORD_HASH", "")

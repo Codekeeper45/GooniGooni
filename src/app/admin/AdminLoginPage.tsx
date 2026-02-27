@@ -4,7 +4,8 @@ import {
   clearSession,
   createAdminSession,
   ensureAdminSession,
-  getSession,
+  AdminHttpError,
+  isAdminSessionErrorCode,
 } from "./adminSession";
 
 export function AdminLoginPage() {
@@ -16,11 +17,13 @@ export function AdminLoginPage() {
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    const existing = getSession();
-    if (!existing) return;
     ensureAdminSession()
       .then(() => nav("/admin/dashboard"))
-      .catch(() => clearSession());
+      .catch((err: unknown) => {
+        if (err instanceof AdminHttpError && isAdminSessionErrorCode(err.code)) {
+          clearSession();
+        }
+      });
   }, [nav]);
 
   async function handleLogin(e: React.FormEvent) {

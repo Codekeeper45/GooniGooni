@@ -1,12 +1,13 @@
 ﻿import { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router";
 import {
-  getSession,
   clearSession,
   adminFetch,
   ensureAdminSession,
   revokeAdminSession,
-  type AdminSession,
+  AdminHttpError,
+  isAdminSessionErrorCode,
+  readAdminErrorPayload,
 } from "./adminSession";
 
 interface Account {
@@ -53,37 +54,12 @@ const statusIcons: Record<string, string> = {
   disabled: "OFF",
 };
 
-type AdminErrorPayload = {
-  code?: string;
-  detail: string;
-};
-
-const ADMIN_SESSION_ERROR_CODES = new Set([
-  "admin_session_missing",
-  "admin_session_expired",
-  "admin_session_invalid",
-]);
-
-async function readAdminError(response: Response): Promise<AdminErrorPayload> {
-  try {
-    const payload = await response.json();
-    const detailNode = payload?.detail;
-    if (detailNode && typeof detailNode === "object") {
-      return {
-        code: typeof detailNode.code === "string" ? detailNode.code : undefined,
-        detail:
-          typeof detailNode.detail === "string"
-            ? detailNode.detail
-            : `HTTP ${response.status}`,
-      };
-    }
-    if (typeof detailNode === "string") {
-      return { detail: detailNode };
-    }
-  } catch {
-    // ignore parse errors
-  }
-  return { detail: `HTTP ${response.status}` };
+function retryAfterSeconds(response: Response): number {
+  const raw = response.headers.get("retry-after");
+  if (!raw) return 5;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 5;
+  return parsed;
 }
 
 async function handleAuthFailureIfNeeded(
@@ -93,8 +69,8 @@ async function handleAuthFailureIfNeeded(
   if (response.status !== 401 && response.status !== 403) {
     return false;
   }
-  const error = await readAdminError(response);
-  if (error.code && ADMIN_SESSION_ERROR_CODES.has(error.code)) {
+  const error = await readAdminErrorPayload(response);
+  if (isAdminSessionErrorCode(error.code)) {
     clearSession();
     nav("/admin");
     return true;
@@ -123,7 +99,7 @@ function StatusBadge({ status }: { status: string }) {
 
 export function AdminDashboard() {
   const nav = useNavigate();
-  const session = getSession() as AdminSession | null;
+  const [authState, setAuthState] = useState<"checking" | "ready" | "denied">("checking");
 
   const [tab, setTab] = useState<Tab>("accounts");
   const [accounts, setAccounts] = useState<Account[]>([]);
@@ -138,21 +114,40 @@ export function AdminDashboard() {
   const [showSecret, setShowSecret] = useState(false);
   const [addLoading, setAddLoading] = useState(false);
 
-  useEffect(() => {
-    if (!session) {
-      nav("/admin");
-      return;
-    }
-    ensureAdminSession().catch(() => {
-      clearSession();
-      nav("/admin");
-    });
-  }, [session, nav]);
-
   const showToast = (msg: string, ok = true) => {
     setToast({ msg, ok });
     setTimeout(() => setToast(null), 3500);
   };
+
+  useEffect(() => {
+    let cancelled = false;
+    ensureAdminSession()
+      .then(() => {
+        if (cancelled) return;
+        setAuthState("ready");
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        if (err instanceof AdminHttpError) {
+          if (isAdminSessionErrorCode(err.code)) {
+            clearSession();
+            setAuthState("denied");
+            nav("/admin");
+            return;
+          }
+          if (err.status === 429) {
+            setAuthState("ready");
+            showToast("Too many admin requests. Please wait and retry.", false);
+            return;
+          }
+        }
+        setAuthState("ready");
+        showToast("Unable to verify admin session. Check connection.", false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [nav]);
 
   const fetchAccounts = useCallback(async () => {
     try {
@@ -161,7 +156,15 @@ export function AdminDashboard() {
         return;
       }
       if (!res.ok) {
-        const error = await readAdminError(res);
+        if (res.status === 429) {
+          const wait = retryAfterSeconds(res);
+          showToast(`Rate limit reached. Retrying in ${wait}s.`, false);
+          setTimeout(() => {
+            void fetchAccounts();
+          }, wait * 1000);
+          return;
+        }
+        const error = await readAdminErrorPayload(res);
         showToast(error.detail, false);
         return;
       }
@@ -176,26 +179,34 @@ export function AdminDashboard() {
   const fetchLogs = useCallback(async () => {
     try {
       const res = await adminFetch("/admin/logs");
+      if (await handleAuthFailureIfNeeded(res, nav)) {
+        return;
+      }
       if (res.ok) {
         const data = await res.json();
         setLogs(data.logs ?? []);
+      } else if (res.status === 429) {
+        const wait = retryAfterSeconds(res);
+        showToast(`Logs are rate limited. Retry in ${wait}s.`, false);
       }
     } catch {
       // endpoint can be unavailable during startup
     }
-  }, []);
+  }, [nav]);
 
   useEffect(() => {
+    if (authState !== "ready") return;
     setLoading(true);
     Promise.all([fetchAccounts(), fetchLogs()]).finally(() => setLoading(false));
-  }, [fetchAccounts, fetchLogs]);
+  }, [authState, fetchAccounts, fetchLogs]);
 
   useEffect(() => {
+    if (authState !== "ready") return;
     const hasActiveChecks = accounts.some((a) => a.status === "pending" || a.status === "checking");
     if (!hasActiveChecks) return;
     const timer = setInterval(fetchAccounts, 5000);
     return () => clearInterval(timer);
-  }, [accounts, fetchAccounts]);
+  }, [authState, accounts, fetchAccounts]);
 
   async function doAction(path: string, method = "POST", okMessage = "Done") {
     try {
@@ -207,7 +218,12 @@ export function AdminDashboard() {
         showToast(okMessage || "Done");
         await fetchAccounts();
       } else {
-        const error = await readAdminError(res);
+        if (res.status === 429) {
+          const wait = retryAfterSeconds(res);
+          showToast(`Rate limit reached. Retry in ${wait}s.`, false);
+          return;
+        }
+        const error = await readAdminErrorPayload(res);
         showToast(error.detail, false);
       }
     } catch {
@@ -237,7 +253,12 @@ export function AdminDashboard() {
         setTokenSecret("");
         await fetchAccounts();
       } else {
-        const error = await readAdminError(res);
+        if (res.status === 429) {
+          const wait = retryAfterSeconds(res);
+          showToast(`Rate limit reached. Retry in ${wait}s.`, false);
+          return;
+        }
+        const error = await readAdminErrorPayload(res);
         showToast(`Error: ${error.detail}`, false);
       }
     } catch (error) {
@@ -286,7 +307,25 @@ export function AdminDashboard() {
     cursor: "pointer",
   });
 
-  if (!session) return null;
+  if (authState === "checking") {
+    return (
+      <div
+        style={{
+          minHeight: "100vh",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: "linear-gradient(135deg,#0f0f1a 0%,#1a0a2e 100%)",
+          color: "rgba(255,255,255,0.75)",
+          fontFamily: "Inter,sans-serif",
+        }}
+      >
+        Checking admin session...
+      </div>
+    );
+  }
+
+  if (authState === "denied") return null;
 
   return (
     <div
