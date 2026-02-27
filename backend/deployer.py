@@ -29,6 +29,19 @@ BACKEND_DIR = Path(__file__).parent
 APP_FILE = str(BACKEND_DIR / "app.py")
 logger = logging.getLogger("deployer")
 MODAL_TARGET_ENV = (os.environ.get("MODAL_TARGET_ENV", "main").strip() or "main")
+ACCOUNT_DEPLOY_TIMEOUT_SECONDS = max(60, int(os.environ.get("ACCOUNT_DEPLOY_TIMEOUT_SECONDS", "300")))
+ACCOUNT_DEPLOY_MAX_RETRIES = max(1, int(os.environ.get("ACCOUNT_DEPLOY_MAX_RETRIES", "3")))
+ACCOUNT_DEPLOY_RETRY_BACKOFF_SECONDS = max(0.0, float(os.environ.get("ACCOUNT_DEPLOY_RETRY_BACKOFF_SECONDS", "10")))
+ACCOUNT_DEPLOY_RETRY_MAX_BACKOFF_SECONDS = max(
+    ACCOUNT_DEPLOY_RETRY_BACKOFF_SECONDS,
+    float(os.environ.get("ACCOUNT_DEPLOY_RETRY_MAX_BACKOFF_SECONDS", "30")),
+)
+ACCOUNT_HEALTH_ATTEMPTS = max(1, int(os.environ.get("ACCOUNT_HEALTH_ATTEMPTS", "24")))
+ACCOUNT_HEALTH_INTERVAL_SECONDS = max(1.0, float(os.environ.get("ACCOUNT_HEALTH_INTERVAL_SECONDS", "5")))
+ACCOUNT_WARMUP_REQUIRED = (os.environ.get("ACCOUNT_WARMUP_REQUIRED", "1").strip().lower() in {"1", "true", "yes", "on"})
+ACCOUNT_WARMUP_TOTAL_TIMEOUT_SECONDS = max(30.0, float(os.environ.get("ACCOUNT_WARMUP_TOTAL_TIMEOUT_SECONDS", "720")))
+ACCOUNT_WARMUP_POLL_INTERVAL_SECONDS = max(1.0, float(os.environ.get("ACCOUNT_WARMUP_POLL_INTERVAL_SECONDS", "3")))
+REQUIRED_WARMUP_MODELS = ("anisora", "phr00t", "pony", "flux")
 
 _SHARED_SECRET_BINDINGS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("gooni-api-key", ("API_KEY",)),
@@ -78,6 +91,26 @@ def _redact_sensitive_text(text: str, account: Optional[dict] = None) -> str:
 def _extract_subprocess_error(result: subprocess.CompletedProcess, account: Optional[dict]) -> str:
     raw = result.stderr or result.stdout or "Unknown deploy error"
     return _redact_sensitive_text(raw, account)[:500]
+
+
+def _deploy_backoff_seconds(attempt: int) -> float:
+    if attempt <= 0:
+        return 0.0
+    return min(
+        ACCOUNT_DEPLOY_RETRY_BACKOFF_SECONDS * (2 ** (attempt - 1)),
+        ACCOUNT_DEPLOY_RETRY_MAX_BACKOFF_SECONDS,
+    )
+
+
+def _is_health_429_quota_error(error: str) -> bool:
+    lower = (error or "").lower()
+    return (
+        "health-check status=429" in lower
+        or ("429" in lower and "health" in lower)
+        or "billing cycle spend limit reached" in lower
+        or "spend limit" in lower
+        or "quota" in lower
+    )
 
 
 def _sync_workspace_secrets(env: dict[str, str], account: dict) -> None:
@@ -153,40 +186,44 @@ def deploy_account(account_id: str) -> None:
             _commit_volume()
             return
 
-        result = subprocess.run(
-            [sys.executable, "-m", "modal", "deploy", "-e", MODAL_TARGET_ENV, APP_FILE],
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=120,  # 2 min deploy timeout (reduced from 5 min)
-        )
-
-        if result.returncode == 0:
-            # Try to extract workspace name from output
-            workspace = _extract_workspace(result.stdout)
-            if not workspace:
-                acc_store.update_account_status(
-                    account_id, "failed", error="Deploy succeeded but workspace was not detected"
-                )
-                _commit_volume()
-                return
-
-            ok, health_error = _wait_for_workspace_health(workspace, account_id=account_id)
-            if not ok:
-                failure_type, _ = acc_store._classify_error(health_error or "health check failed")
-                acc_store.mark_account_failed(
+        workspace: Optional[str] = None
+        deploy_error: Optional[str] = None
+        for attempt in range(1, ACCOUNT_DEPLOY_MAX_RETRIES + 1):
+            try:
+                logger.info(
+                    "deploy_account attempt=%s/%s account_id=%s",
+                    attempt,
+                    ACCOUNT_DEPLOY_MAX_RETRIES,
                     account_id,
-                    health_error or "health check failed",
-                    failure_type=failure_type,
                 )
-                _commit_volume()
-                return
+                result = subprocess.run(
+                    [sys.executable, "-m", "modal", "deploy", "-e", MODAL_TARGET_ENV, APP_FILE],
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=ACCOUNT_DEPLOY_TIMEOUT_SECONDS,
+                )
+            except subprocess.TimeoutExpired:
+                deploy_error = (
+                    f"Deploy timed out after {ACCOUNT_DEPLOY_TIMEOUT_SECONDS} seconds "
+                    f"(attempt {attempt}/{ACCOUNT_DEPLOY_MAX_RETRIES})"
+                )
+            else:
+                if result.returncode == 0:
+                    workspace = _extract_workspace(result.stdout)
+                    if workspace:
+                        break
+                    deploy_error = "Deploy succeeded but workspace was not detected"
+                else:
+                    deploy_error = _extract_subprocess_error(result, account)
 
-            acc_store.update_account_status(account_id, "ready", workspace=workspace, error=None)
-            _commit_volume()
-            _trigger_workspace_warmup(workspace, account_id=account_id)
-        else:
-            error = _extract_subprocess_error(result, account)
+            if attempt < ACCOUNT_DEPLOY_MAX_RETRIES:
+                backoff = _deploy_backoff_seconds(attempt)
+                if backoff > 0:
+                    time.sleep(backoff)
+
+        if not workspace:
+            error = deploy_error or "Deploy failed"
             failure_type, _ = acc_store._classify_error(error)
             acc_store.mark_account_failed(
                 account_id,
@@ -194,14 +231,45 @@ def deploy_account(account_id: str) -> None:
                 failure_type=failure_type,
             )
             _commit_volume()
+            return
 
-    except subprocess.TimeoutExpired:
-        acc_store.mark_account_failed(
-            account_id,
-            "Deploy timed out after 2 minutes",
-            failure_type="timeout",
+        ok, health_error = _wait_for_workspace_health(
+            workspace,
+            account_id=account_id,
+            attempts=ACCOUNT_HEALTH_ATTEMPTS,
+            interval_seconds=ACCOUNT_HEALTH_INTERVAL_SECONDS,
         )
+        if not ok:
+            error = health_error or "health check failed"
+            if _is_health_429_quota_error(error):
+                failure_type = "quota_exceeded"
+            else:
+                failure_type, _ = acc_store._classify_error(error)
+            acc_store.mark_account_failed(
+                account_id,
+                error,
+                failure_type=failure_type,
+            )
+            _commit_volume()
+            return
+
+        warmup_ok, warmup_error = _trigger_workspace_warmup(workspace, account_id=account_id)
+        if ACCOUNT_WARMUP_REQUIRED and not warmup_ok:
+            error = warmup_error or "Required warmup failed"
+            failure_type, _ = acc_store._classify_error(error)
+            acc_store.mark_account_failed(
+                account_id,
+                error,
+                failure_type=failure_type,
+            )
+            _commit_volume()
+            return
+        if not warmup_ok:
+            logger.warning("workspace optional warmup failed: workspace=%s error=%s", workspace, warmup_error)
+
+        acc_store.update_account_status(account_id, "ready", workspace=workspace, error=None)
         _commit_volume()
+
     except Exception as exc:
         error = _redact_sensitive_text(str(exc), account)[:500]
         failure_type, _ = acc_store._classify_error(error)
@@ -265,8 +333,8 @@ def _extract_workspace(output: str) -> Optional[str]:
 def _wait_for_workspace_health(
     workspace: str,
     account_id: Optional[str] = None,
-    attempts: int = 6,
-    interval_seconds: float = 5.0,
+    attempts: int = ACCOUNT_HEALTH_ATTEMPTS,
+    interval_seconds: float = ACCOUNT_HEALTH_INTERVAL_SECONDS,
     cache_ttl_seconds: int = 300,
 ) -> tuple[bool, Optional[str]]:
     """
@@ -306,7 +374,12 @@ def _wait_for_workspace_health(
                     if account_id:
                         acc_store.update_health_check(account_id, "ok")
                     return True, None
-            last_error = f"health-check status={response.status_code}"
+            body_hint = (response.text or "").strip()
+            if body_hint:
+                body_hint = body_hint[:180]
+                last_error = f"health-check status={response.status_code}: {body_hint}"
+            else:
+                last_error = f"health-check status={response.status_code}"
         except Exception as exc:
             last_error = f"health-check error: {exc}"
         if attempt < attempts:
@@ -319,13 +392,69 @@ def _wait_for_workspace_health(
     return False, last_error
 
 
+def _wait_for_warmup_tasks(
+    workspace: str,
+    model_task_ids: dict[str, str],
+    headers: dict[str, str],
+    total_timeout_seconds: float,
+    poll_interval_seconds: float,
+) -> tuple[bool, Optional[str]]:
+    deadline = time.monotonic() + total_timeout_seconds
+    pending = dict(model_task_ids)
+    status_url_base = f"https://{workspace}--gooni-api.modal.run/status/"
+    timeout = httpx.Timeout(connect=5.0, read=15.0, write=10.0, pool=5.0)
+    last_error = ""
+
+    with httpx.Client(timeout=timeout) as client:
+        while pending:
+            if time.monotonic() >= deadline:
+                models = ", ".join(sorted(pending.keys()))
+                extra = f"; last_error={last_error}" if last_error else ""
+                return False, f"warmup timed out after {int(total_timeout_seconds)}s; pending: {models}{extra}"
+
+            for model, task_id in list(pending.items()):
+                try:
+                    response = client.get(f"{status_url_base}{task_id}", headers=headers)
+                except Exception as exc:
+                    last_error = f"status poll error for {model}: {exc}"
+                    continue
+
+                if response.status_code != 200:
+                    body_hint = (response.text or "").strip()[:120]
+                    if body_hint:
+                        last_error = f"status poll {model}: http {response.status_code} ({body_hint})"
+                    else:
+                        last_error = f"status poll {model}: http {response.status_code}"
+                    continue
+
+                try:
+                    payload = response.json()
+                except Exception:
+                    last_error = f"status poll {model}: invalid JSON"
+                    continue
+
+                status_value = str(payload.get("status", "")).lower()
+                if status_value == "done":
+                    pending.pop(model, None)
+                    continue
+                if status_value == "failed":
+                    reason = payload.get("error_msg") or payload.get("stage_detail") or "unknown warmup failure"
+                    return False, f"warmup failed for {model}: {reason}"
+
+            if pending:
+                time.sleep(poll_interval_seconds)
+
+    return True, None
+
+
 def _trigger_workspace_warmup(workspace: str, account_id: Optional[str] = None) -> tuple[bool, Optional[str]]:
     """
-    Trigger async lane warmup on a freshly deployed workspace.
-    Warmup failure is non-fatal: account stays ready, but diagnostics are updated.
+    Trigger lane warmup and wait until all required model lanes report terminal success.
     """
     enabled = (os.environ.get("ENABLE_LANE_WARMUP", "1").strip().lower() in {"1", "true", "yes", "on"})
     if not enabled:
+        if ACCOUNT_WARMUP_REQUIRED:
+            return False, "Warmup is disabled by ENABLE_LANE_WARMUP."
         return True, None
 
     api_key = os.environ.get("API_KEY", "").strip()
@@ -344,12 +473,39 @@ def _trigger_workspace_warmup(workspace: str, account_id: Optional[str] = None) 
         try:
             with httpx.Client(timeout=timeout) as client:
                 response = client.post(url, headers=headers)
-            if response.status_code == 200:
-                logger.info("workspace warmup scheduled: %s", workspace)
-                if account_id:
-                    acc_store.update_health_check(account_id, "ok+warmed")
-                return True, None
-            last_error = f"warmup status={response.status_code}"
+            if response.status_code != 200:
+                last_error = f"warmup status={response.status_code}"
+            else:
+                payload = response.json()
+                scheduled = payload.get("scheduled") or []
+                model_task_ids: dict[str, str] = {}
+                for entry in scheduled:
+                    model = str(entry.get("model", "")).lower()
+                    task_id = str(entry.get("task_id", "")).strip()
+                    if model in REQUIRED_WARMUP_MODELS and task_id:
+                        model_task_ids[model] = task_id
+
+                missing_models = sorted(set(REQUIRED_WARMUP_MODELS) - set(model_task_ids.keys()))
+                if missing_models:
+                    errors = payload.get("errors") or []
+                    last_error = (
+                        f"warmup missing models: {', '.join(missing_models)}"
+                        + (f"; errors={errors}" if errors else "")
+                    )
+                else:
+                    ok, poll_error = _wait_for_warmup_tasks(
+                        workspace=workspace,
+                        model_task_ids=model_task_ids,
+                        headers=headers,
+                        total_timeout_seconds=ACCOUNT_WARMUP_TOTAL_TIMEOUT_SECONDS,
+                        poll_interval_seconds=ACCOUNT_WARMUP_POLL_INTERVAL_SECONDS,
+                    )
+                    if ok:
+                        logger.info("workspace warmup completed: %s", workspace)
+                        if account_id:
+                            acc_store.update_health_check(account_id, "ok+warmed")
+                        return True, None
+                    last_error = poll_error or "warmup status polling failed"
         except Exception as exc:
             last_error = f"warmup error: {exc}"
 

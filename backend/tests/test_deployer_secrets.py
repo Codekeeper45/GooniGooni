@@ -78,7 +78,12 @@ def test_deploy_account_syncs_shared_secrets_before_deploy(monkeypatch):
         return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="unexpected")
 
     monkeypatch.setattr(deployer.subprocess, "run", fake_run)
-    monkeypatch.setattr(deployer, "_wait_for_workspace_health", lambda workspace, account_id=None: (True, None))
+    monkeypatch.setattr(
+        deployer,
+        "_wait_for_workspace_health",
+        lambda workspace, account_id=None, attempts=1, interval_seconds=0.0, cache_ttl_seconds=0: (True, None),
+    )
+    monkeypatch.setattr(deployer, "_trigger_workspace_warmup", lambda workspace, account_id=None: (True, None))
 
     deployer.deploy_account(account_id)
 
@@ -97,6 +102,69 @@ def test_deploy_account_syncs_shared_secrets_before_deploy(monkeypatch):
     for cmd in secret_calls:
         assert cmd[cmd.index("-e") + 1] == "main"
     assert deploy_calls[0][deploy_calls[0].index("-e") + 1] == "main"
+
+
+def test_deploy_account_health_429_disables_account(monkeypatch):
+    _set_required_shared_env(monkeypatch)
+    account_id = accounts.add_account("QuotaHealth", "tok_id_q", "tok_secret_q")
+
+    def fake_run(cmd, **kwargs):
+        if len(cmd) >= 4 and cmd[3] == "secret":
+            return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+        if len(cmd) >= 4 and cmd[3] == "deploy":
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout="Deployed app at https://workspace-quota--gooni-api.modal.run",
+                stderr="",
+            )
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="unexpected")
+
+    monkeypatch.setattr(deployer.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        deployer,
+        "_wait_for_workspace_health",
+        lambda workspace, account_id=None, attempts=1, interval_seconds=0.0, cache_ttl_seconds=0: (
+            False,
+            "health-check status=429: workspace billing cycle spend limit reached",
+        ),
+    )
+
+    deployer.deploy_account(account_id)
+
+    row = accounts.get_account(account_id)
+    assert row is not None
+    assert row["status"] == "disabled"
+    assert row["failure_type"] == "quota_exceeded"
+
+
+def test_deploy_account_requires_warmup_before_ready(monkeypatch):
+    _set_required_shared_env(monkeypatch)
+    monkeypatch.setattr(deployer, "ACCOUNT_WARMUP_REQUIRED", True)
+    account_id = accounts.add_account("WarmupRequired", "tok_id_w", "tok_secret_w")
+
+    def fake_run(cmd, **kwargs):
+        if len(cmd) >= 4 and cmd[3] == "secret":
+            return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+        if len(cmd) >= 4 and cmd[3] == "deploy":
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout="Deployed app at https://workspace-warmup--gooni-api.modal.run",
+                stderr="",
+            )
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="unexpected")
+
+    monkeypatch.setattr(deployer.subprocess, "run", fake_run)
+    monkeypatch.setattr(deployer, "_wait_for_workspace_health", lambda workspace, account_id=None, attempts=1, interval_seconds=0.0, cache_ttl_seconds=0: (True, None))
+    monkeypatch.setattr(deployer, "_trigger_workspace_warmup", lambda workspace, account_id=None: (False, "warmup failed for anisora"))
+
+    deployer.deploy_account(account_id)
+
+    row = accounts.get_account(account_id)
+    assert row is not None
+    assert row["status"] == "failed"
+    assert row["failure_type"] in {"health_check_failed", "unknown"}
 
 
 def test_deploy_account_masks_secret_values_on_sync_failure(monkeypatch):
@@ -128,3 +196,39 @@ def test_deploy_account_masks_secret_values_on_sync_failure(monkeypatch):
     assert row["failure_type"] == "config_failed"
     assert "huggingface" in (row["last_error"] or "")
     assert hf_token not in (row["last_error"] or "")
+
+
+def test_deploy_account_retries_before_success(monkeypatch):
+    _set_required_shared_env(monkeypatch)
+    monkeypatch.setattr(deployer, "ACCOUNT_DEPLOY_MAX_RETRIES", 3)
+    monkeypatch.setattr(deployer, "ACCOUNT_DEPLOY_RETRY_BACKOFF_SECONDS", 0.0)
+    monkeypatch.setattr(deployer, "ACCOUNT_DEPLOY_RETRY_MAX_BACKOFF_SECONDS", 0.0)
+    account_id = accounts.add_account("RetryOnboarding", "tok_id_r", "tok_secret_r")
+
+    deploy_attempts = {"count": 0}
+
+    def fake_run(cmd, **kwargs):
+        if len(cmd) >= 4 and cmd[3] == "secret":
+            return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+        if len(cmd) >= 4 and cmd[3] == "deploy":
+            deploy_attempts["count"] += 1
+            if deploy_attempts["count"] == 1:
+                return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="temporary network issue")
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout="Deployed app at https://workspace-retry--gooni-api.modal.run",
+                stderr="",
+            )
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="unexpected")
+
+    monkeypatch.setattr(deployer.subprocess, "run", fake_run)
+    monkeypatch.setattr(deployer, "_wait_for_workspace_health", lambda workspace, account_id=None, attempts=1, interval_seconds=0.0, cache_ttl_seconds=0: (True, None))
+    monkeypatch.setattr(deployer, "_trigger_workspace_warmup", lambda workspace, account_id=None: (True, None))
+
+    deployer.deploy_account(account_id)
+
+    row = accounts.get_account(account_id)
+    assert row is not None
+    assert row["status"] == "ready"
+    assert deploy_attempts["count"] == 2
