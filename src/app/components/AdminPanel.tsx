@@ -40,19 +40,48 @@ const FAILURE_TYPE_CONFIG: Record<string, { label: string; color: string; bg: st
 
 const API_URL = ((import.meta as any).env.VITE_API_URL as string | undefined) ?? "";
 
+function normalizeBase(value: string): string {
+  return value.trim().replace(/\/$/, "");
+}
+
+function getAdminApiBases(): string[] {
+  const bases: string[] = ["/api"];
+  const envBase = normalizeBase(API_URL);
+  if (envBase && !bases.includes(envBase)) {
+    bases.push(envBase);
+  }
+  return bases;
+}
+
 async function adminFetch<T>(
   path: string,
   options: RequestInit = {}
 ): Promise<T> {
   const ADMIN_KEY = localStorage.getItem("mg_admin_key") ?? "";
-  const res = await fetch(`${API_URL}${path}`, {
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      "x-admin-key": ADMIN_KEY,
-      ...((options.headers as Record<string, string>) ?? {}),
-    },
-  });
+  let res: Response | null = null;
+  let lastError: unknown = null;
+  for (const base of getAdminApiBases()) {
+    try {
+      res = await fetch(`${base}${path}`, {
+        ...options,
+        headers: {
+          "Content-Type": "application/json",
+          "x-admin-key": ADMIN_KEY,
+          ...((options.headers as Record<string, string>) ?? {}),
+        },
+      });
+      if (base === "/api" && (res.status === 404 || res.status === 502 || res.status === 503)) {
+        continue;
+      }
+      break;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  if (!res) {
+    if (lastError instanceof Error) throw lastError;
+    throw new Error("Network error");
+  }
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
     throw new Error(err.detail ?? res.statusText);
@@ -97,7 +126,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onClose }) => {
 
   // ── Fetch accounts ──────────────────────────────────────────────────────────
   const fetchAccounts = useCallback(async () => {
-    if (!API_URL) { setError("VITE_API_URL not configured"); return; }
     try {
       const data = await adminFetch<{ accounts: Account[] }>("/admin/accounts");
       setAccounts(data.accounts);

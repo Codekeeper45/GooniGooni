@@ -275,8 +275,7 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
 
         if (data.status === "done") {
           stopPolling();
-          const API_URL = ((import.meta as any).env.VITE_API_URL as string | undefined)?.replace(/\/$/, "") ?? "";
-          const resultUrl = data.result_url ?? `${API_URL}/results/${tid}`;
+          const resultUrl = data.result_url ?? `/api/results/${tid}`;
           const previewUrl = data.preview_url;
 
           const res = {
