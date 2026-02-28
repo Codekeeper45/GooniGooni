@@ -22,7 +22,7 @@ import accounts as acc_store
 
 
 # Maximum number of fallback attempts if an account fails mid-inference
-MAX_FALLBACKS = 3
+MAX_FALLBACKS = int(os.environ.get("ACCOUNT_MAX_FALLBACKS", "6"))
 FAILED_ACCOUNT_COOLDOWN_SECONDS = int(os.environ.get("ACCOUNT_FAILED_COOLDOWN_SECONDS", "300"))
 MAX_ACCOUNT_FAIL_COUNT = int(os.environ.get("ACCOUNT_MAX_FAIL_COUNT", "6"))
 

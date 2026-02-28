@@ -7,9 +7,17 @@ calls. It only routes generation through explicitly configured ready accounts.
 """
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 from datetime import datetime
 from typing import Any, Optional
+
+logger = logging.getLogger("admin_local")
+
+# Rough A10G cost estimates for spending guard
+_VIDEO_COST_USD = float(os.environ.get("VIDEO_COST_USD_ESTIMATE", "0.05"))   # ~2.7min A10G
+_IMAGE_COST_USD = float(os.environ.get("IMAGE_COST_USD_ESTIMATE", "0.015"))  # ~0.8min A10G
 
 import httpx
 from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request, Response, status
@@ -236,12 +244,28 @@ def _delete_session_cookie(response: Response, key: str) -> None:
     )
 
 
+async def _recovery_loop() -> None:
+    """Periodically recover failed accounts regardless of traffic."""
+    from router import FAILED_ACCOUNT_COOLDOWN_SECONDS
+    while True:
+        try:
+            await asyncio.sleep(60)
+            recovered = acc_store.recover_failed_accounts(
+                cooldown_seconds=FAILED_ACCOUNT_COOLDOWN_SECONDS
+            )
+            if recovered:
+                logger.info("background_recovery recovered=%s", recovered)
+        except Exception:
+            logger.exception("background_recovery_error")
+
+
 @api.on_event("startup")
-def _startup() -> None:
+async def _startup() -> None:
     os.makedirs("/results", exist_ok=True)
     storage.init_db()
     acc_store.init_accounts_table()
     _ensure_audit_table()
+    asyncio.create_task(_recovery_loop())
 
 
 @api.get("/health")
@@ -349,6 +373,12 @@ async def generate(req: GenerateRequest, _: str = Depends(verify_generation_sess
                 raise RuntimeError("remote response missing task_id")
 
             account_router.mark_success(account_id)
+            try:
+                gen_type = req_payload.get("type", "")
+                cost = _VIDEO_COST_USD if gen_type == "video" else _IMAGE_COST_USD
+                acc_store.add_usage(account_id, cost)
+            except Exception:
+                logger.exception("add_usage_error account_id=%s", account_id)
             return GenerateResponse(task_id=f"{workspace}::{remote_task_id}", status=TaskStatus.pending)
 
         except HTTPException:
@@ -692,6 +722,21 @@ async def admin_enable_account(
         )
     acc_store.enable_account(account_id)
     return {"id": account_id, "status": "ready", "message": "Account enabled and returned to rotation."}
+
+
+@api.post("/admin/accounts/{account_id}/reset-usage")
+async def admin_reset_usage(
+    account_id: str,
+    _ip: str = Depends(get_admin_auth("reset_usage_local")),
+):
+    acc_store.reset_monthly_usage(account_id)
+    return {"ok": True}
+
+
+@api.post("/admin/reset-all-usage")
+async def admin_reset_all_usage(_ip: str = Depends(get_admin_auth("reset_all_usage_local"))):
+    acc_store.reset_monthly_usage()
+    return {"ok": True}
 
 
 @api.post("/admin/accounts/{account_id}/deploy")

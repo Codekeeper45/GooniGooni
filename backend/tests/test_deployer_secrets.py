@@ -238,6 +238,92 @@ def test_deploy_account_retries_before_success(monkeypatch):
     assert deploy_attempts["count"] == 2
 
 
+def test_deploy_fails_on_build_id_mismatch(monkeypatch):
+    """Build ID mismatch should cause health check to fail and mark account failed."""
+    _set_required_shared_env(monkeypatch)
+    monkeypatch.setattr(deployer, "EXPECTED_BUILD_ID", "2026-02-28-v1")
+    # Speed up: 1 attempt, no sleep
+    monkeypatch.setattr(deployer, "ACCOUNT_HEALTH_ATTEMPTS", 1)
+    monkeypatch.setattr(deployer, "ACCOUNT_HEALTH_INTERVAL_SECONDS", 0.0)
+    account_id = accounts.add_account("BuildMismatch", "tok_id_bm", "tok_secret_bm")
+
+    def fake_run(cmd, **kwargs):
+        if len(cmd) >= 4 and cmd[3] == "secret":
+            return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+        if len(cmd) >= 4 and cmd[3] == "deploy":
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout="Deployed app at https://ws-bm--gooni-api.modal.run",
+                stderr="",
+            )
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="unexpected")
+
+    monkeypatch.setattr(deployer.subprocess, "run", fake_run)
+    monkeypatch.setattr(deployer, "_trigger_workspace_warmup", lambda workspace, account_id=None: (True, None))
+
+    import httpx as _httpx
+
+    class _FakeClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+        def get(self, url, **kwargs):
+            class _Resp:
+                status_code = 200
+                text = ""
+
+                def json(self):
+                    return {"ok": True, "build_id": "old-build"}
+
+            return _Resp()
+
+    monkeypatch.setattr(_httpx, "Client", lambda **kw: _FakeClient())
+
+    deployer.deploy_account(account_id)
+
+    row = accounts.get_account(account_id)
+    assert row is not None
+    assert row["status"] in {"failed", "disabled"}
+    assert "mismatch" in (row["last_error"] or "").lower() or "build" in (row["last_error"] or "").lower()
+
+
+def test_deploy_skips_build_id_check_when_empty(monkeypatch):
+    """Empty WORKER_BUILD_ID means the build_id check is disabled."""
+    _set_required_shared_env(monkeypatch)
+    monkeypatch.setattr(deployer, "EXPECTED_BUILD_ID", "")
+    account_id = accounts.add_account("NoBuildCheck", "tok_id_nb", "tok_secret_nb")
+
+    def fake_run(cmd, **kwargs):
+        if len(cmd) >= 4 and cmd[3] == "secret":
+            return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+        if len(cmd) >= 4 and cmd[3] == "deploy":
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout="Deployed app at https://ws-nb--gooni-api.modal.run",
+                stderr="",
+            )
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="unexpected")
+
+    monkeypatch.setattr(deployer.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        deployer,
+        "_wait_for_workspace_health",
+        lambda workspace, account_id=None, attempts=1, interval_seconds=0.0, cache_ttl_seconds=0: (True, None),
+    )
+    monkeypatch.setattr(deployer, "_trigger_workspace_warmup", lambda workspace, account_id=None: (True, None))
+
+    deployer.deploy_account(account_id)
+
+    row = accounts.get_account(account_id)
+    assert row is not None
+    assert row["status"] == "ready"
+
+
 def test_deploy_account_writes_onboarding_audit_steps(monkeypatch):
     _set_required_shared_env(monkeypatch)
     account_id = accounts.add_account("AuditTrail", "tok_id_a", "tok_secret_a")

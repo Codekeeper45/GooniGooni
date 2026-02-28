@@ -151,6 +151,8 @@ def init_accounts_table() -> None:
             "ALTER TABLE modal_accounts ADD COLUMN failure_type TEXT",
             "ALTER TABLE modal_accounts ADD COLUMN last_health_check TEXT",
             "ALTER TABLE modal_accounts ADD COLUMN health_check_result TEXT",
+            "ALTER TABLE modal_accounts ADD COLUMN monthly_limit_usd REAL NOT NULL DEFAULT 50.0",
+            "ALTER TABLE modal_accounts ADD COLUMN used_usd REAL NOT NULL DEFAULT 0.0",
         ):
             try:
                 conn.execute(ddl)
@@ -219,6 +221,24 @@ def list_ready_accounts() -> list[dict]:
     return [_to_public(r) for r in rows]
 
 
+def add_usage(account_id: str, usd: float) -> None:
+    """Record generation cost for an account."""
+    with _lock, _db() as conn:
+        conn.execute(
+            "UPDATE modal_accounts SET used_usd = used_usd + ? WHERE id=?",
+            (round(usd, 4), account_id),
+        )
+
+
+def reset_monthly_usage(account_id: Optional[str] = None) -> None:
+    """Reset monthly usage counter. Pass None to reset all accounts."""
+    with _lock, _db() as conn:
+        if account_id:
+            conn.execute("UPDATE modal_accounts SET used_usd=0 WHERE id=?", (account_id,))
+        else:
+            conn.execute("UPDATE modal_accounts SET used_usd=0")
+
+
 def pick_and_mark_ready_account(exclude_ids: Optional[list[str]] = None) -> Optional[dict]:
     """
     Atomically pick one ready account and immediately mark it as used.
@@ -227,9 +247,12 @@ def pick_and_mark_ready_account(exclude_ids: Optional[list[str]] = None) -> Opti
       1) Oldest last_used first (NULL means never used and is treated as oldest)
       2) On tie, lower use_count first
       3) On tie, older added_at first for deterministic ordering
+
+    Spending guard: accounts at 90% of monthly_limit_usd are excluded.
+    Set monthly_limit_usd = 0 to disable the limit for a specific account.
     """
     exclude_ids = exclude_ids or []
-    where = "status='ready'"
+    where = "status='ready' AND (monthly_limit_usd <= 0 OR used_usd < monthly_limit_usd * 0.9)"
     params: list[str] = []
     if exclude_ids:
         placeholders = ",".join("?" for _ in exclude_ids)

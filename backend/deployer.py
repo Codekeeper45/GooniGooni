@@ -24,6 +24,7 @@ from typing import Optional
 import accounts as acc_store
 import httpx
 from admin_security import _ensure_audit_table, _log_action
+from config import WORKER_BUILD_ID as EXPECTED_BUILD_ID
 
 # Path to the main Modal app file (relative to repo root)
 BACKEND_DIR = Path(__file__).parent
@@ -529,6 +530,13 @@ def _wait_for_workspace_health(
             if response.status_code == 200:
                 payload = response.json()
                 if payload.get("ok") is True:
+                    if EXPECTED_BUILD_ID:
+                        actual_build_id = payload.get("build_id", "")
+                        if actual_build_id != EXPECTED_BUILD_ID:
+                            raise RuntimeError(
+                                f"Build ID mismatch: worker={actual_build_id!r}, "
+                                f"expected={EXPECTED_BUILD_ID!r}. Redeploy the account."
+                            )
                     logger.info("workspace health check passed: %s", workspace)
                     if account_id:
                         acc_store.update_health_check(account_id, "ok")

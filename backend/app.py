@@ -837,7 +837,7 @@ def health():
         _sys.path.insert(0, "/root")
 
     from fastapi.responses import JSONResponse
-    return JSONResponse({"ok": True})
+    return JSONResponse({"ok": True, "build_id": os.environ.get("WORKER_BUILD_ID", "")})
 
 
 @app.function(

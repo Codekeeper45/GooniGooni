@@ -272,3 +272,79 @@ def test_recover_failed_accounts_skips_config_failures():
     assert recovered == 0
     row = accounts.get_account(account_id)
     assert row["status"] == "failed"
+
+
+def test_add_usage_increments_correctly():
+    account_id = accounts.add_account("UsageTest", "tok_id", "tok_secret")
+    accounts.update_account_status(account_id, "checking")
+    accounts.update_account_status(account_id, "ready")
+
+    accounts.add_usage(account_id, 0.05)
+    accounts.add_usage(account_id, 0.015)
+
+    row = accounts.get_account(account_id)
+    assert abs(row["used_usd"] - 0.065) < 1e-6
+
+
+def test_reset_monthly_usage():
+    a = accounts.add_account("A", "tok_a", "sec_a")
+    b = accounts.add_account("B", "tok_b", "sec_b")
+    for aid in (a, b):
+        accounts.update_account_status(aid, "checking")
+        accounts.update_account_status(aid, "ready")
+
+    accounts.add_usage(a, 0.1)
+    accounts.add_usage(b, 0.2)
+
+    accounts.reset_monthly_usage(a)
+    assert accounts.get_account(a)["used_usd"] == 0.0
+    assert abs(accounts.get_account(b)["used_usd"] - 0.2) < 1e-6
+
+    accounts.reset_monthly_usage()
+    assert accounts.get_account(b)["used_usd"] == 0.0
+
+
+def test_spending_guard_excludes_over_limit_accounts():
+    ok_id = accounts.add_account("UnderLimit", "tok_id", "tok_secret")
+    over_id = accounts.add_account("OverLimit", "tok_id2", "tok_secret2")
+
+    for aid in (ok_id, over_id):
+        accounts.update_account_status(aid, "checking")
+        accounts.update_account_status(aid, "ready")
+
+    # Set over_id to 95% of its monthly_limit_usd (50 USD default) → 47.5
+    with accounts._db() as conn:
+        conn.execute(
+            "UPDATE modal_accounts SET used_usd=47.5, monthly_limit_usd=50.0 WHERE id=?",
+            (over_id,),
+        )
+        # Ensure ok_id is not excluded
+        conn.execute(
+            "UPDATE modal_accounts SET used_usd=0.0, monthly_limit_usd=50.0 WHERE id=?",
+            (ok_id,),
+        )
+
+    picked = accounts.pick_and_mark_ready_account()
+    assert picked is not None
+    assert picked["id"] == ok_id, "spending guard should skip over-limit account"
+
+    # With ok_id excluded, over-limit account should also be skipped → None
+    picked2 = accounts.pick_and_mark_ready_account(exclude_ids=[ok_id])
+    assert picked2 is None, "over-limit account must be excluded by spending guard"
+
+
+def test_spending_guard_disabled_when_limit_zero():
+    account_id = accounts.add_account("NoLimit", "tok_id", "tok_secret")
+    accounts.update_account_status(account_id, "checking")
+    accounts.update_account_status(account_id, "ready")
+
+    # monthly_limit_usd = 0 disables the guard
+    with accounts._db() as conn:
+        conn.execute(
+            "UPDATE modal_accounts SET used_usd=9999.0, monthly_limit_usd=0 WHERE id=?",
+            (account_id,),
+        )
+
+    picked = accounts.pick_and_mark_ready_account()
+    assert picked is not None
+    assert picked["id"] == account_id

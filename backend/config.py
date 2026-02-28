@@ -7,6 +7,10 @@ import os
 # ─── App identity ──────────────────────────────────────────────────────────────
 APP_NAME = "gooni-gooni-backend"
 
+# Worker build identifier — bump manually after each modal deploy with breaking changes.
+# Empty string disables the check (safe default).
+WORKER_BUILD_ID: str = os.environ.get("WORKER_BUILD_ID", "")
+
 # ─── Volume names ──────────────────────────────────────────────────────────────
 MODEL_CACHE_VOLUME = os.environ.get("CACHE_VOLUME", "model-cache")
 RESULTS_VOLUME_NAME = os.environ.get("RESULTS_VOLUME", "results")
