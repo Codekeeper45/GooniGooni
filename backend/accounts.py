@@ -5,6 +5,7 @@ Credentials are encrypted at rest using Fernet key from ACCOUNTS_ENCRYPT_KEY.
 """
 from __future__ import annotations
 
+import json
 import os
 import logging
 import sqlite3
@@ -159,6 +160,62 @@ def init_accounts_table() -> None:
             except sqlite3.OperationalError:
                 # Column already exists on upgraded databases.
                 pass
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS account_warmup_runs (
+                run_id       TEXT PRIMARY KEY,
+                triggered_by TEXT NOT NULL,
+                mode         TEXT NOT NULL,
+                status       TEXT NOT NULL,
+                created_at   TEXT NOT NULL,
+                finished_at  TEXT,
+                summary_json TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS account_warmup_items (
+                id          TEXT PRIMARY KEY,
+                run_id      TEXT NOT NULL,
+                account_id  TEXT NOT NULL,
+                model       TEXT NOT NULL,
+                task_id     TEXT,
+                result      TEXT NOT NULL,
+                reason      TEXT,
+                error       TEXT,
+                started_at  TEXT NOT NULL,
+                finished_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS account_warmup_state (
+                account_id       TEXT NOT NULL,
+                model            TEXT NOT NULL,
+                last_success_at  TEXT,
+                cooldown_until   TEXT,
+                expires_at       TEXT,
+                last_run_id      TEXT,
+                last_error       TEXT,
+                PRIMARY KEY (account_id, model)
+            )
+            """
+        )
+
+
+def _parse_iso_dt(raw: Optional[str]) -> Optional[datetime]:
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return None
 
 
 def add_account(
@@ -513,3 +570,176 @@ def update_health_check(
             """,
             (now, result, account_id),
         )
+
+
+def create_warmup_run(
+    *,
+    triggered_by: str,
+    mode: str,
+    account_ids: list[str],
+    models: list[str],
+) -> str:
+    run_id = str(uuid.uuid4())
+    summary = {
+        "account_ids": list(account_ids),
+        "models": list(models),
+    }
+    with _lock, _db() as conn:
+        conn.execute(
+            """
+            INSERT INTO account_warmup_runs
+              (run_id, triggered_by, mode, status, created_at, summary_json)
+            VALUES (?, ?, ?, 'running', ?, ?)
+            """,
+            (run_id, triggered_by, mode, _now_iso(), json.dumps(summary, ensure_ascii=False)),
+        )
+    return run_id
+
+
+def finalize_warmup_run(
+    run_id: str,
+    *,
+    status: str,
+    summary: Optional[dict] = None,
+) -> None:
+    with _lock, _db() as conn:
+        conn.execute(
+            """
+            UPDATE account_warmup_runs
+            SET status=?, finished_at=?, summary_json=?
+            WHERE run_id=?
+            """,
+            (
+                status,
+                _now_iso(),
+                json.dumps(summary or {}, ensure_ascii=False),
+                run_id,
+            ),
+        )
+
+
+def get_warmup_run(run_id: str) -> Optional[dict]:
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT * FROM account_warmup_runs WHERE run_id=?",
+            (run_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    data = dict(row)
+    raw_summary = data.get("summary_json")
+    if raw_summary:
+        try:
+            data["summary"] = json.loads(raw_summary)
+        except Exception:
+            data["summary"] = {}
+    else:
+        data["summary"] = {}
+    return data
+
+
+def list_warmup_items(run_id: str) -> list[dict]:
+    with _db() as conn:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM account_warmup_items
+            WHERE run_id=?
+            ORDER BY started_at ASC
+            """,
+            (run_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def record_warmup_item(
+    *,
+    run_id: str,
+    account_id: str,
+    model: str,
+    result: str,
+    task_id: Optional[str] = None,
+    reason: Optional[str] = None,
+    error: Optional[str] = None,
+) -> str:
+    item_id = str(uuid.uuid4())
+    ts = _now_iso()
+    with _lock, _db() as conn:
+        conn.execute(
+            """
+            INSERT INTO account_warmup_items
+              (id, run_id, account_id, model, task_id, result, reason, error, started_at, finished_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (item_id, run_id, account_id, model, task_id, result, reason, error, ts, ts),
+        )
+    return item_id
+
+
+def get_warmup_state(account_id: str, model: str) -> Optional[dict]:
+    with _db() as conn:
+        row = conn.execute(
+            """
+            SELECT *
+            FROM account_warmup_state
+            WHERE account_id=? AND model=?
+            """,
+            (account_id, model),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def upsert_warmup_state(
+    *,
+    account_id: str,
+    model: str,
+    last_success_at: Optional[str] = None,
+    cooldown_until: Optional[str] = None,
+    expires_at: Optional[str] = None,
+    last_run_id: Optional[str] = None,
+    last_error: Optional[str] = None,
+) -> None:
+    with _lock, _db() as conn:
+        conn.execute(
+            """
+            INSERT INTO account_warmup_state
+              (account_id, model, last_success_at, cooldown_until, expires_at, last_run_id, last_error)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(account_id, model)
+            DO UPDATE SET
+              last_success_at=excluded.last_success_at,
+              cooldown_until=excluded.cooldown_until,
+              expires_at=excluded.expires_at,
+              last_run_id=excluded.last_run_id,
+              last_error=excluded.last_error
+            """,
+            (
+                account_id,
+                model,
+                last_success_at,
+                cooldown_until,
+                expires_at,
+                last_run_id,
+                last_error,
+            ),
+        )
+
+
+def is_warmup_cooldown_active(account_id: str, model: str) -> bool:
+    row = get_warmup_state(account_id, model)
+    if not row:
+        return False
+    cooldown_until = _parse_iso_dt(row.get("cooldown_until"))
+    if cooldown_until is None:
+        return False
+    return datetime.now(timezone.utc) < cooldown_until
+
+
+def is_warmup_fresh(account_id: str, model: str) -> bool:
+    row = get_warmup_state(account_id, model)
+    if not row:
+        return False
+    expires_at = _parse_iso_dt(row.get("expires_at"))
+    if expires_at is None:
+        return False
+    return datetime.now(timezone.utc) < expires_at

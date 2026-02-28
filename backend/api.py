@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -47,7 +47,12 @@ from config import (
     ARTIFACT_TTL_DAYS,
 )
 from router import router as account_router, NoReadyAccountError, MAX_FALLBACKS
-from deployer import deploy_account_async, deploy_all_accounts, get_missing_shared_env_keys
+from deployer import (
+    deploy_account_async,
+    deploy_all_accounts,
+    get_missing_shared_env_keys,
+    trigger_workspace_warmup_detailed,
+)
 from schemas import (
     AdminLoginRequest,
     AdminSessionStateResponse,
@@ -66,6 +71,14 @@ from schemas import (
 
 # ─── These are set by create_app() from Modal volume ref ──────────────────────
 _results_vol = None  # injected at startup
+_VALID_WARMUP_MODELS = ("anisora", "phr00t", "pony", "flux")
+_DEFAULT_ADMIN_WARMUP_MODELS = tuple(
+    m.strip().lower()
+    for m in os.environ.get("WARMUP_DEFAULT_MODELS", "pony,flux").split(",")
+    if m.strip().lower() in _VALID_WARMUP_MODELS
+) or ("pony", "flux")
+WARMUP_TTL_SECONDS = max(300, int(os.environ.get("WARMUP_TTL_SECONDS", "21600")))
+WARMUP_COOLDOWN_SECONDS = max(0, int(os.environ.get("WARMUP_COOLDOWN_SECONDS", "3600")))
 
 
 def _set_results_vol(vol):
@@ -128,6 +141,84 @@ def _as_api_error(status_code: int, detail: object) -> dict:
         detail="Request failed.",
         user_action=_USER_ACTION_BY_STATUS.get(status_code, "Retry later."),
     )
+
+
+def _parse_warmup_mode(raw_mode: Any) -> str:
+    mode = str(raw_mode or "best_effort").strip().lower()
+    if mode not in {"required", "best_effort"}:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=_error_payload(
+                "validation_error",
+                "Warmup mode must be 'required' or 'best_effort'.",
+                "Fix warmup mode and retry.",
+            ),
+        )
+    return mode
+
+
+def _parse_warmup_models(raw_models: Any) -> list[str]:
+    if raw_models is None:
+        return list(_DEFAULT_ADMIN_WARMUP_MODELS)
+    if not isinstance(raw_models, list):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=_error_payload(
+                "validation_error",
+                "Warmup models must be an array of model ids.",
+                "Provide at least one valid model id.",
+            ),
+        )
+    parsed = []
+    for item in raw_models:
+        model = str(item).strip().lower()
+        if model not in _VALID_WARMUP_MODELS:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=_error_payload(
+                    "validation_error",
+                    f"Unsupported warmup model: {item}",
+                    "Use one of: anisora, phr00t, pony, flux.",
+                ),
+            )
+        if model not in parsed:
+            parsed.append(model)
+    if not parsed:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=_error_payload(
+                "validation_error",
+                "Warmup models list cannot be empty.",
+                "Provide at least one valid model id.",
+            ),
+        )
+    return parsed
+
+
+def _parse_positive_int(raw_value: Any, default_value: int, field_name: str) -> int:
+    if raw_value is None:
+        return default_value
+    try:
+        value = int(raw_value)
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=_error_payload(
+                "validation_error",
+                f"{field_name} must be an integer.",
+                "Provide a valid integer and retry.",
+            ),
+        )
+    if value < 0:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=_error_payload(
+                "validation_error",
+                f"{field_name} cannot be negative.",
+                "Provide a value >= 0 and retry.",
+            ),
+        )
+    return value
 
 
 # ─── Request helpers ──────────────────────────────────────────────────────────
@@ -472,14 +563,18 @@ def create_app(results_vol=None) -> FastAPI:
         return await _spawn_local_generation(req)
 
     @api.post("/warmup", tags=["Generation"])
-    async def warmup_lanes(_: str = Depends(verify_api_key)):
+    async def warmup_lanes(
+        payload: dict[str, Any] = Body(default={}),
+        _: str = Depends(verify_api_key),
+    ):
         _vol_reload()
         enabled = (os.environ.get("ENABLE_LANE_WARMUP", "1").strip().lower() in {"1", "true", "yes", "on"})
         if not enabled:
             return {"ok": True, "enabled": False, "scheduled": []}
 
-        models_csv = os.environ.get("WARMUP_MODELS", "anisora,phr00t,pony,flux")
-        wanted = {m.strip().lower() for m in models_csv.split(",") if m.strip()}
+        mode = _parse_warmup_mode(payload.get("mode", "best_effort"))
+        requested_models = _parse_warmup_models(payload.get("models"))
+        wanted = set(requested_models)
         specs = [
             {
                 "model": "anisora",
@@ -535,6 +630,15 @@ def create_app(results_vol=None) -> FastAPI:
             except Exception as exc:
                 errors.append({"model": spec["model"], "error": str(exc)})
 
+        if mode == "required" and errors:
+            raise HTTPException(
+                status_code=503,
+                detail=_error_payload(
+                    "warmup_failed",
+                    "Required warmup failed for one or more models.",
+                    "Check worker availability and retry warmup.",
+                ),
+            )
         if errors and not scheduled:
             raise HTTPException(
                 status_code=503,
@@ -544,7 +648,14 @@ def create_app(results_vol=None) -> FastAPI:
                     "Check worker availability and retry warmup.",
                 ),
             )
-        return {"ok": True, "enabled": True, "scheduled": scheduled, "errors": errors}
+        return {
+            "ok": True,
+            "enabled": True,
+            "mode": mode,
+            "requested_models": requested_models,
+            "scheduled": scheduled,
+            "errors": errors,
+        }
 
     @api.post("/generate", response_model=GenerateResponse, tags=["Generation"])
     async def generate(req: GenerateRequest, session_or_api_key: str = Depends(verify_generation_session)):
@@ -958,6 +1069,154 @@ def create_app(results_vol=None) -> FastAPI:
         _delete_session_cookie(response, ADMIN_SESSION_COOKIE)
         return None
 
+    def _find_account_public(account_id: str) -> Optional[dict]:
+        for row in acc_store.list_accounts():
+            if row.get("id") == account_id:
+                return row
+        return None
+
+    def _warmup_window(ts_now: datetime, ttl_seconds: int, cooldown_seconds: int) -> tuple[str, str, str]:
+        last_success_at = ts_now.isoformat()
+        expires_at = (ts_now + timedelta(seconds=max(0, ttl_seconds))).isoformat()
+        cooldown_until = (ts_now + timedelta(seconds=max(0, cooldown_seconds))).isoformat()
+        return last_success_at, expires_at, cooldown_until
+
+    async def _execute_account_warmup(
+        *,
+        account: dict,
+        run_id: str,
+        models: list[str],
+        mode: str,
+        force: bool,
+        ttl_seconds: int,
+        cooldown_seconds: int,
+    ) -> dict:
+        account_id = str(account["id"])
+        workspace = str(account.get("workspace") or "").strip()
+        result_payload: dict[str, Any] = {
+            "account_id": account_id,
+            "workspace": workspace,
+            "scheduled": [],
+            "failed": [],
+            "skipped": [],
+            "mode": mode,
+        }
+
+        if account.get("status") != "ready":
+            for model in models:
+                acc_store.record_warmup_item(
+                    run_id=run_id,
+                    account_id=account_id,
+                    model=model,
+                    result="skipped",
+                    reason=f"status={account.get('status')}",
+                )
+                result_payload["skipped"].append({"model": model, "reason": f"status={account.get('status')}"})
+            return result_payload
+
+        warm_models: list[str] = []
+        for model in models:
+            if (not force) and acc_store.is_warmup_cooldown_active(account_id, model):
+                acc_store.record_warmup_item(
+                    run_id=run_id,
+                    account_id=account_id,
+                    model=model,
+                    result="skipped",
+                    reason="cooldown_active",
+                )
+                result_payload["skipped"].append({"model": model, "reason": "cooldown_active"})
+                continue
+            warm_models.append(model)
+
+        if not warm_models:
+            return result_payload
+
+        if not workspace:
+            for model in warm_models:
+                acc_store.record_warmup_item(
+                    run_id=run_id,
+                    account_id=account_id,
+                    model=model,
+                    result="failed",
+                    error="workspace_not_configured",
+                )
+                state = acc_store.get_warmup_state(account_id, model) or {}
+                acc_store.upsert_warmup_state(
+                    account_id=account_id,
+                    model=model,
+                    last_success_at=state.get("last_success_at"),
+                    expires_at=state.get("expires_at"),
+                    cooldown_until=state.get("cooldown_until"),
+                    last_run_id=run_id,
+                    last_error="workspace_not_configured",
+                )
+                result_payload["failed"].append({"model": model, "error": "workspace_not_configured"})
+            return result_payload
+
+        details = trigger_workspace_warmup_detailed(
+            workspace=workspace,
+            account_id=account_id,
+            models=warm_models,
+            mode=mode,
+        )
+        scheduled_map = details.get("scheduled", {}) or {}
+        error_rows = details.get("errors", []) or []
+        error_by_model: dict[str, str] = {}
+        for row in error_rows:
+            model = str(row.get("model", "")).strip().lower()
+            if model:
+                error_by_model[model] = str(row.get("error", "warmup_failed"))
+
+        ts_now = datetime.now(timezone.utc)
+        last_success_at, expires_at, cooldown_until = _warmup_window(
+            ts_now,
+            ttl_seconds=ttl_seconds,
+            cooldown_seconds=cooldown_seconds,
+        )
+
+        for model in warm_models:
+            if model in scheduled_map:
+                task_id = str(scheduled_map[model])
+                acc_store.record_warmup_item(
+                    run_id=run_id,
+                    account_id=account_id,
+                    model=model,
+                    task_id=task_id,
+                    result="done",
+                )
+                acc_store.upsert_warmup_state(
+                    account_id=account_id,
+                    model=model,
+                    last_success_at=last_success_at,
+                    expires_at=expires_at,
+                    cooldown_until=cooldown_until,
+                    last_run_id=run_id,
+                    last_error=None,
+                )
+                result_payload["scheduled"].append({"model": model, "task_id": task_id})
+            else:
+                error_msg = error_by_model.get(model) or str(details.get("error") or "warmup_not_scheduled")
+                acc_store.record_warmup_item(
+                    run_id=run_id,
+                    account_id=account_id,
+                    model=model,
+                    result="failed",
+                    error=error_msg,
+                )
+                state = acc_store.get_warmup_state(account_id, model) or {}
+                acc_store.upsert_warmup_state(
+                    account_id=account_id,
+                    model=model,
+                    last_success_at=state.get("last_success_at"),
+                    expires_at=state.get("expires_at"),
+                    cooldown_until=state.get("cooldown_until"),
+                    last_run_id=run_id,
+                    last_error=error_msg,
+                )
+                result_payload["failed"].append({"model": model, "error": error_msg})
+
+        return result_payload
+
     @api.get("/admin/health", tags=["Admin"])
     async def admin_health(_ip: str = Depends(get_admin_auth("health"))):
         _vol_reload()
@@ -1025,6 +1284,128 @@ def create_app(results_vol=None) -> FastAPI:
     async def admin_deploy_all(_ip: str = Depends(get_admin_auth("deploy_all"))):
         threads = deploy_all_accounts()
         return {"deploying": len(threads), "message": f"Deploying {len(threads)} account(s)..."}
+
+    @api.post("/admin/accounts/{account_id}/warmup", tags=["Admin"])
+    async def admin_warmup_account(
+        account_id: str,
+        payload: dict[str, Any] = Body(default={}),
+        _ip: str = Depends(get_admin_auth("warmup_account")),
+    ):
+        _vol_reload()
+        account = _find_account_public(account_id)
+        if account is None:
+            raise HTTPException(status_code=404, detail=_error_payload("not_found", "Account not found.", "Verify account id and retry."))
+        models = _parse_warmup_models(payload.get("models"))
+        mode = _parse_warmup_mode(payload.get("mode", "best_effort"))
+        force = bool(payload.get("force", False))
+        ttl_seconds = _parse_positive_int(payload.get("ttl_seconds"), WARMUP_TTL_SECONDS, "ttl_seconds")
+        cooldown_seconds = _parse_positive_int(payload.get("cooldown_seconds"), WARMUP_COOLDOWN_SECONDS, "cooldown_seconds")
+
+        run_id = acc_store.create_warmup_run(
+            triggered_by="admin",
+            mode=mode,
+            account_ids=[account_id],
+            models=models,
+        )
+        account_result = await _execute_account_warmup(
+            account=account,
+            run_id=run_id,
+            models=models,
+            mode=mode,
+            force=force,
+            ttl_seconds=ttl_seconds,
+            cooldown_seconds=cooldown_seconds,
+        )
+        failed_items = len(account_result["failed"])
+        status_value = "failed" if (mode == "required" and failed_items > 0) else "completed"
+        summary = {
+            "mode": mode,
+            "models": models,
+            "accounts_total": 1,
+            "accounts_completed": 1,
+            "failed_items": failed_items,
+            "force": force,
+            "ttl_seconds": ttl_seconds,
+            "cooldown_seconds": cooldown_seconds,
+            "results": [account_result],
+        }
+        acc_store.finalize_warmup_run(run_id, status=status_value, summary=summary)
+        _vol_commit()
+        return {"run_id": run_id, "status": status_value, **summary}
+
+    @api.post("/admin/warmup", tags=["Admin"])
+    async def admin_warmup_batch(
+        payload: dict[str, Any] = Body(default={}),
+        _ip: str = Depends(get_admin_auth("warmup_batch")),
+    ):
+        _vol_reload()
+        all_accounts = acc_store.list_accounts()
+        filter_ids = payload.get("account_ids")
+        if filter_ids is not None and not isinstance(filter_ids, list):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=_error_payload("validation_error", "account_ids must be an array.", "Provide a valid account_ids array."),
+            )
+        filter_set = {str(v) for v in (filter_ids or [])}
+        target_accounts = [
+            row for row in all_accounts
+            if (not filter_set or row.get("id") in filter_set)
+        ]
+        models = _parse_warmup_models(payload.get("models"))
+        mode = _parse_warmup_mode(payload.get("mode", "best_effort"))
+        force = bool(payload.get("force", False))
+        ttl_seconds = _parse_positive_int(payload.get("ttl_seconds"), WARMUP_TTL_SECONDS, "ttl_seconds")
+        cooldown_seconds = _parse_positive_int(payload.get("cooldown_seconds"), WARMUP_COOLDOWN_SECONDS, "cooldown_seconds")
+
+        run_id = acc_store.create_warmup_run(
+            triggered_by="admin",
+            mode=mode,
+            account_ids=[str(a.get("id")) for a in target_accounts],
+            models=models,
+        )
+
+        results: list[dict[str, Any]] = []
+        failed_items = 0
+        for account in target_accounts:
+            account_result = await _execute_account_warmup(
+                account=account,
+                run_id=run_id,
+                models=models,
+                mode=mode,
+                force=force,
+                ttl_seconds=ttl_seconds,
+                cooldown_seconds=cooldown_seconds,
+            )
+            failed_items += len(account_result["failed"])
+            results.append(account_result)
+
+        status_value = "failed" if (mode == "required" and failed_items > 0) else "completed"
+        summary = {
+            "mode": mode,
+            "models": models,
+            "accounts_total": len(target_accounts),
+            "accounts_completed": len(results),
+            "failed_items": failed_items,
+            "force": force,
+            "ttl_seconds": ttl_seconds,
+            "cooldown_seconds": cooldown_seconds,
+            "results": results,
+        }
+        acc_store.finalize_warmup_run(run_id, status=status_value, summary=summary)
+        _vol_commit()
+        return {"run_id": run_id, "status": status_value, **summary}
+
+    @api.get("/admin/warmup-runs/{run_id}", tags=["Admin"])
+    async def admin_warmup_run_status(
+        run_id: str,
+        _ip: str = Depends(get_admin_auth("warmup_run_status")),
+    ):
+        _vol_reload()
+        run = acc_store.get_warmup_run(run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail=_error_payload("not_found", "Warmup run not found.", "Verify run id and retry."))
+        items = acc_store.list_warmup_items(run_id)
+        return {"run": run, "items": items}
 
     @api.get("/admin/logs", tags=["Admin"])
     async def admin_get_logs(limit: int = 100, _ip: str = Depends(get_admin_auth("read_logs"))):

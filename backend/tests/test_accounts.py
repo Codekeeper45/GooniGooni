@@ -348,3 +348,53 @@ def test_spending_guard_disabled_when_limit_zero():
     picked = accounts.pick_and_mark_ready_account()
     assert picked is not None
     assert picked["id"] == account_id
+
+
+def test_warmup_state_cooldown_and_fresh_flags():
+    account_id = accounts.add_account("WarmupState", "tok_id", "tok_secret")
+    accounts.update_account_status(account_id, "checking")
+    accounts.update_account_status(account_id, "ready")
+
+    accounts.upsert_warmup_state(
+        account_id=account_id,
+        model="pony",
+        last_success_at="2026-02-28T00:00:00+00:00",
+        expires_at="2999-01-01T00:00:00+00:00",
+        cooldown_until="2999-01-01T00:00:00+00:00",
+        last_run_id="run-1",
+        last_error=None,
+    )
+
+    assert accounts.is_warmup_cooldown_active(account_id, "pony") is True
+    assert accounts.is_warmup_fresh(account_id, "pony") is True
+
+
+def test_warmup_run_and_items_persist():
+    account_id = accounts.add_account("WarmupRun", "tok_id", "tok_secret")
+    run_id = accounts.create_warmup_run(
+        triggered_by="test",
+        mode="best_effort",
+        account_ids=[account_id],
+        models=["pony"],
+    )
+    accounts.record_warmup_item(
+        run_id=run_id,
+        account_id=account_id,
+        model="pony",
+        task_id="task-123",
+        result="done",
+    )
+    accounts.finalize_warmup_run(
+        run_id,
+        status="completed",
+        summary={"ok": True},
+    )
+
+    run = accounts.get_warmup_run(run_id)
+    items = accounts.list_warmup_items(run_id)
+    assert run is not None
+    assert run["status"] == "completed"
+    assert run["summary"] == {"ok": True}
+    assert len(items) == 1
+    assert items[0]["model"] == "pony"
+    assert items[0]["result"] == "done"

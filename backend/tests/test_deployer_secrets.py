@@ -84,7 +84,7 @@ def test_deploy_account_syncs_shared_secrets_before_deploy(monkeypatch):
         "_wait_for_workspace_health",
         lambda workspace, account_id=None, attempts=1, interval_seconds=0.0, cache_ttl_seconds=0: (True, None),
     )
-    monkeypatch.setattr(deployer, "_trigger_workspace_warmup", lambda workspace, account_id=None: (True, None))
+    monkeypatch.setattr(deployer, "_trigger_workspace_warmup", lambda *args, **kwargs: (True, None))
 
     deployer.deploy_account(account_id)
 
@@ -142,6 +142,7 @@ def test_deploy_account_health_429_disables_account(monkeypatch):
 
 def test_deploy_account_requires_warmup_before_ready(monkeypatch):
     _set_required_shared_env(monkeypatch)
+    monkeypatch.setattr(deployer, "ACCOUNT_AUTO_WARMUP_MODE", "required")
     monkeypatch.setattr(deployer, "ACCOUNT_WARMUP_REQUIRED", True)
     account_id = accounts.add_account("WarmupRequired", "tok_id_w", "tok_secret_w")
 
@@ -159,7 +160,7 @@ def test_deploy_account_requires_warmup_before_ready(monkeypatch):
 
     monkeypatch.setattr(deployer.subprocess, "run", fake_run)
     monkeypatch.setattr(deployer, "_wait_for_workspace_health", lambda workspace, account_id=None, attempts=1, interval_seconds=0.0, cache_ttl_seconds=0: (True, None))
-    monkeypatch.setattr(deployer, "_trigger_workspace_warmup", lambda workspace, account_id=None: (False, "warmup failed for anisora"))
+    monkeypatch.setattr(deployer, "_trigger_workspace_warmup", lambda *args, **kwargs: (False, "warmup failed for anisora"))
 
     deployer.deploy_account(account_id)
 
@@ -228,7 +229,7 @@ def test_deploy_account_retries_before_success(monkeypatch):
 
     monkeypatch.setattr(deployer.subprocess, "run", fake_run)
     monkeypatch.setattr(deployer, "_wait_for_workspace_health", lambda workspace, account_id=None, attempts=1, interval_seconds=0.0, cache_ttl_seconds=0: (True, None))
-    monkeypatch.setattr(deployer, "_trigger_workspace_warmup", lambda workspace, account_id=None: (True, None))
+    monkeypatch.setattr(deployer, "_trigger_workspace_warmup", lambda *args, **kwargs: (True, None))
 
     deployer.deploy_account(account_id)
 
@@ -260,7 +261,7 @@ def test_deploy_fails_on_build_id_mismatch(monkeypatch):
         return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="unexpected")
 
     monkeypatch.setattr(deployer.subprocess, "run", fake_run)
-    monkeypatch.setattr(deployer, "_trigger_workspace_warmup", lambda workspace, account_id=None: (True, None))
+    monkeypatch.setattr(deployer, "_trigger_workspace_warmup", lambda *args, **kwargs: (True, None))
 
     import httpx as _httpx
 
@@ -315,7 +316,7 @@ def test_deploy_skips_build_id_check_when_empty(monkeypatch):
         "_wait_for_workspace_health",
         lambda workspace, account_id=None, attempts=1, interval_seconds=0.0, cache_ttl_seconds=0: (True, None),
     )
-    monkeypatch.setattr(deployer, "_trigger_workspace_warmup", lambda workspace, account_id=None: (True, None))
+    monkeypatch.setattr(deployer, "_trigger_workspace_warmup", lambda *args, **kwargs: (True, None))
 
     deployer.deploy_account(account_id)
 
@@ -346,7 +347,7 @@ def test_deploy_account_writes_onboarding_audit_steps(monkeypatch):
         "_wait_for_workspace_health",
         lambda workspace, account_id=None, attempts=1, interval_seconds=0.0, cache_ttl_seconds=0: (True, None),
     )
-    monkeypatch.setattr(deployer, "_trigger_workspace_warmup", lambda workspace, account_id=None: (True, None))
+    monkeypatch.setattr(deployer, "_trigger_workspace_warmup", lambda *args, **kwargs: (True, None))
 
     deployer.deploy_account(account_id)
 

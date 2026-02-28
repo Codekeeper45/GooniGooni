@@ -40,10 +40,20 @@ ACCOUNT_DEPLOY_RETRY_MAX_BACKOFF_SECONDS = max(
 )
 ACCOUNT_HEALTH_ATTEMPTS = max(1, int(os.environ.get("ACCOUNT_HEALTH_ATTEMPTS", "24")))
 ACCOUNT_HEALTH_INTERVAL_SECONDS = max(1.0, float(os.environ.get("ACCOUNT_HEALTH_INTERVAL_SECONDS", "5")))
-ACCOUNT_WARMUP_REQUIRED = (os.environ.get("ACCOUNT_WARMUP_REQUIRED", "1").strip().lower() in {"1", "true", "yes", "on"})
+ACCOUNT_AUTO_WARMUP_MODE = (os.environ.get("ACCOUNT_AUTO_WARMUP_MODE", "off").strip().lower() or "off")
+if ACCOUNT_AUTO_WARMUP_MODE not in {"off", "required", "best_effort"}:
+    ACCOUNT_AUTO_WARMUP_MODE = "off"
+ACCOUNT_WARMUP_REQUIRED = ACCOUNT_AUTO_WARMUP_MODE == "required"
 ACCOUNT_WARMUP_TOTAL_TIMEOUT_SECONDS = max(30.0, float(os.environ.get("ACCOUNT_WARMUP_TOTAL_TIMEOUT_SECONDS", "720")))
 ACCOUNT_WARMUP_POLL_INTERVAL_SECONDS = max(1.0, float(os.environ.get("ACCOUNT_WARMUP_POLL_INTERVAL_SECONDS", "3")))
 REQUIRED_WARMUP_MODELS = ("anisora", "phr00t", "pony", "flux")
+_DEFAULT_WARMUP_MODELS = tuple(
+    m.strip().lower()
+    for m in os.environ.get("WARMUP_DEFAULT_MODELS", "pony,flux").split(",")
+    if m.strip().lower() in REQUIRED_WARMUP_MODELS
+)
+if not _DEFAULT_WARMUP_MODELS:
+    _DEFAULT_WARMUP_MODELS = ("pony", "flux")
 
 _SHARED_SECRET_BINDINGS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("gooni-api-key", ("API_KEY",)),
@@ -371,46 +381,61 @@ def deploy_account(account_id: str) -> None:
             success=True,
             details=f"step=health_check; workspace={workspace}",
         )
-        _audit_onboarding_step(
-            account=account,
-            action="account_warmup_started",
-            success=True,
-            details=f"step=warmup; workspace={workspace}",
-        )
-
-        warmup_ok, warmup_error = _trigger_workspace_warmup(workspace, account_id=account_id)
-        if ACCOUNT_WARMUP_REQUIRED and not warmup_ok:
-            error = warmup_error or "Required warmup failed"
-            normalized_error = _normalize_onboarding_error("warmup_failed", error, account)
-            failure_type, _ = acc_store._classify_error(error)
-            acc_store.mark_account_failed(
-                account_id,
-                normalized_error,
-                failure_type=failure_type,
-            )
+        if ACCOUNT_AUTO_WARMUP_MODE != "off":
             _audit_onboarding_step(
                 account=account,
-                action="account_warmup_failed",
-                success=False,
-                details=f"step=warmup; code=warmup_failed; error={normalized_error[:180]}",
+                action="account_warmup_started",
+                success=True,
+                details=(
+                    f"step=warmup; workspace={workspace}; mode={ACCOUNT_AUTO_WARMUP_MODE}; "
+                    f"models={','.join(_DEFAULT_WARMUP_MODELS)}"
+                ),
             )
-            _audit_failure_outcome(account_id, account, "warmup_failed")
-            _commit_volume()
-            return
-        if not warmup_ok:
-            logger.warning("workspace optional warmup failed: workspace=%s error=%s", workspace, warmup_error)
-            _audit_onboarding_step(
-                account=account,
-                action="account_warmup_failed",
-                success=False,
-                details=f"step=warmup_optional; workspace={workspace}; error={str(warmup_error)[:180]}",
+            warmup_ok, warmup_error = _trigger_workspace_warmup(
+                workspace,
+                account_id=account_id,
+                models=list(_DEFAULT_WARMUP_MODELS),
+                mode=ACCOUNT_AUTO_WARMUP_MODE,
             )
+            if ACCOUNT_WARMUP_REQUIRED and not warmup_ok:
+                error = warmup_error or "Required warmup failed"
+                normalized_error = _normalize_onboarding_error("warmup_failed", error, account)
+                failure_type, _ = acc_store._classify_error(error)
+                acc_store.mark_account_failed(
+                    account_id,
+                    normalized_error,
+                    failure_type=failure_type,
+                )
+                _audit_onboarding_step(
+                    account=account,
+                    action="account_warmup_failed",
+                    success=False,
+                    details=f"step=warmup; code=warmup_failed; error={normalized_error[:180]}",
+                )
+                _audit_failure_outcome(account_id, account, "warmup_failed")
+                _commit_volume()
+                return
+            if not warmup_ok:
+                logger.warning("workspace optional warmup failed: workspace=%s error=%s", workspace, warmup_error)
+                _audit_onboarding_step(
+                    account=account,
+                    action="account_warmup_failed",
+                    success=False,
+                    details=f"step=warmup_optional; workspace={workspace}; error={str(warmup_error)[:180]}",
+                )
+            else:
+                _audit_onboarding_step(
+                    account=account,
+                    action="account_warmup_passed",
+                    success=True,
+                    details=f"step=warmup; workspace={workspace}",
+                )
         else:
             _audit_onboarding_step(
                 account=account,
-                action="account_warmup_passed",
+                action="account_warmup_skipped",
                 success=True,
-                details=f"step=warmup; workspace={workspace}",
+                details=f"step=warmup; workspace={workspace}; mode=off",
             )
 
         acc_store.update_account_status(account_id, "ready", workspace=workspace, error=None)
@@ -614,19 +639,39 @@ def _wait_for_warmup_tasks(
     return True, None
 
 
-def _trigger_workspace_warmup(workspace: str, account_id: Optional[str] = None) -> tuple[bool, Optional[str]]:
-    """
-    Trigger lane warmup and wait until all required model lanes report terminal success.
-    """
+def trigger_workspace_warmup_detailed(
+    workspace: str,
+    *,
+    account_id: Optional[str] = None,
+    models: Optional[list[str]] = None,
+    mode: str = "best_effort",
+) -> dict:
+    """Trigger warmup for selected models and wait for terminal task statuses."""
+    selected_models = [m for m in (models or list(_DEFAULT_WARMUP_MODELS)) if m in REQUIRED_WARMUP_MODELS]
+    if not selected_models:
+        selected_models = list(_DEFAULT_WARMUP_MODELS)
+
     enabled = (os.environ.get("ENABLE_LANE_WARMUP", "1").strip().lower() in {"1", "true", "yes", "on"})
     if not enabled:
-        if ACCOUNT_WARMUP_REQUIRED:
-            return False, "Warmup is disabled by ENABLE_LANE_WARMUP."
-        return True, None
+        return {
+            "ok": False if mode == "required" else True,
+            "error": "Warmup is disabled by ENABLE_LANE_WARMUP.",
+            "scheduled": {},
+            "errors": [],
+            "requested_models": selected_models,
+            "missing_models": selected_models,
+        }
 
     api_key = os.environ.get("API_KEY", "").strip()
     if not api_key:
-        return False, "API_KEY is missing; cannot trigger warmup"
+        return {
+            "ok": False,
+            "error": "API_KEY is missing; cannot trigger warmup",
+            "scheduled": {},
+            "errors": [],
+            "requested_models": selected_models,
+            "missing_models": selected_models,
+        }
 
     retries = max(1, int(os.environ.get("WARMUP_RETRIES", "2")))
     connect_timeout = float(os.environ.get("WARMUP_CONNECT_TIMEOUT_SECONDS", "5"))
@@ -639,27 +684,31 @@ def _trigger_workspace_warmup(workspace: str, account_id: Optional[str] = None) 
     for attempt in range(1, retries + 1):
         try:
             with httpx.Client(timeout=timeout) as client:
-                response = client.post(url, headers=headers)
+                response = client.post(
+                    url,
+                    headers=headers,
+                    json={"models": selected_models, "mode": mode},
+                )
             if response.status_code != 200:
-                last_error = f"warmup status={response.status_code}"
+                body_hint = (response.text or "").strip()[:180]
+                if body_hint:
+                    last_error = f"warmup status={response.status_code}: {body_hint}"
+                else:
+                    last_error = f"warmup status={response.status_code}"
             else:
                 payload = response.json()
                 scheduled = payload.get("scheduled") or []
+                remote_errors = payload.get("errors") or []
                 model_task_ids: dict[str, str] = {}
                 for entry in scheduled:
                     model = str(entry.get("model", "")).lower()
                     task_id = str(entry.get("task_id", "")).strip()
-                    if model in REQUIRED_WARMUP_MODELS and task_id:
+                    if model in selected_models and task_id:
                         model_task_ids[model] = task_id
 
-                missing_models = sorted(set(REQUIRED_WARMUP_MODELS) - set(model_task_ids.keys()))
-                if missing_models:
-                    errors = payload.get("errors") or []
-                    last_error = (
-                        f"warmup missing models: {', '.join(missing_models)}"
-                        + (f"; errors={errors}" if errors else "")
-                    )
-                else:
+                missing_models = sorted(set(selected_models) - set(model_task_ids.keys()))
+
+                if model_task_ids:
                     ok, poll_error = _wait_for_warmup_tasks(
                         workspace=workspace,
                         model_task_ids=model_task_ids,
@@ -668,11 +717,34 @@ def _trigger_workspace_warmup(workspace: str, account_id: Optional[str] = None) 
                         poll_interval_seconds=ACCOUNT_WARMUP_POLL_INTERVAL_SECONDS,
                     )
                     if ok:
-                        logger.info("workspace warmup completed: %s", workspace)
-                        if account_id:
-                            acc_store.update_health_check(account_id, "ok+warmed")
-                        return True, None
+                        if missing_models:
+                            last_error = (
+                                f"warmup missing models: {', '.join(missing_models)}"
+                                + (f"; errors={remote_errors}" if remote_errors else "")
+                            )
+                            return {
+                                "ok": mode != "required",
+                                "error": last_error,
+                                "scheduled": model_task_ids,
+                                "errors": remote_errors,
+                                "requested_models": selected_models,
+                                "missing_models": missing_models,
+                            }
+                        logger.info("workspace warmup completed: %s models=%s", workspace, ",".join(selected_models))
+                        return {
+                            "ok": True,
+                            "error": None,
+                            "scheduled": model_task_ids,
+                            "errors": remote_errors,
+                            "requested_models": selected_models,
+                            "missing_models": [],
+                        }
                     last_error = poll_error or "warmup status polling failed"
+                else:
+                    last_error = (
+                        f"warmup missing models: {', '.join(missing_models)}"
+                        + (f"; errors={remote_errors}" if remote_errors else "")
+                    )
         except Exception as exc:
             last_error = f"warmup error: {exc}"
 
@@ -680,6 +752,33 @@ def _trigger_workspace_warmup(workspace: str, account_id: Optional[str] = None) 
             time.sleep(2.0)
 
     logger.warning("workspace warmup failed: workspace=%s error=%s", workspace, last_error)
-    if account_id:
-        acc_store.update_health_check(account_id, f"warmup_failed: {last_error}")
-    return False, last_error
+    return {
+        "ok": False,
+        "error": last_error,
+        "scheduled": {},
+        "errors": [],
+        "requested_models": selected_models,
+        "missing_models": selected_models,
+    }
+
+
+def _trigger_workspace_warmup(
+    workspace: str,
+    account_id: Optional[str] = None,
+    *,
+    models: Optional[list[str]] = None,
+    mode: str = "best_effort",
+) -> tuple[bool, Optional[str]]:
+    details = trigger_workspace_warmup_detailed(
+        workspace,
+        account_id=account_id,
+        models=models,
+        mode=mode,
+    )
+    ok = bool(details.get("ok"))
+    error = details.get("error")
+    if ok and account_id:
+        acc_store.update_health_check(account_id, "ok+warmed")
+    if (not ok) and account_id and error:
+        acc_store.update_health_check(account_id, f"warmup_failed: {error}")
+    return ok, error
