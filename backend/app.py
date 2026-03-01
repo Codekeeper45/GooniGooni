@@ -411,15 +411,6 @@ def _execute_video_generation(
         )
 
         result_path, preview_path = pipeline.generate(request_dict, task_id, RESULTS_PATH)
-        _update_status(
-            task_id,
-            "processing",
-            progress=90,
-            stage="artifact_write",
-            stage_detail="persisting_result",
-            lane_mode=lane_mode,
-            fallback_reason=fallback_reason,
-        )
         _ensure_artifacts_exist(result_path, preview_path)
         _update_status(
             task_id,
@@ -663,15 +654,6 @@ def _execute_image_generation(
             fallback_reason=fallback_reason,
         )
         result_path, preview_path = pipeline.generate(request_dict, task_id, RESULTS_PATH)
-        _update_status(
-            task_id,
-            "processing",
-            progress=90,
-            stage="artifact_write",
-            stage_detail="persisting_result",
-            lane_mode=lane_mode,
-            fallback_reason=fallback_reason,
-        )
 
         if not result_path or not os.path.exists(result_path):
             raise RuntimeError(f"Image generation finished without result artifact: {result_path}")
