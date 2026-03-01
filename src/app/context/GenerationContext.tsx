@@ -9,7 +9,7 @@ import type {
   ArbitraryFrameItem,
 } from "../components/ControlPanel";
 import type { HistoryItem } from "../components/HistoryPanel";
-import { sessionFetch, ensureGenerationSession, readApiError } from "../utils/sessionClient";
+import { sessionFetch, ensureGenerationSession, readApiError, resolveMediaUrl } from "../utils/sessionClient";
 import { configManager, type ModelId } from "../utils/configManager";
 import { useGallery } from "./GalleryContext";
 
@@ -166,6 +166,12 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
     if (!raw) return null;
     try {
       const parsed = JSON.parse(raw);
+      if (parsed?.taskId && parsed?.result?.url) {
+        parsed.result.url = resolveMediaUrl(parsed.result.url, `/results/${parsed.taskId}`);
+      }
+      if (parsed?.taskId && parsed?.result?.thumbnailUrl) {
+        parsed.result.thumbnailUrl = resolveMediaUrl(parsed.result.thumbnailUrl, `/preview/${parsed.taskId}`);
+      }
       // Revive dates in history
       if (parsed.history) {
         parsed.history = parsed.history.map((h: any) => ({
@@ -357,14 +363,16 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
 
         if (data.status === "done") {
           stopPolling();
-          const resultUrl = data.result_url ?? `/api/results/${tid}`;
-          const previewUrl = data.preview_url;
+          const resultUrl = resolveMediaUrl(data.result_url, `/results/${tid}`);
+          const previewUrl = data.preview_url
+            ? resolveMediaUrl(data.preview_url, `/preview/${tid}`)
+            : null;
           const requestedSize = requestSizeRef.current ?? { width, height };
           const finalSize = parseEffectiveSize(data.stage_detail) ?? requestedSize;
 
           const res = {
             url: resultUrl,
-            thumbnailUrl: previewUrl ?? undefined,
+            thumbnailUrl: previewUrl || undefined,
             seed: resolvedSeed,
             width: finalSize.width,
             height: finalSize.height,
@@ -380,7 +388,7 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
           addToGallery({
             id: tid,
             url: resultUrl,
-            thumbnailUrl: previewUrl ?? undefined,
+            thumbnailUrl: previewUrl || undefined,
             prompt,
             type: generationType,
             model: currentModelLabel,
@@ -395,7 +403,7 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
             status: "done",
             width: finalSize.width,
             height: finalSize.height,
-            thumbnailUrl: previewUrl ?? resultUrl,
+            thumbnailUrl: previewUrl || resultUrl,
           } : h));
         } else if (data.status === "failed") {
           failPolling(data.error_msg ?? "Generation failed.");

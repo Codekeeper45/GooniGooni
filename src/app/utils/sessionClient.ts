@@ -153,3 +153,39 @@ export async function sessionFetch(
   }
   return response;
 }
+
+export function resolveMediaUrl(
+  rawUrl: string | null | undefined,
+  fallbackPath: string,
+): string {
+  const fallback = fallbackPath.startsWith("/api/") ? fallbackPath : buildUrl("/api", fallbackPath);
+  if (!rawUrl) return fallback;
+
+  const rewritePath = (pathname: string, search: string): string => {
+    if (pathname.startsWith("/results/") || pathname.startsWith("/preview/")) {
+      return `/api${pathname}${search}`;
+    }
+    return "";
+  };
+
+  if (rawUrl.startsWith("/")) {
+    const rewritten = rewritePath(rawUrl, "");
+    return rewritten || rawUrl;
+  }
+
+  try {
+    const parsed = new URL(rawUrl);
+    const rewritten = rewritePath(parsed.pathname, parsed.search);
+    if (!rewritten) {
+      return rawUrl;
+    }
+
+    if (parsed.origin === window.location.origin) {
+      return rewritten;
+    }
+
+    return rawUrl;
+  } catch {
+    return fallback;
+  }
+}

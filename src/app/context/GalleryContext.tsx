@@ -1,6 +1,6 @@
 import { createContext, useContext, useState, useEffect } from "react";
 import type { GenerationType } from "../components/ControlPanel";
-import { sessionFetch } from "../utils/sessionClient";
+import { sessionFetch, resolveMediaUrl } from "../utils/sessionClient";
 
 export interface GalleryItem {
   id: string;
@@ -29,6 +29,8 @@ function deserializeGallery(raw: string): GalleryItem[] {
     const parsed = JSON.parse(raw);
     return parsed.map((item: any) => ({
       ...item,
+      url: resolveMediaUrl(item.url, `/results/${item.id}`),
+      thumbnailUrl: item.thumbnailUrl ? resolveMediaUrl(item.thumbnailUrl, `/preview/${item.id}`) : undefined,
       createdAt: new Date(item.createdAt),
     }));
   } catch {
