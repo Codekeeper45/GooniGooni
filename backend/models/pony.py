@@ -83,7 +83,16 @@ class PonyPipeline(BasePipeline):
         cls_name = _SAMPLERS.get(sampler_name, "EulerAncestralDiscreteScheduler")
         cls = getattr(sched, cls_name, None)
         if cls:
-            pipe.scheduler = cls.from_config(pipe.scheduler.config)
+            kwargs = {}
+            if "Karras" in sampler_name:
+                kwargs["use_karras_sigmas"] = True
+            if "SDE" in sampler_name:
+                kwargs["algorithm_type"] = "sde-dpmsolver++"
+            # Some Pony models like DPM++ 2M Karras also benefit from algorithm_type="sde-dpmsolver++"
+            elif sampler_name == "DPM++ 2M Karras":
+                kwargs["algorithm_type"] = "sde-dpmsolver++"
+
+            pipe.scheduler = cls.from_config(pipe.scheduler.config, **kwargs)
 
     @staticmethod
     def _run_pipe_checked(pipe, **kwargs) -> Image.Image:
