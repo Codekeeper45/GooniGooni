@@ -893,6 +893,28 @@ def create_app(results_vol=None) -> FastAPI:
             elif age >= pending_start_warning:
                 result = result.model_copy(update={"stage": "queued", "stage_detail": f"Awaiting GPU worker pickup ({int(age)}s). Queue delay detected."})
 
+        # Server-side processing stall detection
+        processing_stall_timeout = int(os.environ.get("PROCESSING_STALL_TIMEOUT_SECONDS", "300"))
+        if (
+            result.status == TaskStatus.processing
+            and result.updated_at is not None
+            and processing_stall_timeout > 0
+        ):
+            age_since_update = (
+                datetime.now(result.updated_at.tzinfo) - result.updated_at
+            ).total_seconds()
+            if age_since_update >= processing_stall_timeout:
+                storage.update_task_status(
+                    task_id,
+                    "failed",
+                    progress=result.progress or 0,
+                    error_msg="Worker stalled: no status update for 5 minutes.",
+                    stage="failed",
+                    stage_detail="processing_stall_timeout",
+                )
+                _vol_commit()
+                result = storage.get_task(task_id) or result
+
         if result.updated_at is not None:
             freshness_seconds = max(
                 0.0,

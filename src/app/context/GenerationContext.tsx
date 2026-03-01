@@ -156,6 +156,7 @@ const POLL_INTERVAL_MS = 2000;
 const MAX_POLL_ERRORS = 5;
 const MAX_TRANSIENT_POLL_ERRORS = 12;
 const WORKER_QUEUE_STALL_TIMEOUT_MS = 130_000;
+const PROCESSING_STALL_TIMEOUT_MS = 300_000;
 const FATAL_POLL_HTTP_CODES = new Set([401, 404, 410, 422, 500]);
 const TRANSIENT_POLL_HTTP_CODES = new Set([502, 503]);
 
@@ -303,6 +304,8 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
     let queuedAtMs: number | null = null;
     let includeResumeFlag = options?.resume === true;
     let pollInFlight = false;
+    let lastStageSignature = "";
+    let lastChangeAtMs = Date.now();
     setTaskId(tid);
 
         const failPolling = (message: string) => {
@@ -352,6 +355,18 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
         setStatusText(getStatusText(data.stage, generationType));
         setStageDetail(typeof data.stage_detail === "string" ? data.stage_detail : "");
 
+        // Detect processing stall — safety net for stuck tasks
+        if (data.status === "processing" || (data.status === "pending" && data.stage && data.stage !== "queued")) {
+          const sig = `${data.status}:${data.stage}:${data.progress}`;
+          if (sig !== lastStageSignature) {
+            lastStageSignature = sig;
+            lastChangeAtMs = Date.now();
+          } else if (Date.now() - lastChangeAtMs >= PROCESSING_STALL_TIMEOUT_MS) {
+            failPolling("Generation stalled: no progress detected for 5 minutes.");
+            return;
+          }
+        }
+
         if (
           data.status === "pending" &&
           currentProgress === 0 &&
@@ -371,7 +386,6 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
         }
 
         if (data.status === "done") {
-          stopPolling();
           const resultUrl = resolveMediaUrl(data.result_url, `/results/${tid}`);
           const previewUrl = data.preview_url
             ? resolveMediaUrl(data.preview_url, `/preview/${tid}`)
@@ -393,19 +407,24 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
           setStatus("done");
           setProgress(100);
           setStageDetail(typeof data.stage_detail === "string" ? data.stage_detail : "ok");
+          stopPolling();
 
-          addToGallery({
-            id: tid,
-            url: resultUrl,
-            thumbnailUrl: previewUrl || undefined,
-            prompt,
-            type: generationType,
-            model: currentModelLabel,
-            width: finalSize.width,
-            height: finalSize.height,
-            seed: resolvedSeed,
-            createdAt: new Date(),
-          });
+          try {
+            addToGallery({
+              id: tid,
+              url: resultUrl,
+              thumbnailUrl: previewUrl || undefined,
+              prompt,
+              type: generationType,
+              model: currentModelLabel,
+              width: finalSize.width,
+              height: finalSize.height,
+              seed: resolvedSeed,
+              createdAt: new Date(),
+            });
+          } catch (e) {
+            console.error("addToGallery failed:", e);
+          }
 
           setHistory(prev => prev.map(h => h.taskId === tid ? {
             ...h,
