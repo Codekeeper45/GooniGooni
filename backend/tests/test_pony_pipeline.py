@@ -108,7 +108,6 @@ def test_run_pipe_checked_raises_when_warning_and_low_detail_coexist():
 def test_attempt_parameters_default_attempt_keeps_original_values():
     seed, sampler, steps, cfg, denoise = PonyPipeline._attempt_parameters(
         attempt=0,
-        max_attempts=3,
         base_seed=123,
         sampler="DPM++ 2M Karras",
         steps=40,
@@ -125,7 +124,6 @@ def test_attempt_parameters_default_attempt_keeps_original_values():
 def test_attempt_parameters_final_attempt_uses_safe_preset():
     seed, sampler, steps, cfg, denoise = PonyPipeline._attempt_parameters(
         attempt=2,
-        max_attempts=3,
         base_seed=123,
         sampler="DPM++ SDE Karras",
         steps=60,
@@ -134,13 +132,29 @@ def test_attempt_parameters_final_attempt_uses_safe_preset():
     )
     assert seed == 125
     assert sampler == "Euler a"
-    assert steps == 30
-    assert cfg == 6.5
-    assert denoise == 0.7
+    assert steps == 24
+    assert cfg == 5.0
+    assert denoise == 0.45
+
+
+def test_attempt_resolution_normalizes_unsafe_portrait_size():
+    width, height = PonyPipeline._attempt_resolution(
+        attempt=0,
+        width=720,
+        height=1280,
+        mode="txt2img",
+    )
+    assert (width, height) == (1024, 1024)
+
+
+def test_attempt_resolution_degrades_on_retries():
+    assert PonyPipeline._attempt_resolution(attempt=1, width=1024, height=1024, mode="txt2img") == (768, 768)
+    assert PonyPipeline._attempt_resolution(attempt=2, width=1024, height=1024, mode="txt2img") == (512, 512)
 
 
 def test_cache_guard_helpers_track_loaded_cache_path():
     pipe = PonyPipeline("hf/repo")
+    assert pipe.vae_model_id == "madebyollin/sdxl-vae-fp16-fix"
 
     assert pipe._is_loaded_for_cache("/cache/a") is False
     pipe._mark_loaded_for_cache("/cache/a")

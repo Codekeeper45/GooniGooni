@@ -678,6 +678,14 @@ def _execute_image_generation(
         if not preview_path or not os.path.exists(preview_path):
             raise RuntimeError(f"Image generation finished without preview artifact: {preview_path}")
 
+        effective_width = int(request_dict.get("_effective_width") or request_dict.get("width") or 0)
+        effective_height = int(request_dict.get("_effective_height") or request_dict.get("height") or 0)
+        completed_detail = (
+            f"ok:{effective_width}x{effective_height}"
+            if effective_width > 0 and effective_height > 0
+            else "ok"
+        )
+
         _update_status(
             task_id,
             "done",
@@ -685,7 +693,7 @@ def _execute_image_generation(
             result_path=result_path,
             preview_path=preview_path,
             stage="completed",
-            stage_detail="ok",
+            stage_detail=completed_detail,
             lane_mode=lane_mode,
             fallback_reason=fallback_reason,
         )

@@ -57,6 +57,13 @@ interface ResolutionConfig {
   label: string;
 }
 
+export interface NormalizedResolution {
+  width: number;
+  height: number;
+  changed: boolean;
+  reason?: string;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Config Manager
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -195,6 +202,95 @@ export class InferenceConfigManager {
   getRecommendedResolutions(modelId: ModelId): ResolutionConfig[] {
     const model = this.getModel(modelId);
     return model?.recommended_resolutions || [];
+  }
+
+  getPreferredInitialResolution(modelId: ModelId): ResolutionConfig {
+    const recommended = this.getRecommendedResolutions(modelId);
+    if (recommended.length === 0) {
+      return modelId === "pony"
+        ? { width: 1024, height: 1024, label: "1024x1024" }
+        : { width: 768, height: 768, label: "768x768" };
+    }
+
+    if (modelId === "pony") {
+      const ponyPreferred = recommended.find(
+        (item) => item.width === 1024 && item.height === 1024,
+      );
+      if (ponyPreferred) return ponyPreferred;
+    }
+
+    return recommended[0];
+  }
+
+  isSafeImageResolution(modelId: ModelId, width: number, height: number): boolean {
+    const model = this.getModel(modelId);
+    if (!model || model.type !== "image") return true;
+
+    const recommended = this.getRecommendedResolutions(modelId);
+    const exactRecommended = recommended.some(
+      (item) => item.width === width && item.height === height,
+    );
+    if (exactRecommended) return true;
+
+    if (modelId === "pony") {
+      return width === height && width >= 512 && width <= 1024;
+    }
+
+    return width === height && width >= 512 && width <= 1024;
+  }
+
+  normalizeImageResolution(
+    modelId: ModelId,
+    width: number,
+    height: number,
+  ): NormalizedResolution {
+    const model = this.getModel(modelId);
+    if (!model || model.type !== "image") {
+      return { width, height, changed: false };
+    }
+
+    const preferred = this.getPreferredInitialResolution(modelId);
+    const isKnownVideoPreset = [
+      [720, 1280],
+      [1280, 720],
+      [896, 1120],
+      [1152, 720],
+    ].some(([w, h]) => width === w && height === h);
+
+    const exactRecommended = this.getRecommendedResolutions(modelId).some(
+      (item) => item.width === width && item.height === height,
+    );
+    const isSquare = width === height;
+
+    if (exactRecommended && !isKnownVideoPreset) {
+      return { width, height, changed: false };
+    }
+
+    if (modelId === "pony") {
+      if (this.isSafeImageResolution(modelId, width, height) && !isKnownVideoPreset) {
+        return { width, height, changed: false };
+      }
+
+      const maxSide = Math.max(width, height);
+      const side = maxSide > 896 ? 1024 : maxSide > 640 ? 768 : 512;
+      return {
+        width: side,
+        height: side,
+        changed: width !== side || height !== side,
+        reason: "Pony uses square-safe SDXL resolutions for stability.",
+      };
+    }
+
+    if (this.isSafeImageResolution(modelId, width, height) && !isKnownVideoPreset && isSquare) {
+      return { width, height, changed: false };
+    }
+
+    return {
+      width: preferred.width,
+      height: preferred.height,
+      changed: width !== preferred.width || height !== preferred.height,
+      reason: `${model.name} uses recommended image-safe resolutions.`,
+    };
   }
 
   // ─── Build payload for API ──────────────────────────────────────────────────

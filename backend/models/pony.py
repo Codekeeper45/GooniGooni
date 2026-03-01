@@ -19,14 +19,16 @@ _SAMPLERS = {
     "DPM++ SDE Karras": "DPMSolverSDEScheduler",
 }
 
+_DEFAULT_PONY_VAE = "madebyollin/sdxl-vae-fp16-fix"
+
 
 class PonyPipeline(BasePipeline):
     """Pony Diffusion V6 XL image pipeline."""
 
     def __init__(self, hf_model_id: str):
         self.hf_model_id = hf_model_id
-        # Optional override for experimentation; by default use model-native VAE.
-        self.vae_model_id = (os.environ.get("PONY_VAE_MODEL_ID") or "").strip() or None
+        # Allow env override but default to a stable SDXL VAE to avoid gray/NaN decodes.
+        self.vae_model_id = (os.environ.get("PONY_VAE_MODEL_ID") or "").strip() or _DEFAULT_PONY_VAE
         self._loaded = False
         self._txt2img = None
         self._img2img = None
@@ -132,7 +134,6 @@ class PonyPipeline(BasePipeline):
         cls,
         *,
         attempt: int,
-        max_attempts: int,
         base_seed: int,
         sampler: str,
         steps: int,
@@ -146,14 +147,52 @@ class PonyPipeline(BasePipeline):
         attempt_cfg = float(cfg_scale)
         attempt_denoise = float(denoising_strength)
 
-        # On the final attempt use a safer preset to reduce SDXL decode instability.
-        if attempt == max_attempts - 1:
+        if attempt == 1:
             attempt_sampler = "Euler a"
-            attempt_steps = int(cls._clamp(float(attempt_steps), 24.0, 30.0))
-            attempt_cfg = cls._clamp(attempt_cfg, 4.5, 6.5)
-            attempt_denoise = cls._clamp(attempt_denoise, 0.45, 0.7)
+            attempt_steps = int(cls._clamp(float(attempt_steps), 28.0, 32.0))
+            attempt_cfg = cls._clamp(attempt_cfg, 5.0, 6.0)
+            attempt_denoise = cls._clamp(attempt_denoise, 0.45, 0.6)
+        elif attempt >= 2:
+            attempt_sampler = "Euler a"
+            attempt_steps = 24
+            attempt_cfg = 5.0
+            attempt_denoise = 0.45
 
         return attempt_seed, attempt_sampler, attempt_steps, attempt_cfg, attempt_denoise
+
+    @classmethod
+    def _normalize_initial_resolution(cls, width: int, height: int, mode: str) -> tuple[int, int]:
+        safe_side = cls._fallback_resolution(width, height)
+        if width == height and 512 <= width <= 1024:
+            return width, height
+        if mode == "img2img" and safe_side > 768:
+            safe_side = 768
+        return safe_side, safe_side
+
+    @classmethod
+    def _fallback_resolution(cls, width: int, height: int) -> int:
+        max_side = max(int(width), int(height))
+        if max_side > 896:
+            return 1024
+        if max_side > 640:
+            return 768
+        return 512
+
+    @classmethod
+    def _attempt_resolution(
+        cls,
+        *,
+        attempt: int,
+        width: int,
+        height: int,
+        mode: str,
+    ) -> tuple[int, int]:
+        first_width, first_height = cls._normalize_initial_resolution(width, height, mode)
+        if attempt <= 0:
+            return first_width, first_height
+        if attempt == 1:
+            return 768, 768
+        return 512, 512
 
     def generate(self, request: dict, task_id: str, results_path: str) -> tuple[str, str]:
         if not self._loaded:
@@ -182,9 +221,14 @@ class PonyPipeline(BasePipeline):
         last_exc: Exception | None = None
         max_attempts = 3
         for attempt in range(max_attempts):
+            attempt_width, attempt_height = self._attempt_resolution(
+                attempt=attempt,
+                width=width,
+                height=height,
+                mode=mode,
+            )
             attempt_seed, attempt_sampler, attempt_steps, attempt_cfg, attempt_denoise = self._attempt_parameters(
                 attempt=attempt,
-                max_attempts=max_attempts,
                 base_seed=seed,
                 sampler=sampler,
                 steps=steps,
@@ -200,8 +244,8 @@ class PonyPipeline(BasePipeline):
                             self._txt2img,
                             prompt=prompt,
                             negative_prompt=negative_prompt or None,
-                            width=width,
-                            height=height,
+                            width=attempt_width,
+                            height=attempt_height,
                             num_inference_steps=attempt_steps,
                             guidance_scale=attempt_cfg,
                             clip_skip=clip_skip,
@@ -209,7 +253,10 @@ class PonyPipeline(BasePipeline):
                         )
 
                     elif mode == "img2img":
-                        ref_img = self.decode_image(request["reference_image"]).resize((width, height), Image.LANCZOS)
+                        ref_img = self.decode_image(request["reference_image"]).resize(
+                            (attempt_width, attempt_height),
+                            Image.LANCZOS,
+                        )
                         self._apply_sampler(self._img2img, attempt_sampler)
                         image = self._run_pipe_checked(
                             self._img2img,
@@ -224,6 +271,8 @@ class PonyPipeline(BasePipeline):
                         )
                     else:
                         raise ValueError(f"Unsupported mode for pony: {mode}")
+                request["_effective_width"] = attempt_width
+                request["_effective_height"] = attempt_height
                 break
             except RuntimeError as exc:
                 last_exc = exc
@@ -233,8 +282,8 @@ class PonyPipeline(BasePipeline):
                 if self._is_retryable_decode_error(exc) and attempt == max_attempts - 1:
                     raise RuntimeError(
                         "Pony decode failed after 3 attempts "
-                        "(including safe preset fallback). "
-                        f"Last error: {exc}"
+                        "(including automatic safe-resolution fallback). "
+                        f"Last error: {exc}. The system already retried with smaller square resolutions."
                     ) from exc
                 raise
 

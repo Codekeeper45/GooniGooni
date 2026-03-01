@@ -13,36 +13,46 @@ import { sessionFetch, ensureGenerationSession, readApiError } from "../utils/se
 import { configManager, type ModelId } from "../utils/configManager";
 import { useGallery } from "./GalleryContext";
 
-// ─── Status text mapping ──────────────────────────────────────────────────────
+// Status text mapping
 
 const STAGE_LABELS: Record<string, string> = {
-  queued: "Waiting for GPU worker…",
-  pending: "Waiting for GPU worker…",
-  dispatch: "Dispatching to worker…",
-  model_resolve: "Resolving model…",
-  pipeline_materialize: "Loading AI model…",
-  loading_model: "Loading AI model…",
-  preprocessing: "Preparing inputs…",
-  generating_video: "Generating video…",
-  generating_image: "Generating image…",
-  generating: "Generating…",
-  inference: "Generating…",
-  artifact_write: "Saving result…",
-  postprocessing: "Encoding result…",
-  saving: "Saving to gallery…",
+  queued: "Waiting for GPU worker...",
+  pending: "Waiting for GPU worker...",
+  dispatch: "Dispatching to worker...",
+  model_resolve: "Resolving model...",
+  pipeline_materialize: "Loading AI model...",
+  loading_model: "Loading AI model...",
+  preprocessing: "Preparing inputs...",
+  generating_video: "Generating video...",
+  generating_image: "Generating image...",
+  generating: "Generating...",
+  inference: "Generating...",
+  artifact_write: "Saving result...",
+  postprocessing: "Encoding result...",
+  saving: "Saving to gallery...",
   done: "Complete!",
   failed: "Generation failed",
 };
 
 function getStatusText(stage: string | null, generationType: GenerationType): string {
-  if (!stage) return "Initializing…";
+  if (!stage) return "Initializing...";
   if (stage === "generating") {
-    return generationType === "video" ? "Generating video…" : "Generating image…";
+    return generationType === "video" ? "Generating video..." : "Generating image...";
   }
   return STAGE_LABELS[stage] ?? `Processing: ${stage}`;
 }
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+function parseEffectiveSize(stageDetail: string | null | undefined): { width: number; height: number } | null {
+  if (!stageDetail || !stageDetail.startsWith("ok:")) return null;
+  const match = stageDetail.match(/^ok:(\d+)x(\d+)$/);
+  if (!match) return null;
+  return {
+    width: Number(match[1]),
+    height: Number(match[2]),
+  };
+}
+
+// Types
 
 interface GenerationContextType {
   // Config
@@ -117,7 +127,7 @@ interface GenerationContextType {
   imgDenoisingStrength: number;
   setImgDenoisingStrength: (d: number) => void;
 
-  // Runtime State
+  // State
   status: GenerationStatus;
   progress: number;
   statusText: string;
@@ -139,7 +149,7 @@ interface GenerationContextType {
 
 const GenerationContext = createContext<GenerationContextType | null>(null);
 
-// ─── Provider ─────────────────────────────────────────────────────────────────
+// Provider
 
 const STORAGE_KEY = "mg_generation_state_v2";
 const POLL_INTERVAL_MS = 2000;
@@ -150,7 +160,7 @@ const FATAL_POLL_HTTP_CODES = new Set([401, 404, 410, 422, 500, 502, 503]);
 export function GenerationProvider({ children }: { children: React.ReactNode }) {
   const { addToGallery } = useGallery();
 
-  // Load state from localStorage
+  // State
   const savedState = (() => {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
@@ -169,18 +179,30 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
     }
   })();
 
-  // ── State ───────────────────────────────────────────────────────────────────
-  const [generationType, setGenerationType] = useState<GenerationType>(savedState?.generationType ?? "video");
-  const [videoModel, setVideoModel] = useState<VideoModel>(savedState?.videoModel ?? "anisora");
-  const [imageModel, setImageModel] = useState<ImageModel>(savedState?.imageModel ?? "pony");
+  const initialGenerationType = (savedState?.generationType ?? "video") as GenerationType;
+  const initialVideoModel = (savedState?.videoModel ?? "anisora") as VideoModel;
+  const initialImageModel = (savedState?.imageModel ?? "pony") as ImageModel;
+  const savedWidth = typeof savedState?.width === "number" ? savedState.width : undefined;
+  const savedHeight = typeof savedState?.height === "number" ? savedState.height : undefined;
+  const initialImageResolution = configManager.normalizeImageResolution(
+    initialImageModel,
+    savedWidth ?? configManager.getPreferredInitialResolution(initialImageModel).width,
+    savedHeight ?? configManager.getPreferredInitialResolution(initialImageModel).height,
+  );
+  const initialWidth = initialGenerationType === "image" ? initialImageResolution.width : (savedWidth ?? 720);
+  const initialHeight = initialGenerationType === "image" ? initialImageResolution.height : (savedHeight ?? 1280);
+  // State
+  const [generationType, setGenerationType] = useState<GenerationType>(initialGenerationType);
+  const [videoModel, setVideoModel] = useState<VideoModel>(initialVideoModel);
+  const [imageModel, setImageModel] = useState<ImageModel>(initialImageModel);
   const [videoMode, setVideoMode] = useState<VideoMode>(savedState?.videoMode ?? "t2v");
   const [imageMode, setImageMode] = useState<ImageMode>(savedState?.imageMode ?? "txt2img");
   const [useAdvancedSettings, setUseAdvancedSettings] = useState(savedState?.useAdvancedSettings ?? false);
 
   const [prompt, setPrompt] = useState(savedState?.prompt ?? "");
   const [negativePrompt, setNegativePrompt] = useState(savedState?.negativePrompt ?? "");
-  const [width, setWidth] = useState(savedState?.width ?? 720);
-  const [height, setHeight] = useState(savedState?.height ?? 1280);
+  const [width, setWidth] = useState(initialWidth);
+  const [height, setHeight] = useState(initialHeight);
   const [seed, setSeed] = useState(savedState?.seed ?? -1);
   const [outputFormat, setOutputFormat] = useState(savedState?.outputFormat ?? "mp4");
 
@@ -217,8 +239,16 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
 
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const abortRef = useRef(false);
+  const requestSizeRef = useRef<{ width: number; height: number }>({ width: initialWidth, height: initialHeight });
 
-  // ── Persistence Effect ──────────────────────────────────────────────────────
+  useEffect(() => {
+    if (generationType !== "image") return;
+    const normalized = configManager.normalizeImageResolution(imageModel, width, height);
+    if (!normalized.changed) return;
+    setWidth(normalized.width);
+    setHeight(normalized.height);
+  }, [generationType, imageModel]);
+  // Persistence Effect
   useEffect(() => {
     const state = {
       generationType, videoModel, imageModel, videoMode, imageMode, useAdvancedSettings,
@@ -238,7 +268,7 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
     status, progress, statusText, stageDetail, error, result, taskId, history
   ]);
 
-  // ── Derived ─────────────────────────────────────────────────────────────────
+  // Derived
   const currentModelId: ModelId = generationType === "video" ? videoModel : imageModel;
   const currentMode = generationType === "video" ? videoMode : imageMode;
   const currentModelLabel = generationType === "video" 
@@ -251,7 +281,7 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
     steps: generationType === "video" ? videoSteps : imageSteps,
   });
 
-  // ── Polling Logic ───────────────────────────────────────────────────────────
+  // Polling Logic
   const stopPolling = useCallback(() => {
     if (pollIntervalRef.current) {
       clearInterval(pollIntervalRef.current);
@@ -329,19 +359,23 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
           stopPolling();
           const resultUrl = data.result_url ?? `/api/results/${tid}`;
           const previewUrl = data.preview_url;
+          const requestedSize = requestSizeRef.current ?? { width, height };
+          const finalSize = parseEffectiveSize(data.stage_detail) ?? requestedSize;
 
           const res = {
             url: resultUrl,
             thumbnailUrl: previewUrl ?? undefined,
             seed: resolvedSeed,
-            width, height, prompt,
+            width: finalSize.width,
+            height: finalSize.height,
+            prompt,
             model: currentModelLabel,
             type: generationType,
           };
           setResult(res);
           setStatus("done");
           setProgress(100);
-          setStageDetail("ok");
+          setStageDetail(typeof data.stage_detail === "string" ? data.stage_detail : "ok");
 
           addToGallery({
             id: tid,
@@ -350,11 +384,19 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
             prompt,
             type: generationType,
             model: currentModelLabel,
-            width, height, seed: resolvedSeed,
+            width: finalSize.width,
+            height: finalSize.height,
+            seed: resolvedSeed,
             createdAt: new Date(),
           });
 
-          setHistory(prev => prev.map(h => h.taskId === tid ? { ...h, status: "done", thumbnailUrl: previewUrl ?? resultUrl } : h));
+          setHistory(prev => prev.map(h => h.taskId === tid ? {
+            ...h,
+            status: "done",
+            width: finalSize.width,
+            height: finalSize.height,
+            thumbnailUrl: previewUrl ?? resultUrl,
+          } : h));
         } else if (data.status === "failed") {
           failPolling(data.error_msg ?? "Generation failed.");
         }
@@ -381,25 +423,35 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
     };
   }, []); // Run once on mount
 
-  // ── Actions ─────────────────────────────────────────────────────────────────
+  // Actions
   const generate = useCallback(async () => {
     if (!prompt.trim() || status === "generating") return;
 
     setStatus("generating");
     setProgress(0);
-    setStatusText("Initializing…");
+    setStatusText("Initializing...");
     setStageDetail("");
     setError(null);
     setResult(null);
 
-    const resolvedSeed = seed === -1 ? Math.floor(Math.random() * 2147483647) : seed;
+    const normalizedSize = generationType === "image"
+      ? configManager.normalizeImageResolution(imageModel, width, height)
+      : { width, height, changed: false };
+    const requestWidth = normalizedSize.width;
+    const requestHeight = normalizedSize.height;
+    requestSizeRef.current = { width: requestWidth, height: requestHeight };
+    if (generationType === "image" && normalizedSize.changed) {
+      setWidth(requestWidth);
+      setHeight(requestHeight);
+    }
 
+    const resolvedSeed = seed === -1 ? Math.floor(Math.random() * 2147483647) : seed;
     const historyItem: HistoryItem = {
       id: Date.now().toString(),
       prompt,
       type: generationType,
       model: currentModelLabel,
-      width, height, seed: resolvedSeed,
+      width: requestWidth, height: requestHeight, seed: resolvedSeed,
       createdAt: new Date(),
       status: "pending",
     };
@@ -408,7 +460,7 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
     try {
       await ensureGenerationSession();
       
-      const values: any = { prompt, negative_prompt: negativePrompt, width, height, seed: resolvedSeed, output_format: outputFormat };
+      const values: any = { prompt, negative_prompt: negativePrompt, width: requestWidth, height: requestHeight, seed: resolvedSeed, output_format: outputFormat };
       if (generationType === "video") {
         Object.assign(values, { num_frames: numFrames, fps, steps: videoSteps, guidance_scale: guidanceScale, cfg_scale: cfgScaleVideo, reference_strength: referenceStrength, lighting_variant: lightingVariant, denoising_strength: denoisingStrength });
         if (videoMode === "i2v") values.reference_image = referenceImage;
@@ -442,7 +494,7 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
     prompt, status, seed, generationType, currentModelLabel, width, height, negativePrompt, outputFormat,
     numFrames, fps, videoSteps, guidanceScale, cfgScaleVideo, referenceStrength, lightingVariant, denoisingStrength,
     videoMode, referenceImage, firstFrameImage, lastFrameImage, arbitraryFrames,
-    imageSteps, cfgScaleImage, clipSkip, sampler, imageGuidanceScale, imgDenoisingStrength, imageMode,
+    imageSteps, cfgScaleImage, clipSkip, sampler, imageGuidanceScale, imgDenoisingStrength, imageMode, imageModel,
     currentModelId, currentMode, startPolling
   ]);
 
