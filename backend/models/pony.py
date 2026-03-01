@@ -108,6 +108,22 @@ class PonyPipeline(BasePipeline):
                 "Pony decode produced unstable pixel values (NaN/Inf warning + low detail). "
                 "Retry with lower resolution/steps or a different seed."
             )
+            
+        # DEBUG LOGGING FOR GRAY SCREEN BUG:
+        import logging
+        logger = logging.getLogger("pony_debug")
+        logger.setLevel(logging.INFO)
+        sh = logging.StreamHandler()
+        logger.addHandler(sh)
+        unique_colors = len(np.unique(arr.reshape(-1, arr.shape[-1]), axis=0))
+        logger.warning(f"[PONY DEBUG] Dynamic range: {dynamic_range}")
+        logger.warning(f"[PONY DEBUG] Unique colors: {unique_colors}")
+        logger.warning(f"[PONY DEBUG] Invalid cast warning seen? {saw_invalid_cast_warning}")
+        try:
+            vae_dtype = str(pipe.vae.dtype)
+            logger.warning(f"[PONY DEBUG] VAE dtype: {vae_dtype}")
+        except: pass
+            
         return image
 
     @staticmethod
