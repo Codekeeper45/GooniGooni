@@ -11,6 +11,8 @@ set -e
 DOCKERHUB_USER="${DOCKERHUB_USER:-YOUR_DOCKERHUB_USERNAME}"
 IMAGE="${DOCKERHUB_USER}/gooni-gooni:latest"
 CONTAINER_NAME="gooni"
+ENV_FILE="/opt/gooni/admin.env"
+RESULTS_DIR="/opt/gooni/results"
 
 echo "=== Gooni Gooni — Deployment Script ==="
 echo "Image: $IMAGE"
@@ -40,12 +42,23 @@ else
   echo "[3/4] No old container to stop"
 fi
 
+# 3.5 Ensure runtime dirs/env exist
+echo "[3.5/4] Checking runtime env file..."
+sudo mkdir -p "$RESULTS_DIR"
+if [ ! -f "$ENV_FILE" ]; then
+  echo "ERROR: missing $ENV_FILE"
+  echo "Create the env file with API_KEY, ADMIN_LOGIN, ADMIN_PASSWORD_HASH, ACCOUNTS_ENCRYPT_KEY, HF_TOKEN"
+  exit 1
+fi
+
 # 4. Start new container
 echo "[4/4] Starting container..."
 sudo docker run -d \
   --name $CONTAINER_NAME \
   --restart unless-stopped \
   -p 80:80 \
+  -v "$RESULTS_DIR:/results" \
+  --env-file "$ENV_FILE" \
   "$IMAGE"
 
 echo ""
