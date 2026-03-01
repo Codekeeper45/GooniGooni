@@ -229,6 +229,10 @@ async def _proxy_status_json(workspace: str, remote_task_id: str, api_key: str) 
         payload = resp.json()
         if isinstance(payload, dict):
             payload["task_id"] = f"{workspace}::{remote_task_id}"
+            if str(payload.get("status") or "") == "done":
+                payload["result_url"] = f"/api/results/{workspace}::{remote_task_id}"
+                if payload.get("preview_url"):
+                    payload["preview_url"] = f"/api/preview/{workspace}::{remote_task_id}"
         return payload
     except HTTPException:
         raise

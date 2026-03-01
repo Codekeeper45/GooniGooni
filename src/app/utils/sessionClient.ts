@@ -175,6 +175,15 @@ export function resolveMediaUrl(
 
   try {
     const parsed = new URL(rawUrl);
+    const modalMatch = parsed.hostname.match(/^([^.]+)--gooni-api\.modal\.run$/i);
+    if (modalMatch) {
+      const pathMatch = parsed.pathname.match(/^\/(results|preview)\/(.+)$/);
+      if (pathMatch) {
+        const [, kind, remoteTaskId] = pathMatch;
+        return `/api/${kind}/${modalMatch[1]}::${remoteTaskId}${parsed.search}`;
+      }
+    }
+
     const rewritten = rewritePath(parsed.pathname, parsed.search);
     if (!rewritten) {
       return rawUrl;
