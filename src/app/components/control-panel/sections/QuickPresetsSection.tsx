@@ -16,7 +16,7 @@ const DURATION_PRESETS = [
 const ASPECT_PRESETS = [
   { label: "📱 9:16", width: 720, height: 1280 },
   { label: "🖥 16:9", width: 1280, height: 720 },
-  { label: "⬛ 1:1", width: 896, height: 896 },
+  { label: "⬛ 1:1", width: 1024, height: 1024 },
   { label: "📱 4:5", width: 896, height: 1120 },
   { label: "🌊 16:10", width: 1152, height: 720 },
 ];

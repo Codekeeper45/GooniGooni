@@ -56,9 +56,6 @@ class PonyPipeline(BasePipeline):
             self.hf_model_id,
             **pipe_kwargs,
         )
-        # Fix for NaN fp16 VAE outputs (SDXL VAE bug on float16)
-        if hasattr(self._txt2img, "vae") and self._txt2img.vae is not None:
-            self._txt2img.vae = self._txt2img.vae.to(dtype=torch.float32)
 
         self._txt2img.enable_model_cpu_offload()
         self._img2img = StableDiffusionXLImg2ImgPipeline.from_pipe(self._txt2img)
@@ -80,9 +77,6 @@ class PonyPipeline(BasePipeline):
 
     @staticmethod
     def _run_pipe_checked(pipe, **kwargs) -> Image.Image:
-        # SDXL VAE decode is more stable in fp32.
-        if hasattr(pipe, "vae") and pipe.vae is not None:
-            pipe.vae.to(dtype=torch.float32)
 
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always", RuntimeWarning)
