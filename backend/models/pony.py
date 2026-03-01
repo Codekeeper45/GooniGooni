@@ -220,7 +220,7 @@ class PonyPipeline(BasePipeline):
         height = request.get("height", 1024)
         steps = request.get("steps", 30)
         cfg_scale = request.get("cfg_scale", 6.0)
-        sampler = request.get("sampler", "Euler a")
+        sampler = request.get("sampler", "DPM++ 2M Karras")
         clip_skip = request.get("clip_skip", 2)
         denoising_strength = request.get("denoising_strength", 0.7)
 
