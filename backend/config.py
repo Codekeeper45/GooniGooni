@@ -161,7 +161,7 @@ MODELS_SCHEMA = [
         "parameters_schema": {
             "steps": {"type": "int", "default": 30, "min": 20, "max": 60},
             "cfg_scale": {"type": "float", "default": 6.0, "min": 1.0, "max": 12.0},
-            "sampler": {"type": "enum", "options": ["Euler a", "DPM++ 2M Karras", "DPM++ SDE Karras"], "default": "Euler a"},
+            "sampler": {"type": "enum", "options": ["Euler a", "DPM++ 2M Karras", "DPM++ SDE Karras"], "default": "DPM++ 2M Karras"},
             "clip_skip": {"type": "int", "default": 2, "min": 1, "max": 4},
             "denoising_strength": {"type": "float", "default": 0.7, "min": 0.0, "max": 1.0},
             "width": {"type": "int", "default": 1024},
