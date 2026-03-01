@@ -4,10 +4,23 @@ function normalizeBase(value: string): string {
   return value.trim().replace(/\/$/, "");
 }
 
+function shouldUseEnvApiFallback(): boolean {
+  if (typeof window === "undefined") {
+    return false;
+  }
+  const host = window.location.hostname.toLowerCase();
+  return (
+    host === "localhost" ||
+    host === "127.0.0.1" ||
+    host.endsWith(".local") ||
+    host.endsWith(".modal.run")
+  );
+}
+
 function getApiBases(): string[] {
   const bases: string[] = ["/api"];
   const envBase = normalizeBase(API_URL);
-  if (envBase && !bases.includes(envBase)) {
+  if (envBase && shouldUseEnvApiFallback() && !bases.includes(envBase)) {
     bases.push(envBase);
   }
   return bases;
@@ -83,12 +96,12 @@ async function fetchWithFallback(path: string, init: RequestInit): Promise<Respo
     const url = buildUrl(base, path);
     try {
       const response = await fetch(url, init);
-      // If /api is unavailable in local dev (404/502), fallback to env URL.
+      // If /api is unavailable in local dev, fallback to env URL.
       const canFallback = index < bases.length - 1;
       if (
         canFallback &&
         base === "/api" &&
-        (response.status === 404 || response.status === 502 || response.status === 503)
+        response.status === 404
       ) {
         continue;
       }

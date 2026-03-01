@@ -121,7 +121,7 @@ def test_rate_limit_threshold_enforced(monkeypatch):
     from admin_security import verify_admin_key_header
 
     monkeypatch.setenv("ADMIN_KEY", "x" * 24)
-    monkeypatch.setattr(admin_security, "RATE_LIMIT", 2)
+    monkeypatch.setattr(admin_security, "RATE_LIMIT_AUTH", 2)
 
     dep = verify_admin_key_header()
     req = DummyRequest(host="10.0.0.5")
@@ -138,7 +138,7 @@ def test_rate_limit_precedence_over_bad_key(monkeypatch):
     from admin_security import verify_admin_key_header
 
     monkeypatch.setenv("ADMIN_KEY", "x" * 24)
-    monkeypatch.setattr(admin_security, "RATE_LIMIT", 1)
+    monkeypatch.setattr(admin_security, "RATE_LIMIT_AUTH", 1)
 
     dep = verify_admin_key_header()
     req = DummyRequest(host="10.0.0.7")
@@ -185,6 +185,64 @@ def test_verify_admin_login_password_rejects_invalid(monkeypatch):
         verify_admin_login_password(req, "admin", "wrong-pass")
     assert exc.value.status_code == 403
     assert exc.value.detail["code"] == "admin_credentials_invalid"
+
+
+def test_verify_admin_login_password_rate_limits_failed_attempts_only(monkeypatch):
+    import admin_security
+    from admin_security import verify_admin_login_password
+
+    monkeypatch.setenv("ADMIN_LOGIN", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD_HASH", _make_pbkdf2_hash("secret-pass"))
+    monkeypatch.delenv("ADMIN_KEY", raising=False)
+    monkeypatch.setattr(admin_security, "RATE_LIMIT_LOGIN_FAILURE", 2)
+
+    req = DummyRequest(host="10.0.0.9")
+
+    with pytest.raises(HTTPException) as exc1:
+        verify_admin_login_password(req, "admin", "wrong-1")
+    assert exc1.value.status_code == 403
+
+    with pytest.raises(HTTPException) as exc2:
+        verify_admin_login_password(req, "admin", "wrong-2")
+    assert exc2.value.status_code == 403
+
+    with pytest.raises(HTTPException) as exc3:
+        verify_admin_login_password(req, "admin", "wrong-3")
+    assert exc3.value.status_code == 429
+    assert exc3.value.detail["code"] == "admin_login_rate_limited"
+
+    assert verify_admin_login_password(req, "admin", "secret-pass") == "10.0.0.9"
+
+
+def test_verify_admin_login_password_success_clears_failure_counter(monkeypatch):
+    import admin_security
+    from admin_security import verify_admin_login_password
+
+    monkeypatch.setenv("ADMIN_LOGIN", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD_HASH", _make_pbkdf2_hash("secret-pass"))
+    monkeypatch.delenv("ADMIN_KEY", raising=False)
+    monkeypatch.setattr(admin_security, "RATE_LIMIT_LOGIN_FAILURE", 2)
+
+    req = DummyRequest(host="10.0.0.10")
+
+    with pytest.raises(HTTPException) as exc1:
+        verify_admin_login_password(req, "admin", "wrong-1")
+    assert exc1.value.status_code == 403
+
+    assert verify_admin_login_password(req, "admin", "secret-pass") == "10.0.0.10"
+
+    with pytest.raises(HTTPException) as exc2:
+        verify_admin_login_password(req, "admin", "wrong-2")
+    assert exc2.value.status_code == 403
+
+    with pytest.raises(HTTPException) as exc3:
+        verify_admin_login_password(req, "admin", "wrong-3")
+    assert exc3.value.status_code == 403
+
+    with pytest.raises(HTTPException) as exc4:
+        verify_admin_login_password(req, "admin", "wrong-4")
+    assert exc4.value.status_code == 429
+    assert exc4.value.detail["code"] == "admin_login_rate_limited"
 
 
 def test_verify_admin_login_password_requires_explicit_env(monkeypatch):
