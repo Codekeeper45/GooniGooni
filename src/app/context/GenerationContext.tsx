@@ -154,8 +154,10 @@ const GenerationContext = createContext<GenerationContextType | null>(null);
 const STORAGE_KEY = "mg_generation_state_v2";
 const POLL_INTERVAL_MS = 2000;
 const MAX_POLL_ERRORS = 5;
+const MAX_TRANSIENT_POLL_ERRORS = 12;
 const WORKER_QUEUE_STALL_TIMEOUT_MS = 130_000;
-const FATAL_POLL_HTTP_CODES = new Set([401, 404, 410, 422, 500, 502, 503]);
+const FATAL_POLL_HTTP_CODES = new Set([401, 404, 410, 422, 500]);
+const TRANSIENT_POLL_HTTP_CODES = new Set([502, 503]);
 
 export function GenerationProvider({ children }: { children: React.ReactNode }) {
   const { addToGallery } = useGallery();
@@ -300,6 +302,7 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
     const startedAtMs = Date.now();
     let queuedAtMs: number | null = null;
     let includeResumeFlag = options?.resume === true;
+    let pollInFlight = false;
     setTaskId(tid);
 
         const failPolling = (message: string) => {
@@ -317,7 +320,8 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
     };
 
     const poll = async () => {
-      if (abortRef.current) return;
+      if (abortRef.current || pollInFlight) return;
+      pollInFlight = true;
       try {
         const statusPath = includeResumeFlag ? `/status/${tid}?resume=1` : `/status/${tid}`;
         const resp = await sessionFetch(statusPath, {}, { retryOn401: true });
@@ -325,12 +329,17 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
         if (!resp.ok) {
           const apiErr = await readApiError(resp, "Status check failed.");
           const message = `${apiErr.detail} ${apiErr.userAction}`.trim();
+          const isTransient = TRANSIENT_POLL_HTTP_CODES.has(resp.status);
           if (FATAL_POLL_HTTP_CODES.has(resp.status)) {
             failPolling(message || "Generation failed.");
             return;
           }
+          if (isTransient) {
+            setStatusText("Reconnecting to worker...");
+          }
           consecutiveErrors++;
-          if (consecutiveErrors >= MAX_POLL_ERRORS) {
+          const errorBudget = isTransient ? MAX_TRANSIENT_POLL_ERRORS : MAX_POLL_ERRORS;
+          if (consecutiveErrors >= errorBudget) {
             failPolling(message || "Connection to server lost.");
           }
           return;
@@ -410,9 +419,12 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
         }
       } catch (err: any) {
         consecutiveErrors++;
+        setStatusText("Reconnecting to worker...");
         if (consecutiveErrors >= MAX_POLL_ERRORS) {
           failPolling(err?.message || "Polling error.");
         }
+      } finally {
+        pollInFlight = false;
       }
     };
 
