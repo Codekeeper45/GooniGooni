@@ -24,22 +24,39 @@ class Phr00tPipeline(BasePipeline):
         self._pipeline = None
         self._i2v_pipeline = None
 
+    # Base Wan2.1 diffusers repo needed as a "shell" to get tokenizer, VAE, scheduler, etc.
+    # because WanTransformer3DModel.from_single_file() loads only the transformer weights.
+    BASE_DIFFUSERS_ID = "Wan-AI/Wan2.1-T2V-14B-Diffusers"
+
     def load(self, cache_path: str) -> None:
         if self._is_loaded_for_cache(cache_path):
             return
 
         from huggingface_hub import hf_hub_download
-        from diffusers import WanPipeline, WanImageToVideoPipeline
+        from diffusers import WanPipeline, WanImageToVideoPipeline, WanTransformer3DModel
 
+        # Step 1: download the single-file Phr00t checkpoint
         ckpt_path = hf_hub_download(
             repo_id=self.hf_repo_id,
             filename=self.hf_filename,
             cache_dir=cache_path,
         )
 
-        self._pipeline = WanPipeline.from_single_file(
+        # Step 2: load ONLY the transformer from the single file.
+        # WanPipeline.from_single_file() is NOT supported in diffusers 0.36+;
+        # the workaround is to inject the transformer into a pretrained base pipeline.
+        transformer = WanTransformer3DModel.from_single_file(
             ckpt_path,
             torch_dtype=torch.bfloat16,
+        )
+
+        # Step 3: build the full pipeline using base repo's tokenizer/VAE/scheduler,
+        # but override the transformer with our custom Phr00t weights.
+        self._pipeline = WanPipeline.from_pretrained(
+            self.BASE_DIFFUSERS_ID,
+            transformer=transformer,
+            torch_dtype=torch.bfloat16,
+            cache_dir=cache_path,
         )
         self._pipeline.enable_model_cpu_offload()
         if hasattr(self._pipeline, "vae"):

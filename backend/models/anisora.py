@@ -29,14 +29,11 @@ class AnisoraPipeline(BasePipeline):
         self._mark_loaded_for_cache(cache_path)
 
     def _common_kwargs(self) -> dict:
-        kwargs = {
+        return {
             "pretrained_model_name_or_path": self.hf_model_id,
             "cache_dir": self._cache_path,
             "torch_dtype": torch.bfloat16,
         }
-        if self.subfolder:
-            kwargs["subfolder"] = self.subfolder
-        return kwargs
 
     def _ensure_t2v(self) -> None:
         if self._t2v is not None:

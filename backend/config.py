@@ -47,7 +47,7 @@ ANISORA_SUBFOLDER = os.environ.get("ANISORA_SUBFOLDER", "")
 # Filename of the Phr00t single-file checkpoint to download (latest Mega-v12)
 PHR00T_FILENAME = os.environ.get(
     "PHR00T_FILENAME",
-    "wan2.2-rapid-mega-aio-nsfw-v12.2.safetensors",
+    "Mega-v12/wan2.2-rapid-mega-aio-nsfw-v12.2.safetensors",
 )
 
 # ─── GPU config ────────────────────────────────────────────────────────────────
@@ -89,8 +89,8 @@ WARMUP_TIMEOUT_SECONDS = int(os.environ.get("WARMUP_TIMEOUT_SECONDS", "25"))
 
 # Fixed video generation constraints (source-of-truth for backend validation/tests)
 VIDEO_FIXED_CONSTRAINTS = {
-    "anisora": {"steps": 8, "cfg_scale": None},
-    "phr00t": {"steps": 4, "cfg_scale": 1.0},
+    "anisora": {"steps": 50, "cfg_scale": 4.0},   # Optimal: 50 steps, CFG 4.0 (bfloat16 Wan2.1)
+    "phr00t": {"steps": 40, "cfg_scale": 7.0},    # Optimal: 40 steps, CFG 7.0 (WAN 2.2 Rapid)
 }
 
 # ─── Gallery defaults ──────────────────────────────────────────────────────────
@@ -113,8 +113,8 @@ MODELS_SCHEMA = [
         "modes": ["t2v", "i2v", "first_last_frame", "arbitrary_frame"],
         "default_mode": "t2v",
         "fixed_parameters": {
-            "steps": {"value": 8, "locked": True},
-            "guidance_scale": {"value": 1.0, "recommended": True},
+            "steps": {"value": 50, "locked": True, "description": "Optimal for Wan2.1 14B anime quality"},
+            "guidance_scale": {"value": 4.0, "locked": True, "description": "Optimal CFG for AniSora"},
         },
         "parameters_schema": {
             "num_frames": {"type": "int", "default": 81, "min": 49, "max": 161},
@@ -136,8 +136,8 @@ MODELS_SCHEMA = [
         "modes": ["t2v", "i2v", "first_last_frame"],
         "default_mode": "t2v",
         "fixed_parameters": {
-            "steps": {"value": 4, "locked": True},
-            "cfg_scale": {"value": 1.0, "locked": True},
+            "steps": {"value": 40, "locked": True, "description": "Optimal for WAN 2.2 Rapid quality"},
+            "cfg_scale": {"value": 7.0, "locked": True, "description": "Optimal CFG for WAN 2.2 Rapid prompt adherence"},
         },
         "parameters_schema": {
             "num_frames": {"type": "int", "default": 81, "min": 49, "max": 161},
