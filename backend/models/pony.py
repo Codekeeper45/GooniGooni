@@ -41,7 +41,7 @@ class PonyPipeline(BasePipeline):
 
         pipe_kwargs = dict(
             cache_dir=cache_path,
-            torch_dtype=torch.float16,
+            torch_dtype=torch.bfloat16,
             use_safetensors=True,
             low_cpu_mem_usage=False,
         )
@@ -49,21 +49,19 @@ class PonyPipeline(BasePipeline):
             pipe_kwargs["vae"] = AutoencoderKL.from_pretrained(
                 self.vae_model_id,
                 cache_dir=cache_path,
-                torch_dtype=torch.float16,
+                torch_dtype=torch.bfloat16,
             )
 
         self._txt2img = StableDiffusionXLPipeline.from_pretrained(
             self.hf_model_id,
             **pipe_kwargs,
-        )
+        ).to("cuda")
 
-        self._txt2img.enable_model_cpu_offload()
         self._img2img = StableDiffusionXLImg2ImgPipeline.from_pipe(self._txt2img)
 
         for pipe in (self._txt2img, self._img2img):
             if hasattr(pipe, "vae") and pipe.vae is not None:
                 pipe.vae.enable_slicing()
-                pipe.vae.enable_tiling()
 
         self._mark_loaded_for_cache(cache_path)
 
@@ -108,22 +106,6 @@ class PonyPipeline(BasePipeline):
                 "Pony decode produced unstable pixel values (NaN/Inf warning + low detail). "
                 "Retry with lower resolution/steps or a different seed."
             )
-            
-        # DEBUG LOGGING FOR GRAY SCREEN BUG:
-        import logging
-        logger = logging.getLogger("pony_debug")
-        logger.setLevel(logging.INFO)
-        sh = logging.StreamHandler()
-        logger.addHandler(sh)
-        unique_colors = len(np.unique(arr.reshape(-1, arr.shape[-1]), axis=0))
-        logger.warning(f"[PONY DEBUG] Dynamic range: {dynamic_range}")
-        logger.warning(f"[PONY DEBUG] Unique colors: {unique_colors}")
-        logger.warning(f"[PONY DEBUG] Invalid cast warning seen? {saw_invalid_cast_warning}")
-        try:
-            vae_dtype = str(pipe.vae.dtype)
-            logger.warning(f"[PONY DEBUG] VAE dtype: {vae_dtype}")
-        except: pass
-            
         return image
 
     @staticmethod
