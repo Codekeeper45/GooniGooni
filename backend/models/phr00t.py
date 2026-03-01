@@ -76,9 +76,14 @@ class Phr00tPipeline(BasePipeline):
         fps = request.get("fps", 16)
         lighting_variant = request.get("lighting_variant", "low_noise")
 
-        # Phr00t Rapid: fixed distilled settings.
-        steps = 4
-        cfg_scale = 1.0
+        # Source: https://huggingface.co/Wan-AI/Wan2.1-T2V-14B & Community feedback
+        # WAN 2.2 requires ~30-50 steps and a guidance scale of 5.0-9.0 for good prompt adherence
+        steps = int(request.get("num_inference_steps", 40))
+        cfg_scale = float(request.get("guidance_scale", 7.0))
+        
+        # Validation checks
+        steps = max(10, min(100, steps))
+        cfg_scale = max(1.0, min(20.0, cfg_scale))
 
         output_format = request.get("output_format", "mp4")
         out_path = result_file_path(task_id, output_format)

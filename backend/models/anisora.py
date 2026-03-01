@@ -79,10 +79,18 @@ class AnisoraPipeline(BasePipeline):
         negative_prompt = request.get("negative_prompt", "")
         width = request.get("width", 720)
         height = request.get("height", 1280)
+        
+        # Wan models strictly require resolutions to be multiples of 16 for the VAE Spatial Downsampling
+        width = (width // 16) * 16
+        height = (height // 16) * 16
+        
         num_frames = request.get("num_frames", 81)
-        steps = request.get("steps", 8) or 8
+        
+        # Source: https://github.com/IndexInnovation/Index-1.9B & Community feedback
+        # AniSora V3.2 (Wan based) relies on ~50 steps and 3.0-5.0 CFG for high quality
+        steps = int(request.get("steps", 50) or 50)
         fps = request.get("fps", 16)
-        guidance_scale = request.get("guidance_scale", 1.0)
+        guidance_scale = float(request.get("guidance_scale", 4.0))
 
         output_format = request.get("output_format", "mp4")
         out_path = result_file_path(task_id, output_format)

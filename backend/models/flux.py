@@ -68,8 +68,11 @@ class FluxPipeline(BasePipeline):
         negative_prompt = request.get("negative_prompt", "")
         width = request.get("width", 1024)
         height = request.get("height", 1024)
-        steps = request.get("steps", 25)
-        guidance_scale = request.get("guidance_scale", 3.5)
+        # Source: https://huggingface.co/black-forest-labs/FLUX.1-dev & Community feedback
+        # Flux.1 [dev] is a guidance-distilled model. It requires CFG ~3.5 and exactly 50 steps.
+        # Overriding user inputs (which default to SDXL standards) to ensure Flux functions correctly.
+        steps = 50 
+        guidance_scale = 3.5
         denoising_strength = request.get("denoising_strength", 0.7)
 
         output_format = request.get("output_format", "png")

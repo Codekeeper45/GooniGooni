@@ -37,7 +37,12 @@ class PonyPipeline(BasePipeline):
         if self._is_loaded_for_cache(cache_path):
             return
 
-        from diffusers import AutoencoderKL, StableDiffusionXLPipeline, StableDiffusionXLImg2ImgPipeline
+        from diffusers import (
+            AutoencoderKL, 
+            StableDiffusionXLPipeline, 
+            StableDiffusionXLImg2ImgPipeline,
+            DPMSolverMultistepScheduler
+        )
 
         pipe_kwargs = dict(
             cache_dir=cache_path,
@@ -56,6 +61,13 @@ class PonyPipeline(BasePipeline):
             self.hf_model_id,
             **pipe_kwargs,
         ).to("cuda")
+
+        # Pony models perform much better with DPM++ 2M Karras, especially at <40 steps
+        self._txt2img.scheduler = DPMSolverMultistepScheduler.from_config(
+            self._txt2img.scheduler.config,
+            use_karras_sigmas=True,
+            algorithm_type="sde-dpmsolver++"
+        )
 
         self._img2img = StableDiffusionXLImg2ImgPipeline.from_pipe(self._txt2img)
 
