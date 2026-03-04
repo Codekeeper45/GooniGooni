@@ -1,8 +1,9 @@
-import { Sparkles, Clock, Zap, Grid3x3, Settings } from "lucide-react";
+import { Sparkles, Clock, Zap, Grid3x3, Settings, Package, Play, Loader2, Power } from "lucide-react";
 import { useNavigate } from "react-router";
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import type React from "react";
 import { useGallery } from "../context/GalleryContext";
+import { ModelManager } from "./ModelManager";
 
 interface NavbarProps {
   onHistoryClick: () => void;
@@ -14,6 +15,53 @@ export function Navbar({ onHistoryClick, historyCount, onAdminClick }: NavbarPro
   const navigate = useNavigate();
   const { gallery } = useGallery();
   const galleryCount = gallery.length;
+  const isLocalModelManagerAvailable = import.meta.env.DEV;
+  const [modelsOpen, setModelsOpen] = useState(false);
+
+  // ComfyUI status for the launch button
+  const [comfyRunning, setComfyRunning] = useState<boolean | null>(null);
+  const [comfyFound, setComfyFound] = useState(false);
+  const [launching, setLaunching] = useState(false);
+
+  const checkComfyStatus = useCallback(async () => {
+    try {
+      const res = await fetch("/local-api/comfyui/status");
+      const data = await res.json();
+      setComfyRunning(data.comfyuiRunning ?? false);
+      setComfyFound(data.comfyuiFound ?? false);
+    } catch {
+      setComfyRunning(false);
+      setComfyFound(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!isLocalModelManagerAvailable) {
+      setComfyRunning(false);
+      setComfyFound(false);
+      return;
+    }
+    checkComfyStatus();
+    const interval = setInterval(checkComfyStatus, 10000);
+    return () => clearInterval(interval);
+  }, [checkComfyStatus, isLocalModelManagerAvailable]);
+
+  const handleLaunchComfy = async () => {
+    if (!isLocalModelManagerAvailable) return;
+    setLaunching(true);
+    try {
+      const response = await fetch("/local-api/comfyui/launch", { method: "POST" });
+      if (!response.ok) return;
+      // Poll until running
+      let attempts = 0;
+      const poll = setInterval(async () => {
+        attempts++;
+        await checkComfyStatus();
+        if (attempts >= 30) clearInterval(poll);
+      }, 2000);
+    } catch {}
+    setLaunching(false);
+  };
 
   return (
     <header
@@ -56,6 +104,25 @@ export function Navbar({ onHistoryClick, historyCount, onAdminClick }: NavbarPro
 
       {/* Right actions */}
       <div className="flex items-center gap-1">
+        {isLocalModelManagerAvailable && (
+          <>
+            {/* ComfyUI Launch Button */}
+            <ComfyUIButton
+              running={comfyRunning}
+              found={comfyFound}
+              launching={launching}
+              onLaunch={handleLaunchComfy}
+            />
+
+            <div className="w-px h-6 mx-1" style={{ background: "rgba(255,255,255,0.06)" }} />
+
+            <NavButton
+              icon={<Package className="w-4 h-4" />}
+              label="Models"
+              onClick={() => setModelsOpen(true)}
+            />
+          </>
+        )}
         <NavButton
           icon={<Grid3x3 className="w-4 h-4" />}
           label="Gallery"
@@ -78,6 +145,11 @@ export function Navbar({ onHistoryClick, historyCount, onAdminClick }: NavbarPro
           onClick={() => navigate("/admin")}
         />
       </div>
+
+      {/* Model Manager Dialog */}
+      {isLocalModelManagerAvailable && modelsOpen && (
+        <ModelManager open={modelsOpen} onOpenChange={setModelsOpen} />
+      )}
     </header>
   );
 }
@@ -117,6 +189,85 @@ function NavButton({
           {badge}
         </span>
       )}
+    </button>
+  );
+}
+
+// ─── ComfyUI Launch Button ───────────────────────────────────────────────────
+
+function ComfyUIButton({
+  running,
+  found,
+  launching,
+  onLaunch,
+}: {
+  running: boolean | null;
+  found: boolean;
+  launching: boolean;
+  onLaunch: () => void;
+}) {
+  // Still loading status
+  if (running === null) {
+    return (
+      <div
+        className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm"
+        style={{ color: "#4B5563", fontFamily: "'Space Grotesk', sans-serif" }}
+      >
+        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+        <span className="hidden sm:inline">ComfyUI</span>
+      </div>
+    );
+  }
+
+  // Running — green dot
+  if (running) {
+    return (
+      <div
+        className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm"
+        style={{ color: "#10B981", fontFamily: "'Space Grotesk', sans-serif" }}
+      >
+        <span className="relative flex h-2.5 w-2.5">
+          <span className="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75" style={{ background: "#10B981" }} />
+          <span className="relative inline-flex rounded-full h-2.5 w-2.5" style={{ background: "#10B981" }} />
+        </span>
+        <span className="hidden sm:inline">ComfyUI</span>
+      </div>
+    );
+  }
+
+  // Not running — show launch button
+  return (
+    <button
+      onClick={onLaunch}
+      disabled={launching || !found}
+      className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-all duration-200 disabled:opacity-40"
+      style={{
+        background: found
+          ? "linear-gradient(135deg, #10B981, #059669)"
+          : "rgba(255,255,255,0.03)",
+        color: found ? "#fff" : "#4B5563",
+        boxShadow: found ? "0 2px 8px rgba(16,185,129,0.25)" : "none",
+        border: found ? "none" : "1px solid rgba(255,255,255,0.06)",
+        fontFamily: "'Space Grotesk', sans-serif",
+      }}
+      title={found ? "Запустить ComfyUI" : "ComfyUI не найден — укажите COMFYUI_PATH в .env.local"}
+      onMouseEnter={(e) => {
+        if (found && !launching) {
+          e.currentTarget.style.boxShadow = "0 4px 12px rgba(16,185,129,0.35)";
+          e.currentTarget.style.transform = "translateY(-1px)";
+        }
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.boxShadow = found ? "0 2px 8px rgba(16,185,129,0.25)" : "none";
+        e.currentTarget.style.transform = "none";
+      }}
+    >
+      {launching ? (
+        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+      ) : (
+        <Play className="w-3.5 h-3.5" />
+      )}
+      <span className="hidden sm:inline">{launching ? "Запуск..." : "ComfyUI"}</span>
     </button>
   );
 }
