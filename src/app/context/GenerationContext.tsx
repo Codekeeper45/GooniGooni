@@ -11,35 +11,45 @@ import type {
 import type { HistoryItem } from "../components/HistoryPanel";
 import { sessionFetch, ensureGenerationSession, readApiError, resolveMediaUrl } from "../utils/sessionClient";
 import { configManager, type ModelId } from "../utils/configManager";
+import { getPresetsForModel } from "../utils/presetManager";
 import { useGallery } from "./GalleryContext";
+import {
+  getAvailableModes,
+  getDefaultMode,
+  restoreMode,
+  checkEnvironmentSync,
+  type GenerationModeId,
+} from "../utils/environment";
+import { getAPIClient, type GenerationClient, type ProgressUpdate } from "../api/apiFactory";
+import { getActiveLoRAs } from "../utils/loraState";
 
 // Status text mapping
 
 const STAGE_LABELS: Record<string, string> = {
-  queued: "Waiting for GPU worker...",
-  pending: "Waiting for GPU worker...",
-  dispatch: "Dispatching to worker...",
-  model_resolve: "Resolving model...",
-  pipeline_materialize: "Loading AI model...",
-  loading_model: "Loading AI model...",
-  preprocessing: "Preparing inputs...",
-  generating_video: "Generating video...",
-  generating_image: "Generating image...",
-  generating: "Generating...",
-  inference: "Generating...",
-  artifact_write: "Saving result...",
-  postprocessing: "Encoding result...",
-  saving: "Saving to gallery...",
-  done: "Complete!",
-  failed: "Generation failed",
+  queued: "Ожидание GPU воркера...",
+  pending: "Ожидание GPU воркера...",
+  dispatch: "Отправка на воркер...",
+  model_resolve: "Загрузка модели...",
+  pipeline_materialize: "Загрузка AI модели...",
+  loading_model: "Загрузка AI модели...",
+  preprocessing: "Подготовка входных данных...",
+  generating_video: "Генерация видео...",
+  generating_image: "Генерация изображения...",
+  generating: "Генерация...",
+  inference: "Генерация...",
+  artifact_write: "Сохранение результата...",
+  postprocessing: "Кодирование результата...",
+  saving: "Сохранение в галерею...",
+  done: "Готово!",
+  failed: "Генерация не удалась",
 };
 
 function getStatusText(stage: string | null, generationType: GenerationType): string {
-  if (!stage) return "Initializing...";
+  if (!stage) return "Инициализация...";
   if (stage === "generating") {
-    return generationType === "video" ? "Generating video..." : "Generating image...";
+    return generationType === "video" ? "Генерация видео..." : "Генерация изображения...";
   }
-  return STAGE_LABELS[stage] ?? `Processing: ${stage}`;
+  return STAGE_LABELS[stage] ?? `Обработка: ${stage}`;
 }
 
 function parseEffectiveSize(stageDetail: string | null | undefined): { width: number; height: number } | null {
@@ -55,6 +65,10 @@ function parseEffectiveSize(stageDetail: string | null | undefined): { width: nu
 // Types
 
 interface GenerationContextType {
+  // Generation mode (local / remote)
+  generationMode: GenerationModeId;
+  setGenerationMode: (mode: GenerationModeId) => void;
+
   // Config
   generationType: GenerationType;
   setGenerationType: (t: GenerationType) => void;
@@ -133,6 +147,7 @@ interface GenerationContextType {
   statusText: string;
   stageDetail: string;
   error: string | null;
+  userAction: string | null;
   result: any;
   taskId: string | null;
   estSeconds: number;
@@ -162,6 +177,27 @@ const TRANSIENT_POLL_HTTP_CODES = new Set([502, 503]);
 
 export function GenerationProvider({ children }: { children: React.ReactNode }) {
   const { addToGallery } = useGallery();
+
+  // ── Hybrid Mode (local / remote) ───────────────────────────────────────────
+  const availableModes = getAvailableModes();
+  const envDefaultMode = getDefaultMode();
+  const [generationMode, setGenerationModeRaw] = useState<GenerationModeId>(
+    () => restoreMode(availableModes, envDefaultMode),
+  );
+
+  // Persist mode selection to sessionStorage on change
+  useEffect(() => {
+    try {
+      sessionStorage.setItem("generation_mode", generationMode);
+    } catch {
+      // sessionStorage unavailable — ignore
+    }
+  }, [generationMode]);
+
+  // Run environment sync check once on mount
+  useEffect(() => {
+    checkEnvironmentSync();
+  }, []);
 
   // State
   const savedState = (() => {
@@ -242,12 +278,48 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
   const [statusText, setStatusText] = useState(savedState?.statusText ?? "");
   const [stageDetail, setStageDetail] = useState(savedState?.stageDetail ?? "");
   const [error, setError] = useState<string | null>(savedState?.error ?? null);
+  const [userAction, setUserAction] = useState<string | null>(null);
   const [result, setResult] = useState<any>(savedState?.result ?? null);
   const [taskId, setTaskId] = useState<string | null>(savedState?.taskId ?? null);
   const [history, setHistory] = useState<HistoryItem[]>(savedState?.history ?? []);
 
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const abortRef = useRef(false);
+  const localClientRef = useRef<GenerationClient | null>(null);
+
+  // Cancellation-aware mode setter (FR-018, FR-026)
+  const handleSetGenerationMode = useCallback((newMode: GenerationModeId) => {
+    setGenerationModeRaw((prevMode) => {
+      if (prevMode === newMode) return prevMode;
+
+      // If there's an active generation, cancel it
+      if (status === "generating") {
+        // Cancel remote polling
+        if (pollIntervalRef.current) {
+          clearInterval(pollIntervalRef.current);
+          pollIntervalRef.current = null;
+        }
+        abortRef.current = true;
+
+        // Cancel local client if active
+        if (prevMode === "local" && localClientRef.current) {
+          localClientRef.current.cancelGeneration().catch(() => {});
+        }
+
+        // Reset generation state
+        setTimeout(() => {
+          setStatus("idle");
+          setProgress(0);
+          setStatusText("");
+          setError(null);
+          setStageDetail("");
+          console.info(`Generation cancelled — switched to ${newMode} mode`);
+        }, 0);
+      }
+
+      return newMode;
+    });
+  }, [status]);
   const requestSizeRef = useRef<{ width: number; height: number }>({ width: initialWidth, height: initialHeight });
 
   useEffect(() => {
@@ -257,6 +329,64 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
     setWidth(normalized.width);
     setHeight(normalized.height);
   }, [generationType, imageModel]);
+
+  // ── Auto-fill recommended params on image model change (US3) ───────────────
+  const prevImageModelRef = useRef<ImageModel>(initialImageModel);
+  useEffect(() => {
+    if (generationType !== "image") return;
+    if (imageModel === prevImageModelRef.current) return;
+    prevImageModelRef.current = imageModel;
+
+    const defaults = configManager.getModelDefaults(imageModel);
+    if (!defaults || Object.keys(defaults).length === 0) {
+      // Custom model without defaults — apply safe fallback
+      setImageSteps(20);
+      setCfgScaleImage(7);
+      setSampler("Euler a");
+      setClipSkip(2);
+      setImageGuidanceScale(3.5);
+      setImgDenoisingStrength(0.7);
+    } else {
+      if (defaults.steps !== undefined) setImageSteps(defaults.steps);
+      if (defaults.cfg_scale !== undefined) setCfgScaleImage(defaults.cfg_scale);
+      if (defaults.guidance_scale !== undefined) setImageGuidanceScale(defaults.guidance_scale);
+      if (defaults.sampler !== undefined) setSampler(defaults.sampler);
+      if (defaults.clip_skip !== undefined) setClipSkip(defaults.clip_skip);
+      if (defaults.denoising_strength !== undefined) setImgDenoisingStrength(defaults.denoising_strength);
+      if (defaults.width !== undefined) setWidth(defaults.width);
+      if (defaults.height !== undefined) setHeight(defaults.height);
+    }
+
+    // Preset-aware override (T020): if user has a preset for this model, prefer it
+    const presets = getPresetsForModel(imageModel);
+    if (presets.length > 0) {
+      const preset = presets[0]; // Use first (most recently saved) preset
+      const p = preset.parameters;
+      if (p.steps !== undefined) setImageSteps(p.steps);
+      if (p.cfg_scale !== undefined) setCfgScaleImage(p.cfg_scale);
+      if (p.sampler !== undefined) setSampler(p.sampler);
+      if (p.clip_skip !== undefined) setClipSkip(p.clip_skip);
+      if (p.width !== undefined) setWidth(p.width);
+      if (p.height !== undefined) setHeight(p.height);
+    }
+
+    // Quality tags prepopulation (T018)
+    const metadata = configManager.getModelMetadata(imageModel);
+    if (metadata?.quality_tags) {
+      const tags = metadata.quality_tags;
+      setPrompt((prev: string) => {
+        if (!prev.trim()) return tags + ", ";
+        if (prev.includes(tags)) return prev;
+        return tags + ", " + prev;
+      });
+    }
+
+    // Clear negative prompt when switching to Flux (no negative prompt support)
+    if (imageModel === "flux") {
+      setNegativePrompt("");
+    }
+  }, [generationType, imageModel]);
+
   // Persistence Effect
   useEffect(() => {
     const state = {
@@ -276,6 +406,16 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
     imageSteps, cfgScaleImage, clipSkip, sampler, imageGuidanceScale, imgDenoisingStrength,
     status, progress, statusText, stageDetail, error, result, taskId, history
   ]);
+
+  // Warn user before closing tab during active generation
+  useEffect(() => {
+    if (status !== "generating") return;
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [status]);
 
   // Derived
   const currentModelId: ModelId = generationType === "video" ? videoModel : imageModel;
@@ -308,11 +448,12 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
     let lastChangeAtMs = Date.now();
     setTaskId(tid);
 
-        const failPolling = (message: string) => {
+        const failPolling = (message: string, action?: string) => {
       stopPolling();
       setStatus("error");
       setStageDetail("failed");
       setError(message);
+      setUserAction(action ?? null);
       setHistory(prev =>
         prev.map(h =>
           h.taskId === tid
@@ -331,14 +472,14 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
         includeResumeFlag = false;
         if (!resp.ok) {
           const apiErr = await readApiError(resp, "Status check failed.");
-          const message = `${apiErr.detail} ${apiErr.userAction}`.trim();
+          const message = apiErr.detail;
           const isTransient = TRANSIENT_POLL_HTTP_CODES.has(resp.status);
           if (FATAL_POLL_HTTP_CODES.has(resp.status)) {
-            failPolling(message || "Generation failed.");
+            failPolling(message || "Generation failed.", apiErr.userAction);
             return;
           }
           if (isTransient) {
-            setStatusText("Reconnecting to worker...");
+            setStatusText("Переподключение к воркеру...");
           }
           consecutiveErrors++;
           const errorBudget = isTransient ? MAX_TRANSIENT_POLL_ERRORS : MAX_POLL_ERRORS;
@@ -362,7 +503,7 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
             lastStageSignature = sig;
             lastChangeAtMs = Date.now();
           } else if (Date.now() - lastChangeAtMs >= PROCESSING_STALL_TIMEOUT_MS) {
-            failPolling("Generation stalled: no progress detected for 5 minutes.");
+            failPolling("Генерация зависла: нет прогресса более 5 минут.");
             return;
           }
         }
@@ -380,7 +521,7 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
             queuedAtMs = Number.isFinite(createdAtMs) ? createdAtMs : startedAtMs;
           }
           if (Date.now() - queuedAtMs >= WORKER_QUEUE_STALL_TIMEOUT_MS) {
-            failPolling("Worker start timeout: no GPU worker picked up the task in time.");
+            failPolling("Таймаут ожидания: GPU воркер не взял задачу вовремя.");
             return;
           }
         }
@@ -417,6 +558,7 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
               prompt,
               type: generationType,
               model: currentModelLabel,
+              mode: "remote",
               width: finalSize.width,
               height: finalSize.height,
               seed: resolvedSeed,
@@ -434,13 +576,13 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
             thumbnailUrl: previewUrl || resultUrl,
           } : h));
         } else if (data.status === "failed") {
-          failPolling(data.error_msg ?? "Generation failed.");
+          failPolling(data.error_msg ?? "Генерация не удалась.");
         }
       } catch (err: any) {
         consecutiveErrors++;
-        setStatusText("Reconnecting to worker...");
+        setStatusText("Переподключение к воркеру...");
         if (consecutiveErrors >= MAX_POLL_ERRORS) {
-          failPolling(err?.message || "Polling error.");
+          failPolling(err?.message || "Ошибка опроса сервера.");
         }
       } finally {
         pollInFlight = false;
@@ -468,9 +610,13 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
 
     setStatus("generating");
     setProgress(0);
-    setStatusText("Initializing...");
+    setStatusText("Инициализация...");
     setStageDetail("");
     setError(null);
+    // Revoke old blob URL to prevent memory leak
+    if (result?.url?.startsWith("blob:")) {
+      URL.revokeObjectURL(result.url);
+    }
     setResult(null);
 
     const normalizedSize = generationType === "image"
@@ -496,6 +642,108 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
     };
     setHistory(prev => [historyItem, ...prev.slice(0, 49)]);
 
+    // ── Pre-generation VRAM check (US4/T025) ──────────────────────────────────
+    if (generationMode === "local") {
+      try {
+        const gpuResp = await fetch("/local-api/gpu");
+        if (gpuResp.ok) {
+          const gpuData = await gpuResp.json();
+          if (gpuData.detected && gpuData.vram_free_mb != null) {
+            const metadata = configManager.getModelMetadata(currentModelId);
+            const requiredMb = (metadata?.vram_min_gb ?? 6) * 1024;
+            if (gpuData.vram_free_mb < requiredMb) {
+              const freeMb = gpuData.vram_free_mb;
+              const freeGb = (freeMb / 1024).toFixed(1);
+              const reqGb = (requiredMb / 1024).toFixed(0);
+              const proceed = window.confirm(
+                `Недостаточно VRAM для ${currentModelLabel}.\nТребуется: ${reqGb} GB, доступно: ${freeGb} GB.\nПродолжить?`
+              );
+              if (!proceed) {
+                setStatus("idle");
+                setProgress(0);
+                setStatusText("");
+                setHistory(prev => prev.filter(h => h.id !== historyItem.id));
+                return;
+              }
+            }
+          }
+        }
+      } catch {
+        // GPU check failed — proceed without warning
+      }
+    }
+
+    // ── Local Mode dispatch (ComfyUI) ──────────────────────────────────────
+    if (generationMode === "local" && generationType === "image") {
+      try {
+        const client = await getAPIClient("local");
+
+        // Wire progress updates
+        client.onProgress((update: ProgressUpdate) => {
+          setProgress(update.percentage);
+          setStatusText(update.stage);
+        });
+
+        const localResult = await client.generate({
+          model: imageModel as "pony" | "flux",
+          prompt,
+          negative_prompt: negativePrompt || undefined,
+          width: requestWidth,
+          height: requestHeight,
+          seed: resolvedSeed,
+          steps: imageSteps,
+          cfg_scale: cfgScaleImage,
+          loras: getActiveLoRAs().length > 0 ? getActiveLoRAs() : undefined,
+        });
+
+        const res = {
+          url: localResult.imageData,
+          seed: resolvedSeed,
+          width: requestWidth,
+          height: requestHeight,
+          prompt,
+          model: currentModelLabel,
+          type: generationType,
+        };
+        setResult(res);
+        setStatus("done");
+        setProgress(100);
+        setStageDetail("ok");
+
+        try {
+          addToGallery({
+            id: localResult.generationId,
+            url: localResult.imageData,
+            prompt,
+            type: generationType,
+            model: currentModelLabel,
+            mode: "local",
+            width: requestWidth,
+            height: requestHeight,
+            seed: resolvedSeed,
+            createdAt: new Date(),
+          });
+        } catch (e) {
+          console.error("addToGallery failed:", e);
+        }
+
+        setHistory(prev => prev.map(h => h.id === historyItem.id ? {
+          ...h,
+          status: "done",
+          taskId: localResult.generationId,
+          thumbnailUrl: localResult.imageData,
+        } : h));
+      } catch (err: any) {
+        setStatus("error");
+        setStageDetail("failed");
+        setError(err.message);
+        setUserAction(err.userAction ?? null);
+        setHistory(prev => prev.map(h => h.id === historyItem.id ? { ...h, status: "failed", error: err.message } : h));
+      }
+      return;
+    }
+
+    // ── Remote Mode dispatch (Modal backend) ───────────────────────────────
     try {
       await ensureGenerationSession();
       
@@ -515,7 +763,9 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
 
       if (!resp.ok) {
         const apiErr = await readApiError(resp, "Fail");
-        throw new Error(`${apiErr.detail} ${apiErr.userAction}`.trim());
+        const err = new Error(apiErr.detail);
+        (err as any).userAction = apiErr.userAction;
+        throw err;
       }
 
       const data = await resp.json();
@@ -527,6 +777,7 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
       setStatus("error");
       setStageDetail("failed");
       setError(err.message);
+      setUserAction(err.userAction ?? null);
       setHistory(prev => prev.map(h => h.id === historyItem.id ? { ...h, status: "failed", error: err.message } : h));
     }
   }, [
@@ -534,13 +785,14 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
     numFrames, fps, videoSteps, guidanceScale, cfgScaleVideo, referenceStrength, lightingVariant, denoisingStrength,
     videoMode, referenceImage, firstFrameImage, lastFrameImage, arbitraryFrames,
     imageSteps, cfgScaleImage, clipSkip, sampler, imageGuidanceScale, imgDenoisingStrength, imageMode, imageModel,
-    currentModelId, currentMode, startPolling
+    currentModelId, currentMode, startPolling, generationMode, addToGallery
   ]);
 
   const retry = useCallback(() => {
     stopPolling();
     setStatus("idle");
     setError(null);
+    setUserAction(null);
   }, [stopPolling]);
 
   const regenerate = useCallback(() => {
@@ -549,6 +801,7 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
   }, [stopPolling, generate]);
 
   const value = {
+    generationMode, setGenerationMode: handleSetGenerationMode,
     generationType, setGenerationType,
     videoModel, setVideoModel,
     imageModel, setImageModel,
@@ -580,7 +833,7 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
     sampler, setSampler,
     imageGuidanceScale, setImageGuidanceScale,
     imgDenoisingStrength, setImgDenoisingStrength,
-    status, progress, statusText, stageDetail, error, result, taskId, estSeconds,
+    status, progress, statusText, stageDetail, error, userAction, result, taskId, estSeconds,
     generate, retry, regenerate,
     history, setHistory
   };

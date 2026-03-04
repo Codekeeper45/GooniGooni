@@ -5,8 +5,12 @@
  */
 
 import type React from "react";
+import { useState } from "react";
 import { RefreshCw, Upload, X } from "lucide-react";
 import { ParamLabel } from "./ParamLabel";
+
+const MAX_FILE_SIZE_MB = 12;
+const MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024;
 
 interface ImageUploaderProps {
   image: string | null;
@@ -20,11 +24,23 @@ interface ImageUploaderProps {
 export function ImageUploader({
   image, onUpload, onRemove, fileRef, label, disabled = false,
 }: ImageUploaderProps) {
+  const [sizeError, setSizeError] = useState<string | null>(null);
+
+  const validateSize = (file: File): boolean => {
+    if (file.size > MAX_FILE_SIZE_BYTES) {
+      setSizeError(`File too large (${(file.size / 1024 / 1024).toFixed(1)} MB). Max ${MAX_FILE_SIZE_MB} MB.`);
+      return false;
+    }
+    setSizeError(null);
+    return true;
+  };
+
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     if (disabled) return;
     const file = e.dataTransfer.files?.[0];
     if (file && file.type.startsWith("image/")) {
+      if (!validateSize(file)) return;
       const reader = new FileReader();
       reader.onload = (ev) => onUpload(ev.target?.result as string);
       reader.readAsDataURL(file);
@@ -33,6 +49,7 @@ export function ImageUploader({
 
   const handleFile = (file: File) => {
     if (!file.type.startsWith("image/")) return;
+    if (!validateSize(file)) return;
     const reader = new FileReader();
     reader.onload = (ev) => onUpload(ev.target?.result as string);
     reader.readAsDataURL(file);
@@ -111,8 +128,11 @@ export function ImageUploader({
             <p className="text-sm" style={{ color: "#9CA3AF" }}>
               Drop image or <span style={{ color: "#4F8CFF" }}>click to upload</span>
             </p>
-            <p className="text-xs mt-1" style={{ color: "#4B5563" }}>PNG, JPG, WebP</p>
+            <p className="text-xs mt-1" style={{ color: "#4B5563" }}>PNG, JPG, WebP • max {MAX_FILE_SIZE_MB} MB</p>
           </div>
+          {sizeError && (
+            <p className="text-xs mt-1" style={{ color: "#EF4444" }}>{sizeError}</p>
+          )}
         </div>
       )}
       <input

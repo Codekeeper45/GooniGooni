@@ -43,5 +43,8 @@ coverage/
 modal_volumes/
 *.swp
 
+# Local admin credentials
+admin.db
+
 # Local specification artifacts
 specs/

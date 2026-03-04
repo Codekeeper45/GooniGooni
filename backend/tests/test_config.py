@@ -3,11 +3,9 @@ Unit tests for backend/config.py
 No Modal, no GPU, no network required.
 """
 import os
-import importlib
 import sys
 from pathlib import Path
 
-import pytest
 
 # Ensure backend/ is on sys.path
 BACKEND = str(Path(__file__).parent.parent)
@@ -204,3 +202,143 @@ class TestModelsSchema:
         import config
         phr00t = next(m for m in config.MODELS_SCHEMA if m["id"] == "phr00t")
         assert "arbitrary_frame" not in phr00t["modes"]
+
+
+# ---------------------------------------------------------------------------
+# T041 – Hybrid mode environment helpers & GET /api/environment
+# ---------------------------------------------------------------------------
+
+
+def _with_app_env(monkeypatch, value):
+    """Set APP_ENV and reload config so the module picks up the new value."""
+    monkeypatch.setenv("APP_ENV", value)
+    if "config" in sys.modules:
+        del sys.modules["config"]
+    import config as cfg
+    return cfg
+
+
+def _without_app_env(monkeypatch):
+    """Remove APP_ENV and reload config."""
+    monkeypatch.delenv("APP_ENV", raising=False)
+    if "config" in sys.modules:
+        del sys.modules["config"]
+    import config as cfg
+    return cfg
+
+
+class TestGetEnvironment:
+    """Unit tests for config.get_environment()."""
+
+    def test_development_returns_local(self, monkeypatch):
+        cfg = _with_app_env(monkeypatch, "development")
+        assert cfg.get_environment() == "local"
+
+    def test_dev_returns_local(self, monkeypatch):
+        cfg = _with_app_env(monkeypatch, "dev")
+        assert cfg.get_environment() == "local"
+
+    def test_local_returns_local(self, monkeypatch):
+        cfg = _with_app_env(monkeypatch, "local")
+        assert cfg.get_environment() == "local"
+
+    def test_test_returns_local(self, monkeypatch):
+        cfg = _with_app_env(monkeypatch, "test")
+        assert cfg.get_environment() == "local"
+
+    def test_production_returns_production(self, monkeypatch):
+        cfg = _with_app_env(monkeypatch, "production")
+        assert cfg.get_environment() == "production"
+
+    def test_staging_returns_production(self, monkeypatch):
+        cfg = _with_app_env(monkeypatch, "staging")
+        assert cfg.get_environment() == "production"
+
+    def test_empty_returns_production(self, monkeypatch):
+        cfg = _with_app_env(monkeypatch, "")
+        assert cfg.get_environment() == "production"
+
+    def test_missing_defaults_to_production(self, monkeypatch):
+        """Unset APP_ENV → production (empty string is not in _LOCAL_ENV_VALUES)."""
+        cfg = _without_app_env(monkeypatch)
+        assert cfg.get_environment() == "production"
+
+    def test_case_insensitive(self, monkeypatch):
+        cfg = _with_app_env(monkeypatch, "Development")
+        assert cfg.get_environment() == "local"
+
+    def test_whitespace_stripped(self, monkeypatch):
+        cfg = _with_app_env(monkeypatch, "  local  ")
+        assert cfg.get_environment() == "local"
+
+
+class TestGetAvailableModes:
+    """Unit tests for config.get_available_modes()."""
+
+    def test_local_env_returns_both_modes(self, monkeypatch):
+        cfg = _with_app_env(monkeypatch, "development")
+        assert cfg.get_available_modes() == ["local", "remote"]
+
+    def test_production_env_returns_remote_only(self, monkeypatch):
+        cfg = _with_app_env(monkeypatch, "production")
+        assert cfg.get_available_modes() == ["remote"]
+
+
+class TestGetDefaultMode:
+    """Unit tests for config.get_default_mode()."""
+
+    def test_local_env_defaults_to_local(self, monkeypatch):
+        cfg = _with_app_env(monkeypatch, "development")
+        assert cfg.get_default_mode() == "local"
+
+    def test_production_env_defaults_to_remote(self, monkeypatch):
+        cfg = _with_app_env(monkeypatch, "production")
+        assert cfg.get_default_mode() == "remote"
+
+
+class TestEnvironmentEndpointUnit:
+    """
+    Unit-level tests for the /api/environment endpoint response shape.
+    These tests call the config helpers directly and validate the
+    EnvironmentResponse schema without needing a running server.
+    """
+
+    def test_local_response_schema(self, monkeypatch):
+        cfg = _with_app_env(monkeypatch, "development")
+        payload = {
+            "environment": cfg.get_environment(),
+            "available_modes": cfg.get_available_modes(),
+            "default_mode": cfg.get_default_mode(),
+        }
+        assert payload == {
+            "environment": "local",
+            "available_modes": ["local", "remote"],
+            "default_mode": "local",
+        }
+
+    def test_production_response_schema(self, monkeypatch):
+        cfg = _with_app_env(monkeypatch, "production")
+        payload = {
+            "environment": cfg.get_environment(),
+            "available_modes": cfg.get_available_modes(),
+            "default_mode": cfg.get_default_mode(),
+        }
+        assert payload == {
+            "environment": "production",
+            "available_modes": ["remote"],
+            "default_mode": "remote",
+        }
+
+    def test_environment_response_pydantic_model(self, monkeypatch):
+        """EnvironmentResponse validates successfully with config output."""
+        cfg = _with_app_env(monkeypatch, "local")
+        from schemas import EnvironmentResponse
+
+        resp = EnvironmentResponse(
+            environment=cfg.get_environment(),
+            available_modes=cfg.get_available_modes(),
+            default_mode=cfg.get_default_mode(),
+        )
+        assert resp.environment == "local"
+        assert resp.available_modes == ["local", "remote"]
+        assert resp.default_mode == "local"

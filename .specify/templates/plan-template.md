@@ -1,4 +1,4 @@
-﻿# Implementation Plan: [FEATURE]
+# Implementation Plan: [FEATURE]
 
 **Branch**: `[###-feature-name]` | **Date**: [DATE] | **Spec**: [link]
 **Input**: Feature specification from `/specs/[###-feature-name]/spec.md`
@@ -17,25 +17,21 @@
   the iteration process.
 -->
 
-**Language/Version**: [e.g., Python 3.11, TypeScript 5.x or NEEDS CLARIFICATION]  
-**Primary Dependencies**: [e.g., FastAPI, Modal, React, Vite or NEEDS CLARIFICATION]  
-**Storage**: [e.g., Modal Volume (results/model-cache), SQLite, or N/A]  
-**Testing**: [e.g., pytest backend/tests/, live API smoke, npm run build]  
-**Target Platform**: [e.g., Modal + GCP VM + Browser clients]  
-**Project Type**: [web app with frontend + backend]  
-**Performance Goals**: [e.g., inference queued <30s, status polling every 3s]  
-**Constraints**: [e.g., GPU VRAM limits, cold starts, API key auth, CORS policy]  
-**Scale/Scope**: [e.g., concurrent generation targets, models affected]
+**Language/Version**: [e.g., Python 3.11, Swift 5.9, Rust 1.75 or NEEDS CLARIFICATION]  
+**Primary Dependencies**: [e.g., FastAPI, UIKit, LLVM or NEEDS CLARIFICATION]  
+**Storage**: [if applicable, e.g., PostgreSQL, CoreData, files or N/A]  
+**Testing**: [e.g., pytest, XCTest, cargo test or NEEDS CLARIFICATION]  
+**Target Platform**: [e.g., Linux server, iOS 15+, WASM or NEEDS CLARIFICATION]
+**Project Type**: [e.g., library/cli/web-service/mobile-app/compiler/desktop-app or NEEDS CLARIFICATION]  
+**Performance Goals**: [domain-specific, e.g., 1000 req/s, 10k lines/sec, 60 fps or NEEDS CLARIFICATION]  
+**Constraints**: [domain-specific, e.g., <200ms p95, <100MB memory, offline-capable or NEEDS CLARIFICATION]  
+**Scale/Scope**: [domain-specific, e.g., 10k users, 1M LOC, 50 screens or NEEDS CLARIFICATION]
 
 ## Constitution Check
 
 *GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
 
-- [ ] **Contract + Config Integrity**: API/schema updates and `inference_settings.json` changes are mapped to backend/frontend files.
-- [ ] **Modal Reliability**: model loading strategy, GPU limits, timeout, and concurrency are explicit.
-- [ ] **Auth + Secrets Safety**: auth modes, secret handling, and CORS impact are documented.
-- [ ] **Storage Consistency**: task lifecycle persistence and Volume commit/reload behavior are documented.
-- [ ] **Test + Transparency Gates**: required tests, status transitions, and audit/log implications are specified.
+[Gates determined based on constitution file]
 
 ## Project Structure
 
@@ -60,23 +56,43 @@ specs/[###-feature]/
 -->
 
 ```text
+# [REMOVE IF UNUSED] Option 1: Single project (DEFAULT)
 src/
-├── app/
+├── models/
+├── services/
+├── cli/
+└── lib/
+
+tests/
+├── contract/
+├── integration/
+└── unit/
+
+# [REMOVE IF UNUSED] Option 2: Web application (when "frontend" + "backend" detected)
+backend/
+├── src/
+│   ├── models/
+│   ├── services/
+│   └── api/
+└── tests/
+
+frontend/
+├── src/
 │   ├── components/
 │   ├── pages/
-│   ├── admin/
-│   └── utils/
-└── styles/
-
-backend/
-├── app.py
-├── schemas.py
-├── storage.py
-├── models/
+│   └── services/
 └── tests/
+
+# [REMOVE IF UNUSED] Option 3: Mobile + API (when "iOS/Android" detected)
+api/
+└── [same as backend above]
+
+ios/ or android/
+└── [platform-specific structure: feature modules, UI flows, platform tests]
 ```
 
-**Structure Decision**: [Document the selected structure and reference the real directories captured above]
+**Structure Decision**: [Document the selected structure and reference the real
+directories captured above]
 
 ## Complexity Tracking
 
@@ -84,5 +100,5 @@ backend/
 
 | Violation | Why Needed | Simpler Alternative Rejected Because |
 |-----------|------------|-------------------------------------|
-| [e.g., additional service boundary] | [current need] | [why in-process approach insufficient] |
-| [e.g., non-standard auth behavior] | [specific problem] | [why default pattern insufficient] |
+| [e.g., 4th project] | [current need] | [why 3 projects insufficient] |
+| [e.g., Repository pattern] | [specific problem] | [why direct DB access insufficient] |

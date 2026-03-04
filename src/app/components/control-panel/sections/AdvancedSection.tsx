@@ -156,17 +156,21 @@ export function AdvancedSection({
 
             {/* Fields wrapper (dim when not in advanced mode) */}
             <div style={{ opacity: useAdvancedSettings ? 1 : 0.4, pointerEvents: useAdvancedSettings ? "auto" : "none" }}>
-              {/* Negative Prompt */}
-              <ParamLabel>Negative Prompt</ParamLabel>
-              <textarea
-                value={negativePrompt}
-                onChange={(e) => setNegativePrompt(e.target.value)}
-                placeholder="What to exclude..."
-                rows={2}
-                disabled={disabled || !useAdvancedSettings}
-                className="w-full rounded-xl px-3.5 py-3 text-sm resize-none outline-none transition-colors duration-150 placeholder-[#374151] disabled:opacity-50"
-                style={{ background: "#1C212C", border: "1px solid rgba(255,255,255,0.06)", color: "#9CA3AF", fontFamily: "'Space Grotesk', sans-serif" }}
-              />
+              {/* Negative Prompt — hidden for Flux (no negative prompt support) */}
+              {!(generationType === "image" && imageModel === "flux") && (
+                <>
+                  <ParamLabel>Negative Prompt</ParamLabel>
+                  <textarea
+                    value={negativePrompt}
+                    onChange={(e) => setNegativePrompt(e.target.value)}
+                    placeholder="What to exclude..."
+                    rows={2}
+                    disabled={disabled || !useAdvancedSettings}
+                    className="w-full rounded-xl px-3.5 py-3 text-sm resize-none outline-none transition-colors duration-150 placeholder-[#374151] disabled:opacity-50"
+                    style={{ background: "#1C212C", border: "1px solid rgba(255,255,255,0.06)", color: "#9CA3AF", fontFamily: "'Space Grotesk', sans-serif" }}
+                  />
+                </>
+              )}
 
               {/* Seed */}
               <div className="mt-5">

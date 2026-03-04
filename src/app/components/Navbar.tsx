@@ -22,16 +22,21 @@ export function Navbar({ onHistoryClick, historyCount, onAdminClick }: NavbarPro
   const [comfyRunning, setComfyRunning] = useState<boolean | null>(null);
   const [comfyFound, setComfyFound] = useState(false);
   const [launching, setLaunching] = useState(false);
+  const [launchError, setLaunchError] = useState<string | null>(null);
 
-  const checkComfyStatus = useCallback(async () => {
+  const checkComfyStatus = useCallback(async (): Promise<{ running: boolean; error: string | null }> => {
     try {
       const res = await fetch("/local-api/comfyui/status");
       const data = await res.json();
-      setComfyRunning(data.comfyuiRunning ?? false);
+      const running = data.comfyuiRunning ?? false;
+      setComfyRunning(running);
       setComfyFound(data.comfyuiFound ?? false);
+      if (data.lastLaunchError) setLaunchError(data.lastLaunchError);
+      return { running, error: data.lastLaunchError ?? null };
     } catch {
       setComfyRunning(false);
       setComfyFound(false);
+      return { running: false, error: null };
     }
   }, []);
 
@@ -49,17 +54,32 @@ export function Navbar({ onHistoryClick, historyCount, onAdminClick }: NavbarPro
   const handleLaunchComfy = async () => {
     if (!isLocalModelManagerAvailable) return;
     setLaunching(true);
+    setLaunchError(null);
     try {
       const response = await fetch("/local-api/comfyui/launch", { method: "POST" });
-      if (!response.ok) return;
-      // Poll until running
-      let attempts = 0;
-      const poll = setInterval(async () => {
-        attempts++;
-        await checkComfyStatus();
-        if (attempts >= 30) clearInterval(poll);
-      }, 2000);
-    } catch {}
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        setLaunchError(data.error || "Не удалось запустить ComfyUI");
+        setLaunching(false);
+        return;
+      }
+      // Poll until running or error (max 30 attempts, 2s each = 60s)
+      for (let attempt = 0; attempt < 30; attempt++) {
+        await new Promise((r) => setTimeout(r, 2000));
+        const status = await checkComfyStatus();
+        if (status.running) {
+          setLaunching(false);
+          return;
+        }
+        if (status.error) {
+          setLaunching(false);
+          return;
+        }
+      }
+      setLaunchError("ComfyUI не запустился за 60 секунд");
+    } catch {
+      setLaunchError("Ошибка сети при запуске ComfyUI");
+    }
     setLaunching(false);
   };
 
@@ -111,6 +131,7 @@ export function Navbar({ onHistoryClick, historyCount, onAdminClick }: NavbarPro
               running={comfyRunning}
               found={comfyFound}
               launching={launching}
+              error={launchError}
               onLaunch={handleLaunchComfy}
             />
 
@@ -118,20 +139,20 @@ export function Navbar({ onHistoryClick, historyCount, onAdminClick }: NavbarPro
 
             <NavButton
               icon={<Package className="w-4 h-4" />}
-              label="Models"
+              label="Модели"
               onClick={() => setModelsOpen(true)}
             />
           </>
         )}
         <NavButton
           icon={<Grid3x3 className="w-4 h-4" />}
-          label="Gallery"
+          label="Галерея"
           badge={galleryCount > 0 ? String(galleryCount > 99 ? "99+" : galleryCount) : undefined}
           onClick={() => navigate("/gallery")}
         />
         <NavButton
           icon={<Clock className="w-4 h-4" />}
-          label="History"
+          label="История"
           badge={historyCount > 0 ? String(historyCount > 9 ? "9+" : historyCount) : undefined}
           onClick={onHistoryClick}
         />
@@ -141,7 +162,7 @@ export function Navbar({ onHistoryClick, historyCount, onAdminClick }: NavbarPro
         />
         <NavButton
           icon={<Settings className="w-4 h-4" />}
-          label="Admin"
+          label="Админ"
           onClick={() => navigate("/admin")}
         />
       </div>
@@ -199,11 +220,13 @@ function ComfyUIButton({
   running,
   found,
   launching,
+  error,
   onLaunch,
 }: {
   running: boolean | null;
   found: boolean;
   launching: boolean;
+  error: string | null;
   onLaunch: () => void;
 }) {
   // Still loading status
@@ -232,6 +255,26 @@ function ComfyUIButton({
         </span>
         <span className="hidden sm:inline">ComfyUI</span>
       </div>
+    );
+  }
+
+  // Error state — red with tooltip
+  if (error && !launching) {
+    return (
+      <button
+        onClick={onLaunch}
+        className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-all duration-200"
+        style={{
+          background: "rgba(239,68,68,0.1)",
+          color: "#EF4444",
+          border: "1px solid rgba(239,68,68,0.2)",
+          fontFamily: "'Space Grotesk', sans-serif",
+        }}
+        title={`Ошибка: ${error}\nНажмите для повторной попытки`}
+      >
+        <Power className="w-3.5 h-3.5" />
+        <span className="hidden sm:inline">Ошибка</span>
+      </button>
     );
   }
 

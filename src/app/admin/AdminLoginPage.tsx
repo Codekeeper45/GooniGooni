@@ -101,7 +101,7 @@ export function AdminLoginPage() {
             Gooni Admin
           </h1>
           <p style={{ color: "rgba(255,255,255,0.45)", margin: "6px 0 0", fontSize: 14 }}>
-            Login with your admin credentials
+            Пароль по умолчанию: admin
           </p>
         </div>
 

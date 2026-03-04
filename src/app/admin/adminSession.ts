@@ -140,6 +140,18 @@ export async function revokeAdminSession(): Promise<void> {
   });
 }
 
+export async function changePassword(currentPassword: string, newPassword: string): Promise<void> {
+  const response = await fetchAdmin("/admin/change-password", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+    credentials: "include",
+  });
+  if (!response.ok) {
+    throw new AdminHttpError(await parseErrorPayload(response));
+  }
+}
+
 export async function adminFetch(
   path: string,
   options: RequestInit = {},

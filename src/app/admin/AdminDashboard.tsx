@@ -3,6 +3,7 @@ import { useNavigate } from "react-router";
 import {
   clearSession,
   adminFetch,
+  changePassword,
   ensureAdminSession,
   revokeAdminSession,
   AdminHttpError,
@@ -115,6 +116,8 @@ export function AdminDashboard() {
   const [tokenSecret, setTokenSecret] = useState("");
   const [showSecret, setShowSecret] = useState(false);
   const [addLoading, setAddLoading] = useState(false);
+  const [isDefaultPassword, setIsDefaultPassword] = useState(false);
+  const [showChangePassword, setShowChangePassword] = useState(false);
 
   const showToast = (msg: string, ok = true) => {
     setToast({ msg, ok });
@@ -196,11 +199,23 @@ export function AdminDashboard() {
     }
   }, [nav]);
 
+  const fetchSessionInfo = useCallback(async () => {
+    try {
+      const res = await adminFetch("/admin/session");
+      if (res.ok) {
+        const data = await res.json();
+        setIsDefaultPassword(data.is_default_password ?? false);
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
+
   useEffect(() => {
     if (authState !== "ready") return;
     setLoading(true);
-    Promise.all([fetchAccounts(), fetchLogs()]).finally(() => setLoading(false));
-  }, [authState, fetchAccounts, fetchLogs]);
+    Promise.all([fetchAccounts(), fetchLogs(), fetchSessionInfo()]).finally(() => setLoading(false));
+  }, [authState, fetchAccounts, fetchLogs, fetchSessionInfo]);
 
   useEffect(() => {
     if (authState !== "ready") return;
@@ -388,6 +403,41 @@ export function AdminDashboard() {
           </button>
         </div>
       </div>
+
+      {isDefaultPassword && (
+        <div
+          style={{
+            background: "rgba(245,158,11,0.15)",
+            border: "1px solid rgba(245,158,11,0.4)",
+            borderRadius: 0,
+            padding: "12px 28px",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 16,
+          }}
+        >
+          <span style={{ color: "#fbbf24", fontSize: 14, fontWeight: 500 }}>
+            ⚠️ Вы используете стандартный пароль. Рекомендуем сменить.
+          </span>
+          <button
+            onClick={() => setShowChangePassword(true)}
+            style={{
+              background: "rgba(245,158,11,0.25)",
+              border: "1px solid rgba(245,158,11,0.5)",
+              borderRadius: 8,
+              color: "#fbbf24",
+              padding: "6px 16px",
+              cursor: "pointer",
+              fontSize: 13,
+              fontWeight: 600,
+              whiteSpace: "nowrap",
+            }}
+          >
+            Сменить пароль
+          </button>
+        </div>
+      )}
 
       <div
         style={{
@@ -696,6 +746,18 @@ export function AdminDashboard() {
         )}
       </div>
 
+      {showChangePassword && (
+        <ChangePasswordDialog
+          onClose={() => setShowChangePassword(false)}
+          onSuccess={() => {
+            setShowChangePassword(false);
+            setIsDefaultPassword(false);
+            showToast("Пароль успешно изменён");
+          }}
+          showToast={showToast}
+        />
+      )}
+
       {toast && (
         <div
           style={{
@@ -720,4 +782,129 @@ export function AdminDashboard() {
   );
 }
 
+function ChangePasswordDialog({
+  onClose,
+  onSuccess,
+  showToast,
+}: {
+  onClose: () => void;
+  onSuccess: () => void;
+  showToast: (msg: string, ok?: boolean) => void;
+}) {
+  const [currentPwd, setCurrentPwd] = useState("");
+  const [newPwd, setNewPwd] = useState("");
+  const [confirmPwd, setConfirmPwd] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
 
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setError("");
+
+    if (!currentPwd || !newPwd || !confirmPwd) {
+      setError("Заполните все поля");
+      return;
+    }
+    if (newPwd !== confirmPwd) {
+      setError("Пароли не совпадают");
+      return;
+    }
+    if (newPwd.length < 1) {
+      setError("Новый пароль должен быть не менее 1 символа");
+      return;
+    }
+
+    setLoading(true);
+    try {
+      await changePassword(currentPwd, newPwd);
+      onSuccess();
+    } catch (err) {
+      if (err instanceof AdminHttpError) {
+        setError(err.message);
+      } else {
+        setError("Ошибка при смене пароля");
+      }
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const inputStyle: React.CSSProperties = {
+    width: "100%",
+    boxSizing: "border-box",
+    padding: "10px 14px",
+    background: "rgba(255,255,255,0.08)",
+    border: "1px solid rgba(255,255,255,0.18)",
+    borderRadius: 8,
+    color: "#fff",
+    fontSize: 14,
+    outline: "none",
+  };
+
+  return (
+    <div
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.6)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 9998,
+      }}
+      onClick={onClose}
+    >
+      <div
+        style={{
+          background: "#1a1a2e",
+          border: "1px solid rgba(255,255,255,0.15)",
+          borderRadius: 16,
+          padding: "32px 28px",
+          width: "100%",
+          maxWidth: 400,
+          boxShadow: "0 20px 60px rgba(0,0,0,0.5)",
+        }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h2 style={{ color: "#fff", margin: "0 0 20px", fontSize: 20, fontWeight: 700 }}>
+          Сменить пароль
+        </h2>
+        <form onSubmit={handleSubmit}>
+          <div style={{ marginBottom: 14 }}>
+            <label style={{ display: "block", color: "rgba(255,255,255,0.7)", fontSize: 13, marginBottom: 4, fontWeight: 600 }}>
+              Текущий пароль
+            </label>
+            <input type="password" value={currentPwd} onChange={(e) => setCurrentPwd(e.target.value)} style={inputStyle} autoComplete="current-password" />
+          </div>
+          <div style={{ marginBottom: 14 }}>
+            <label style={{ display: "block", color: "rgba(255,255,255,0.7)", fontSize: 13, marginBottom: 4, fontWeight: 600 }}>
+              Новый пароль
+            </label>
+            <input type="password" value={newPwd} onChange={(e) => setNewPwd(e.target.value)} style={inputStyle} autoComplete="new-password" />
+          </div>
+          <div style={{ marginBottom: 20 }}>
+            <label style={{ display: "block", color: "rgba(255,255,255,0.7)", fontSize: 13, marginBottom: 4, fontWeight: 600 }}>
+              Подтверждение
+            </label>
+            <input type="password" value={confirmPwd} onChange={(e) => setConfirmPwd(e.target.value)} style={inputStyle} autoComplete="new-password" />
+          </div>
+
+          {error && (
+            <div style={{ background: "rgba(239,68,68,0.15)", border: "1px solid rgba(239,68,68,0.4)", borderRadius: 8, padding: "8px 12px", marginBottom: 14, color: "#fca5a5", fontSize: 13 }}>
+              {error}
+            </div>
+          )}
+
+          <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+            <button type="button" onClick={onClose} style={{ padding: "9px 20px", borderRadius: 8, background: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.15)", color: "rgba(255,255,255,0.7)", cursor: "pointer", fontSize: 13 }}>
+              Отмена
+            </button>
+            <button type="submit" disabled={loading} style={{ padding: "9px 20px", borderRadius: 8, background: "linear-gradient(135deg,#7c3aed,#a855f7)", border: "none", color: "#fff", fontWeight: 700, fontSize: 13, cursor: loading ? "default" : "pointer", opacity: loading ? 0.7 : 1 }}>
+              {loading ? "..." : "Сменить"}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}

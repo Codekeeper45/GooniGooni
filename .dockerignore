@@ -39,6 +39,9 @@ backend/tests/__pycache__/
 Thumbs.db
 desktop.ini
 
+# Local admin credentials
+admin.db
+
 # Editor
 .vscode/
 .idea/

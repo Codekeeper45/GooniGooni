@@ -1,18 +1,14 @@
 import { motion, AnimatePresence } from "motion/react";
 import { X, Download, Maximize2, Video, Image as ImageIcon, Trash2 } from "lucide-react";
 import { useState } from "react";
-import type { GenerationType } from "./ControlPanel";
+import type { GalleryItem } from "../context/GalleryContext";
 
-export interface GalleryItem {
-  id: string;
-  url: string;
-  prompt: string;
-  type: GenerationType;
-  model: string;
-  width: number;
-  height: number;
-  seed: number;
-  createdAt: Date;
+function pluralizeItems(n: number): string {
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return "элемент";
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 10 || mod100 >= 20)) return "элемента";
+  return "элементов";
 }
 
 interface GalleryPanelProps {
@@ -84,10 +80,10 @@ export function GalleryPanel({
                 </div>
                 <div>
                   <h2 className="text-lg" style={{ color: "#E5E7EB" }}>
-                    Gallery
+                    Галерея
                   </h2>
                   <p className="text-xs" style={{ color: "#6B7280" }}>
-                    {items.length} {items.length === 1 ? "item" : "items"}
+                    {items.length} {pluralizeItems(items.length)}
                   </p>
                 </div>
               </div>
@@ -108,7 +104,7 @@ export function GalleryPanel({
                     }}
                   >
                     <Trash2 className="w-4 h-4" />
-                    Clear All
+                    Очистить всё
                   </button>
                 )}
                 <button
@@ -144,10 +140,10 @@ export function GalleryPanel({
                   </div>
                   <div className="text-center">
                     <p className="text-base" style={{ color: "#4B5563" }}>
-                      No items in gallery
+                      Галерея пуста
                     </p>
                     <p className="text-sm mt-2" style={{ color: "#374151" }}>
-                      Generated images and videos will appear here
+                      Сгенерированные изображения и видео появятся здесь
                     </p>
                   </div>
                 </div>
@@ -208,6 +204,7 @@ function GalleryCard({
       <img
         src={item.url}
         alt={item.prompt}
+        loading="lazy"
         className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110"
       />
 
@@ -225,7 +222,7 @@ function GalleryCard({
         }}
       >
         <Icon className="w-3 h-3" />
-        {item.type === "video" ? "Video" : "Image"}
+        {item.type === "video" ? "Видео" : "Изображение"}
       </div>
 
       {/* Hover actions */}
@@ -361,7 +358,7 @@ function Lightbox({
           <div className="flex items-center gap-4 text-xs" style={{ color: "#6B7280" }}>
             <div className="flex items-center gap-2">
               <Icon className="w-3.5 h-3.5" />
-              <span>{item.type === "video" ? "Video" : "Image"}</span>
+              <span>{item.type === "video" ? "Видео" : "Изображение"}</span>
             </div>
             <span>•</span>
             <span>{item.model}</span>
@@ -383,7 +380,7 @@ function Lightbox({
               }}
             >
               <Download className="w-4 h-4" />
-              Download
+              Скачать
             </button>
             <button
               onClick={onClose}
@@ -394,7 +391,7 @@ function Lightbox({
                 color: "#9CA3AF",
               }}
             >
-              Close
+              Закрыть
             </button>
           </div>
         </div>

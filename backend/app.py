@@ -110,9 +110,9 @@ image_gen_image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install(
         *_base_pkgs,
-        "torch>=2.6.0",
-        "torchvision",
-        "diffusers>=0.30",
+        "torch==2.4.0",  # Pinned — torch 2.10+ may have SDXL attention regression
+        "torchvision==0.19.0",
+        "diffusers>=0.32",
         "transformers>=4.43",
         "accelerate>=0.32",
         "bitsandbytes>=0.43",
@@ -254,7 +254,7 @@ def _get_image_pipeline(model_id_key: str):
             return _image_pipeline_cache[model_id_key]
 
         if model_id_key == "pony":
-            from models.pony import PonyPipeline
+            from pipelines.pony_pipeline import PonyPipeline
             from config import MODEL_IDS
 
             pipeline = PonyPipeline(MODEL_IDS["pony"])

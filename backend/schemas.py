@@ -4,7 +4,6 @@ Field names mirror exactly what configManager.buildPayload() sends from the fron
 """
 from __future__ import annotations
 
-import uuid
 from datetime import datetime
 from enum import Enum
 from typing import Any, List, Literal, Optional
@@ -286,6 +285,7 @@ class AdminSessionStateResponse(BaseModel):
     active: bool
     idle_timeout_seconds: int = 43200
     last_activity_at: Optional[datetime] = None
+    is_default_password: bool = False
 
 
 class AdminLoginRequest(BaseModel):
@@ -293,10 +293,37 @@ class AdminLoginRequest(BaseModel):
     password: str = Field(..., min_length=1, max_length=512)
 
 
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(..., min_length=1, max_length=512)
+    new_password: str = Field(..., min_length=1, max_length=512)
+
+
+class ChangePasswordResponse(BaseModel):
+    ok: bool
+    message: str
+
+
+class GPUInfoResponse(BaseModel):
+    detected: bool
+    name: Optional[str] = None
+    vram_total_mb: Optional[int] = None
+    vram_free_mb: Optional[int] = None
+    driver_version: Optional[str] = None
+    cuda_version: Optional[str] = None
+    vram_level: Literal['green', 'yellow', 'orange', 'red']
+
+
 class ErrorResponse(BaseModel):
     code: str
     detail: str
     user_action: str
+
+
+class EnvironmentResponse(BaseModel):
+    """Backend environment information for frontend sync validation (FR-027)."""
+    environment: str  # "local" | "production"
+    available_modes: list[str]  # ["local", "remote"] or ["remote"]
+    default_mode: str  # "local" | "remote"
 
 
 class ApiErrorEnvelope(BaseModel):

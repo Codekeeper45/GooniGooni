@@ -68,4 +68,51 @@ Generation, gallery, and auth-related API failures return a single envelope:
 ```
 
 Frontend must show both `detail` and `user_action` to avoid silent failures and undefined retry behavior.
+
+## Hybrid Mode — Local + Remote Generation
+
+The application supports two image generation modes:
+
+### Remote Mode (Production)
+- Uses Modal cloud backend with A10G GPUs
+- All model types (video + image): `anisora`, `phr00t`, `pony`, `flux`
+- Auth: `X-API-Key` header + session cookies
+- Set `VITE_ENVIRONMENT=production` in `.env.production`
+
+### Local Mode (Development only)
+- Uses ComfyUI on `localhost:8188` for image generation only (`pony`, `flux`)
+- WebSocket progress updates, no auth required
+- Vite dev proxy routes `/comfy-api/*` → `http://127.0.0.1:8188`
+- Set `VITE_ENVIRONMENT=local` in `.env.local`
+- Requires ComfyUI running with Pony V6 XL and/or Flux dev nf4 checkpoints
+
+### Mode Switching
+- Local environment: both Local and Remote tabs visible; user can switch freely
+- Production environment: only Remote tab available; all ComfyUI code tree-shaken from bundle
+- Mode selection persists in `sessionStorage` (survives refresh, resets on new session)
+- Switching modes during active generation cancels the in-flight request
+
+### Security
+- `SecurityGuard` middleware blocks all `/comfy/` and `/local/` paths in production
+- `mode=local` query parameter blocked in production
+- No ComfyUI code included in production bundles (Vite `import.meta.env.DEV` guard)
+
+## Troubleshooting
+
+### Сброс пароля администратора
+Удалите файл `admin.db` в корне проекта и перезапустите приложение. Пароль сбросится к `admin`.
+
+```bash
+rm admin.db
+npm run dev
+```
+
+### Повреждённая база admin.db
+Если admin.db повреждена (ошибки SQLite при входе), приложение автоматически пересоздаст файл с паролем по умолчанию (`admin`). В логах появится предупреждение: `admin.db повреждён, пересоздан с паролем по умолчанию`.
+
+### GPU не обнаружена
+Убедитесь, что установлены последние драйверы NVIDIA и `nvidia-smi` доступна в PATH. Если GPU не найдена, используйте Remote Mode для генерации через облачные GPU.
+
+### LoRA файлы не отображаются
+Поместите `.safetensors` / `.ckpt` файлы в `{COMFYUI_PATH}/models/loras/`. Для автоопределения совместимости используйте подпапки `sdxl/` или `flux/`.
   

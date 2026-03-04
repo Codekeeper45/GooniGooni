@@ -25,13 +25,17 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, status, Bod
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
+from middleware.security import SecurityGuard
 
 import storage
 import accounts as acc_store
 from auth import verify_api_key, verify_generation_session, GENERATION_SESSION_COOKIE
 from admin_security import (
     _ensure_audit_table,
+    change_local_admin_password,
+    check_is_default_password,
     get_admin_auth,
+    init_local_admin_db,
     verify_admin_login_password,
     verify_admin_key_header,
     ADMIN_SESSION_COOKIE,
@@ -45,6 +49,9 @@ from config import (
     GEN_SESSION_MAX_ACTIVE_TASKS,
     NO_READY_ACCOUNT_WAIT_SECONDS,
     ARTIFACT_TTL_DAYS,
+    get_environment,
+    get_available_modes,
+    get_default_mode,
 )
 from router import router as account_router, NoReadyAccountError, MAX_FALLBACKS
 from deployer import (
@@ -56,7 +63,10 @@ from deployer import (
 from schemas import (
     AdminLoginRequest,
     AdminSessionStateResponse,
+    ChangePasswordRequest,
+    ChangePasswordResponse,
     DeleteResponse,
+    EnvironmentResponse,
     GalleryResponse,
     GenerateRequest,
     GenerateResponse,
@@ -291,10 +301,44 @@ def _no_ready_wait_expired(deadline: float, now: Optional[float] = None) -> bool
     return _no_ready_wait_remaining(deadline, now=now) <= 0.0
 
 
+# ─── User endpoint rate limiting ─────────────────────────────────────────────
+
+import threading
+from collections import defaultdict
+
+_GENERATE_RATE_LIMIT = int(os.environ.get("GENERATE_RATE_LIMIT", "10"))  # per minute
+_GENERATE_RATE_WINDOW = 60.0  # seconds
+_generate_rate_hits: dict[str, list[float]] = defaultdict(list)
+_generate_rate_lock = threading.Lock()
+
+
+def _check_generate_rate_limit(request: Request) -> None:
+    """Sliding-window per-IP rate limit for /generate."""
+    ip = request.client.host if request.client else "unknown"
+    now = time.time()
+    threshold = now - _GENERATE_RATE_WINDOW
+    with _generate_rate_lock:
+        hits = _generate_rate_hits[ip]
+        # Prune expired entries
+        _generate_rate_hits[ip] = hits = [t for t in hits if t > threshold]
+        if len(hits) >= _GENERATE_RATE_LIMIT:
+            retry_after = max(1, int(hits[0] + _GENERATE_RATE_WINDOW - now) + 1)
+            raise HTTPException(
+                status_code=429,
+                detail=_error_payload(
+                    "rate_limited",
+                    f"Too many generation requests. Limit: {_GENERATE_RATE_LIMIT}/min.",
+                    f"Wait {retry_after}s and retry.",
+                ),
+                headers={"Retry-After": str(retry_after)},
+            )
+        hits.append(now)
+
+
 # ─── Cookie helpers ───────────────────────────────────────────────────────────
 
-_COOKIE_SECURE = True
-_COOKIE_SAMESITE = "none"
+_COOKIE_SECURE = os.environ.get("SESSION_COOKIE_SECURE", "1") == "1"
+_COOKIE_SAMESITE = os.environ.get("SESSION_COOKIE_SAMESITE", "none")
 
 
 def _set_session_cookie(response: Response, key: str, value: str, max_age: int) -> None:
@@ -324,6 +368,7 @@ def create_app(results_vol=None) -> FastAPI:
     storage.init_db()
     acc_store.init_accounts_table()
     _ensure_audit_table()
+    init_local_admin_db()
 
     enable_docs = (os.environ.get("ENABLE_DOCS", "0").strip().lower() in {"1", "true", "yes", "on"})
     if not os.environ.get("PUBLIC_BASE_URL", "").strip():
@@ -351,6 +396,9 @@ def create_app(results_vol=None) -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # SecurityGuard — blocks Local Mode requests in production
+    api.add_middleware(SecurityGuard)
 
     # Global config
     generation_ttl = int(os.environ.get("GENERATION_SESSION_TTL_SECONDS", str(24 * 3600)))
@@ -519,6 +567,15 @@ def create_app(results_vol=None) -> FastAPI:
     async def health_check():
         return HealthResponse()
 
+    @api.get("/environment", response_model=EnvironmentResponse, tags=["Info"])
+    async def get_environment_info():
+        """Return backend environment for frontend sync validation (FR-027). No auth required."""
+        return EnvironmentResponse(
+            environment=get_environment(),
+            available_modes=get_available_modes(),
+            default_mode=get_default_mode(),
+        )
+
     @api.get("/models", response_model=ModelsResponse, tags=["Info"])
     async def list_models(_: str = Depends(verify_api_key)):
         return ModelsResponse(models=MODELS_SCHEMA)
@@ -658,7 +715,12 @@ def create_app(results_vol=None) -> FastAPI:
         }
 
     @api.post("/generate", response_model=GenerateResponse, tags=["Generation"])
-    async def generate(req: GenerateRequest, session_or_api_key: str = Depends(verify_generation_session)):
+    async def generate(
+        req: GenerateRequest,
+        request: Request,
+        session_or_api_key: str = Depends(verify_generation_session),
+    ):
+        _check_generate_rate_limit(request)
         import httpx
 
         request_started_at = time.monotonic()
@@ -1047,12 +1109,19 @@ def create_app(results_vol=None) -> FastAPI:
     # ── Admin ─────────────────────────────────────────────────────────────────
     @api.post("/admin/login", status_code=status.HTTP_204_NO_CONTENT, tags=["Admin"])
     async def admin_login(payload: AdminLoginRequest, request: Request, response: Response):
-        verify_admin_login_password(request, payload.login, payload.password, action="admin_login")
+        _ip, is_default_password = verify_admin_login_password(request, payload.login, payload.password, action="admin_login")
         _vol_reload()
         token, _ = storage.create_admin_session(idle_timeout_seconds=admin_idle_timeout)
         _vol_commit()
         _set_session_cookie(response, ADMIN_SESSION_COOKIE, token, admin_idle_timeout)
         return None
+
+    @api.post("/admin/change-password", response_model=ChangePasswordResponse, tags=["Admin"])
+    async def admin_change_password(payload: ChangePasswordRequest, request: Request, ip: str = Depends(get_admin_auth("admin_change_password"))):
+        if len(payload.new_password) < 1:
+            raise HTTPException(status_code=400, detail="New password must be at least 1 character")
+        change_local_admin_password(payload.current_password, payload.new_password, ip=ip)
+        return ChangePasswordResponse(ok=True, message="Password changed successfully")
 
     @api.post("/admin/session", status_code=status.HTTP_204_NO_CONTENT, tags=["Admin"])
     async def create_admin_session(response: Response, _ip: str = Depends(verify_admin_key_header("admin_session_create"))):
@@ -1079,7 +1148,8 @@ def create_app(results_vol=None) -> FastAPI:
                 last_activity = datetime.fromisoformat(session_row["last_activity_at"])
             except Exception:
                 pass
-        return AdminSessionStateResponse(active=True, idle_timeout_seconds=admin_idle_timeout, last_activity_at=last_activity)
+        is_default = check_is_default_password()
+        return AdminSessionStateResponse(active=True, idle_timeout_seconds=admin_idle_timeout, last_activity_at=last_activity, is_default_password=is_default)
 
     @api.delete("/admin/session", status_code=status.HTTP_204_NO_CONTENT, tags=["Admin"])
     async def delete_admin_session(response: Response, request: Request, _ip: str = Depends(get_admin_auth("admin_session_delete"))):
@@ -1243,7 +1313,13 @@ def create_app(results_vol=None) -> FastAPI:
     async def admin_health(_ip: str = Depends(get_admin_auth("health"))):
         _vol_reload()
         ready = [a for a in acc_store.list_accounts() if a["status"] == "ready"]
-        return {"ok": True, "storage_ok": storage.check_storage_health(), "ready_accounts": len(ready), "diagnostics": storage.get_operational_snapshot()}
+        # GPU detection
+        try:
+            from gpu_utils import query_gpu_info
+            gpu = query_gpu_info().to_dict()
+        except Exception:
+            gpu = {"detected": False, "name": None, "vram_total_mb": None, "vram_free_mb": None, "cuda_version": None, "vram_level": "red"}
+        return {"ok": True, "storage_ok": storage.check_storage_health(), "ready_accounts": len(ready), "diagnostics": storage.get_operational_snapshot(), "gpu": gpu}
 
     @api.post("/admin/accounts", tags=["Admin"], status_code=201)
     async def admin_add_account(label: str = Body(...), token_id: str = Body(...), token_secret: str = Body(...), _ip: str = Depends(get_admin_auth("add_account"))):

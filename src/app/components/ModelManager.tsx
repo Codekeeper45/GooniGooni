@@ -35,7 +35,7 @@ export function ModelManager({ open, onOpenChange }: ModelManagerProps) {
   const [tab, setTab] = useState<Tab>("recommended");
 
   const {
-    installedModels, downloads, loading, comfyStatus,
+    installedModels, downloads, loading, comfyStatus, cpuMode,
     searchResults, searching, searchError,
     refreshModels, downloadModel, cancelDownload, deleteModel,
     searchCivitAI, checkStatus, isModelInstalled,
@@ -75,6 +75,17 @@ export function ModelManager({ open, onOpenChange }: ModelManagerProps) {
 
         {/* ComfyUI Status Banner */}
         <ComfyUIStatusBanner comfyStatus={comfyStatus} onLaunch={launchComfyUI} onRefresh={checkStatus} />
+
+        {/* CPU Mode Warning */}
+        {cpuMode && (
+          <div
+            className="flex items-center gap-2 p-3 rounded-lg text-sm"
+            style={{ background: "rgba(251,191,36,0.08)", border: "1px solid rgba(251,191,36,0.2)", color: "#FBBF24" }}
+          >
+            <AlertTriangle className="w-4 h-4 flex-shrink-0" />
+            <span>Не обнаружена NVIDIA GPU — ComfyUI работает в режиме CPU. Генерация будет значительно медленнее.</span>
+          </div>
+        )}
 
         {/* Active Downloads Banner */}
         <ActiveDownloads downloads={downloads} onCancel={cancelDownload} />
@@ -242,11 +253,24 @@ function ActiveDownloads({
   downloads,
   onCancel,
 }: {
-  downloads: Array<{ id: string; filename: string; percentage: number; status: string; error?: string }>;
+  downloads: Array<{ id: string; filename: string; percentage: number; status: string; error?: string; speedBps?: number; etaSeconds?: number | null }>;
   onCancel: (id: string) => void;
 }) {
   const active = downloads.filter((d) => d.status === "downloading");
   if (active.length === 0) return null;
+
+  const formatSpeed = (bps?: number) => {
+    if (!bps || bps <= 0) return "";
+    if (bps > 1024 * 1024) return `${(bps / 1024 / 1024).toFixed(1)} МБ/с`;
+    if (bps > 1024) return `${(bps / 1024).toFixed(0)} КБ/с`;
+    return `${bps} Б/с`;
+  };
+  const formatEta = (sec?: number | null) => {
+    if (sec == null || sec <= 0) return "";
+    if (sec > 3600) return `~${Math.floor(sec / 3600)}ч ${Math.floor((sec % 3600) / 60)}м`;
+    if (sec > 60) return `~${Math.floor(sec / 60)}м ${sec % 60}с`;
+    return `~${sec}с`;
+  };
 
   return (
     <div className="space-y-2">
@@ -261,7 +285,14 @@ function ActiveDownloads({
             <div className="text-sm truncate" style={{ color: "#E5E7EB" }}>{d.filename}</div>
             <Progress value={d.percentage} className="h-1.5 mt-1" />
           </div>
-          <span className="text-xs tabular-nums" style={{ color: "#6B7280" }}>{d.percentage}%</span>
+          <div className="flex flex-col items-end gap-0.5">
+            <span className="text-xs tabular-nums" style={{ color: "#6B7280" }}>{d.percentage}%</span>
+            {(d.speedBps || d.etaSeconds) && (
+              <span className="text-[10px] tabular-nums whitespace-nowrap" style={{ color: "#4B5563" }}>
+                {formatSpeed(d.speedBps)}{d.speedBps && d.etaSeconds ? " • " : ""}{formatEta(d.etaSeconds)}
+              </span>
+            )}
+          </div>
           <button
             onClick={() => onCancel(d.id)}
             className="p-1 rounded hover:bg-white/5 transition-colors"

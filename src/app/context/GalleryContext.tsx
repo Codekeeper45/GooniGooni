@@ -9,6 +9,7 @@ export interface GalleryItem {
   prompt: string;
   type: GenerationType;
   model: string;
+  mode?: "local" | "remote";
   width: number;
   height: number;
   seed: number;
@@ -45,11 +46,15 @@ export function GalleryProvider({ children }: { children: React.ReactNode }) {
   });
 
   useEffect(() => {
-    localStorage.setItem("mg_gallery_v2", JSON.stringify(gallery));
+    try {
+      localStorage.setItem("mg_gallery_v2", JSON.stringify(gallery));
+    } catch (e) {
+      console.warn("Gallery save to localStorage failed (quota exceeded?):", e);
+    }
   }, [gallery]);
 
   const addToGallery = (item: GalleryItem) => {
-    setGallery((prev) => [item, ...prev]);
+    setGallery((prev) => [item, ...prev].slice(0, 200));
   };
 
   const clearGallery = () => {

@@ -27,6 +27,7 @@ interface OutputPanelProps {
     type: GenerationType;
   } | null;
   error: string | null;
+  userAction?: string | null;
   referenceImage: string | null;
   generationType: GenerationType;
   mode: VideoMode | ImageMode;
@@ -57,7 +58,7 @@ function GlowBar({ value }: { value: number }) {
 // ── Idle ────────────────────────────────────────────────────────────────────
 function IdleState({ generationType }: { generationType: GenerationType }) {
   const Icon = generationType === "video" ? Video : ImageLucide;
-  const typeLabel = generationType === "video" ? "video" : "image";
+  const typeLabel = generationType === "video" ? "видео" : "изображение";
 
   return (
     <div className="flex flex-col items-center justify-center h-full gap-6 select-none">
@@ -95,7 +96,7 @@ function IdleState({ generationType }: { generationType: GenerationType }) {
           Your generated {typeLabel} will appear here
         </p>
         <p className="text-xs" style={{ color: "#374151" }}>
-          Enter a prompt and click Generate
+          Введите промпт и нажмите Генерировать
         </p>
       </div>
     </div>
@@ -214,7 +215,7 @@ function GeneratingState({
             </motion.p>
           </AnimatePresence>
           <p className="text-xs" style={{ color: "#4B5563" }}>
-            ~{remaining}s remaining
+            ~{remaining}с осталось
           </p>
           {stageDetail ? (
             <p className="text-[11px]" style={{ color: "#6B7280" }}>
@@ -322,10 +323,10 @@ function SuccessState({
       >
         <div className="flex items-center gap-3">
           {[
-            { label: "Model", value: result.model.split(" ")[0] },
+            { label: "Модель", value: result.model.split(" ")[0] },
             { label: "Seed", value: result.seed.toString().slice(0, 8) },
-            { label: "Size", value: `${result.width}×${result.height}` },
-            ...(isVideo ? [{ label: "Type", value: "Video" }] : []),
+            { label: "Размер", value: `${result.width}×${result.height}` },
+            ...(isVideo ? [{ label: "Тип", value: "Видео" }] : []),
           ].map((m) => (
             <div key={m.label} className="flex items-center gap-1.5">
               <span className="text-[10px] uppercase tracking-wider" style={{ color: "#4B5563" }}>
@@ -341,12 +342,12 @@ function SuccessState({
         <div className="flex gap-2">
           <ActionChip
             icon={<Download className="w-3.5 h-3.5" />}
-            label="Download"
+            label="Скачать"
             onClick={handleDownload}
           />
           <ActionChip
             icon={<RotateCcw className="w-3.5 h-3.5" />}
-            label="Regenerate"
+            label="Перегенерировать"
             onClick={onRegenerate}
           />
         </div>
@@ -392,9 +393,11 @@ function ActionChip({
 // ── Error ─────────────────────────────────────────────────────────────────────
 function ErrorState({
   error,
+  userAction,
   onRetry,
 }: {
   error: string;
+  userAction?: string | null;
   onRetry: () => void;
 }) {
   return (
@@ -410,11 +413,16 @@ function ErrorState({
       </div>
       <div className="text-center space-y-1.5">
         <p className="text-sm" style={{ color: "#9CA3AF" }}>
-          Generation failed
+          Генерация не удалась
         </p>
         <p className="text-xs" style={{ color: "#6B7280" }}>
           {error}
         </p>
+        {userAction && (
+          <p className="text-xs mt-2 px-3 py-1.5 rounded-lg inline-block" style={{ color: "#93C5FD", background: "rgba(59,130,246,0.08)", border: "1px solid rgba(59,130,246,0.15)" }}>
+            💡 {userAction}
+          </p>
+        )}
       </div>
       <button
         onClick={onRetry}
@@ -427,7 +435,7 @@ function ErrorState({
         }}
       >
         <RefreshCw className="w-4 h-4" />
-        Retry
+        Повторить
       </button>
     </div>
   );
@@ -435,7 +443,7 @@ function ErrorState({
 
 // ── Main export ───────────────────────────────────────────────────────────────
 export function OutputPanel({
-  status, progress, statusText, stageDetail, result, error,
+  status, progress, statusText, stageDetail, result, error, userAction,
   referenceImage, generationType, mode, onRetry, onRegenerate, estSeconds,
 }: OutputPanelProps) {
   return (
@@ -496,7 +504,7 @@ export function OutputPanel({
             exit={{ opacity: 0 }}
             className="absolute inset-0"
           >
-            <ErrorState error={error ?? "Unknown error"} onRetry={onRetry} />
+            <ErrorState error={error ?? "Неизвестная ошибка"} userAction={userAction} onRetry={onRetry} />
           </motion.div>
         )}
       </AnimatePresence>

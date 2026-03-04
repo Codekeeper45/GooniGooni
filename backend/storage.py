@@ -16,6 +16,7 @@ from typing import Any, Generator, Optional
 
 from config import (
     DB_PATH,
+    LOCAL_ADMIN_DB_PATH,
     RESULTS_PATH,
     DEFAULT_PAGE_SIZE,
     MAX_PAGE_SIZE,
@@ -986,3 +987,76 @@ def result_file_path(task_id: str, extension: str) -> str:
 def preview_file_path(task_id: str) -> str:
     """Return the absolute path for the preview JPEG thumbnail."""
     return str(task_dir(task_id) / "preview.jpg")
+
+
+# ─── Local admin credentials DB (admin.db) ────────────────────────────────────
+
+_ADMIN_CREATE_SQL = """
+CREATE TABLE IF NOT EXISTS admin_credentials (
+    id             INTEGER PRIMARY KEY CHECK (id = 1),
+    password_hash  TEXT NOT NULL,
+    is_default     INTEGER NOT NULL DEFAULT 1,
+    updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+"""
+
+
+@contextmanager
+def _admin_db() -> Generator[sqlite3.Connection, None, None]:
+    """Context manager that yields a connection to the local admin.db."""
+    Path(LOCAL_ADMIN_DB_PATH).parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(LOCAL_ADMIN_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def init_local_admin_db(default_hash: str) -> None:
+    """Create admin_credentials table and seed with default password if empty."""
+    with _admin_db() as conn:
+        conn.executescript(_ADMIN_CREATE_SQL)
+        row = conn.execute(
+            "SELECT id FROM admin_credentials WHERE id = 1"
+        ).fetchone()
+        if row is None:
+            conn.execute(
+                "INSERT INTO admin_credentials (id, password_hash, is_default, updated_at) "
+                "VALUES (1, ?, 1, ?)",
+                (default_hash, _now_iso()),
+            )
+
+
+def get_admin_credentials() -> dict | None:
+    """Return admin credentials row as dict, or None if DB/table missing.
+    Raises sqlite3.DatabaseError if file is corrupted (handled by admin_security recovery)."""
+    if not os.path.exists(LOCAL_ADMIN_DB_PATH):
+        return None
+    with _admin_db() as conn:
+        try:
+            row = conn.execute(
+                "SELECT password_hash, is_default, updated_at "
+                "FROM admin_credentials WHERE id = 1"
+            ).fetchone()
+            return dict(row) if row else None
+        except sqlite3.OperationalError as e:
+            # Table doesn't exist yet — not corrupted, just uninitialized
+            if "no such table" in str(e):
+                return None
+            raise
+
+
+def update_admin_password(new_hash: str) -> None:
+    """Update the admin password hash and clear the is_default flag."""
+    with _admin_db() as conn:
+        conn.execute(
+            "UPDATE admin_credentials SET password_hash = ?, is_default = 0, updated_at = ? "
+            "WHERE id = 1",
+            (new_hash, _now_iso()),
+        )

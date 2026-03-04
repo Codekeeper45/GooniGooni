@@ -4,9 +4,12 @@ import { router } from "./routes";
 import { GalleryProvider } from "./context/GalleryContext";
 import { GenerationProvider } from "./context/GenerationContext";
 import { ensureGenerationSession } from "./utils/sessionClient";
+import { ErrorBoundary } from "./components/ErrorBoundary";
+import { useOnboarding, OnboardingScreen } from "./components/OnboardingScreen";
 
 export default function App() {
   const [sessionReady, setSessionReady] = useState(false);
+  const { showOnboarding, dismissOnboarding } = useOnboarding();
 
   useEffect(() => {
     let active = true;
@@ -31,16 +34,19 @@ export default function App() {
         className="min-h-screen flex items-center justify-center"
         style={{ background: "#0B0E14", color: "#9CA3AF", fontFamily: "'Space Grotesk', sans-serif" }}
       >
-        Initializing session...
+        Загрузка сессии...
       </div>
     );
   }
 
   return (
-    <GalleryProvider>
-      <GenerationProvider>
-        <RouterProvider router={router} />
-      </GenerationProvider>
-    </GalleryProvider>
+    <ErrorBoundary>
+      <GalleryProvider>
+        <GenerationProvider>
+          {showOnboarding && <OnboardingScreen onDismiss={dismissOnboarding} />}
+          <RouterProvider router={router} />
+        </GenerationProvider>
+      </GalleryProvider>
+    </ErrorBoundary>
   );
 }

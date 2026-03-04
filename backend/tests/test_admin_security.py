@@ -41,9 +41,12 @@ def _reset_rate_limiter(monkeypatch, tmp_path):
     import storage
 
     db_file = str(tmp_path / "test_admin.db")
+    admin_db_file = str(tmp_path / "test_local_admin.db")
     monkeypatch.setattr(config, "DB_PATH", db_file)
+    monkeypatch.setattr(config, "LOCAL_ADMIN_DB_PATH", admin_db_file)
     monkeypatch.setattr(config, "RESULTS_PATH", str(tmp_path))
     monkeypatch.setattr(storage, "DB_PATH", db_file)
+    monkeypatch.setattr(storage, "LOCAL_ADMIN_DB_PATH", admin_db_file)
     monkeypatch.setattr(storage, "RESULTS_PATH", str(tmp_path))
     storage.init_db()
 
@@ -169,7 +172,8 @@ def test_verify_admin_login_password_accepts_pbkdf2(monkeypatch):
     monkeypatch.delenv("ADMIN_KEY", raising=False)
 
     req = DummyRequest()
-    ip = verify_admin_login_password(req, "admin", "secret-pass")
+    result = verify_admin_login_password(req, "admin", "secret-pass")
+    ip, _is_default = result
     assert ip == "127.0.0.1"
 
 
@@ -211,7 +215,8 @@ def test_verify_admin_login_password_rate_limits_failed_attempts_only(monkeypatc
     assert exc3.value.status_code == 429
     assert exc3.value.detail["code"] == "admin_login_rate_limited"
 
-    assert verify_admin_login_password(req, "admin", "secret-pass") == "10.0.0.9"
+    ip, _is_default = verify_admin_login_password(req, "admin", "secret-pass")
+    assert ip == "10.0.0.9"
 
 
 def test_verify_admin_login_password_success_clears_failure_counter(monkeypatch):
@@ -229,7 +234,8 @@ def test_verify_admin_login_password_success_clears_failure_counter(monkeypatch)
         verify_admin_login_password(req, "admin", "wrong-1")
     assert exc1.value.status_code == 403
 
-    assert verify_admin_login_password(req, "admin", "secret-pass") == "10.0.0.10"
+    ip, _is_default = verify_admin_login_password(req, "admin", "secret-pass")
+    assert ip == "10.0.0.10"
 
     with pytest.raises(HTTPException) as exc2:
         verify_admin_login_password(req, "admin", "wrong-2")
@@ -246,6 +252,8 @@ def test_verify_admin_login_password_success_clears_failure_counter(monkeypatch)
 
 
 def test_verify_admin_login_password_requires_explicit_env(monkeypatch):
+    """Without env vars, dual-path falls back to local admin.db.
+    With wrong password, returns admin_credentials_invalid."""
     from admin_security import verify_admin_login_password
 
     monkeypatch.delenv("ADMIN_LOGIN", raising=False)
@@ -256,4 +264,4 @@ def test_verify_admin_login_password_requires_explicit_env(monkeypatch):
     with pytest.raises(HTTPException) as exc:
         verify_admin_login_password(req, "admin", "x" * 24)
     assert exc.value.status_code == 403
-    assert exc.value.detail["code"] == "admin_misconfigured"
+    assert exc.value.detail["code"] == "admin_credentials_invalid"

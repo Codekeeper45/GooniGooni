@@ -28,10 +28,10 @@ interface HistoryPanelProps {
 
 function timeAgo(date: Date): string {
   const diff = Math.floor((Date.now() - date.getTime()) / 1000);
-  if (diff < 60) return "just now";
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  return `${Math.floor(diff / 86400)}d ago`;
+  if (diff < 60) return "только что";
+  if (diff < 3600) return `${Math.floor(diff / 60)}м назад`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}ч назад`;
+  return `${Math.floor(diff / 86400)}д назад`;
 }
 
 export function HistoryPanel({
@@ -80,7 +80,7 @@ export function HistoryPanel({
               <div className="flex items-center gap-2.5">
                 <Clock className="w-4 h-4" style={{ color: "#4F8CFF" }} />
                 <span className="text-sm" style={{ color: "#E5E7EB" }}>
-                  History
+                  История
                 </span>
                 {history.length > 0 && (
                   <span
@@ -112,7 +112,7 @@ export function HistoryPanel({
                     }}
                   >
                     <Trash2 className="w-3.5 h-3.5" />
-                    Clear
+                    Очистить
                   </button>
                 )}
                 <button
@@ -148,10 +148,10 @@ export function HistoryPanel({
                   </div>
                   <div className="text-center">
                     <p className="text-sm" style={{ color: "#4B5563" }}>
-                      No generations yet
+                      Пока нет генераций
                     </p>
                     <p className="text-xs mt-1" style={{ color: "#374151" }}>
-                      Your history will appear here
+                      Ваша история появится здесь
                     </p>
                   </div>
                 </div>
@@ -210,6 +210,7 @@ function HistoryCard({
           <img
             src={item.thumbnailUrl}
             alt={item.prompt}
+            loading="lazy"
             className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
           />
         ) : (
@@ -230,7 +231,7 @@ function HistoryCard({
           }}
         >
           <Icon className="w-3 h-3" />
-          {item.type === "video" ? "Video" : "Image"}
+          {item.type === "video" ? "Видео" : "Изображение"}
         </span>
 
         <span
@@ -271,7 +272,7 @@ function HistoryCard({
             }}
           >
             <RotateCcw className="w-3.5 h-3.5" />
-            Reuse
+            Использовать
           </div>
         </div>
       </div>

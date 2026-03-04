@@ -15,8 +15,11 @@ from storage import preview_file_path, result_file_path
 
 _SAMPLERS = {
     "Euler a": "EulerAncestralDiscreteScheduler",
+    "Euler": "EulerDiscreteScheduler",
     "DPM++ 2M Karras": "DPMSolverMultistepScheduler",
-    "DPM++ SDE Karras": "DPMSolverSDEScheduler",
+    "DPM++ SDE Karras": "DPMSolverMultistepScheduler",
+    "Heun": "HeunDiscreteScheduler",
+    "LMS": "LMSDiscreteScheduler",
 }
 
 _DEFAULT_PONY_VAE = "madebyollin/sdxl-vae-fp16-fix"
@@ -50,12 +53,6 @@ class PonyPipeline(BasePipeline):
             use_safetensors=True,
             low_cpu_mem_usage=False,
         )
-        if self.vae_model_id:
-            pipe_kwargs["vae"] = AutoencoderKL.from_pretrained(
-                self.vae_model_id,
-                cache_dir=cache_path,
-                torch_dtype=torch.bfloat16,
-            )
 
         self._txt2img = StableDiffusionXLPipeline.from_pretrained(
             self.hf_model_id,
@@ -66,7 +63,7 @@ class PonyPipeline(BasePipeline):
         self._txt2img.scheduler = DPMSolverMultistepScheduler.from_config(
             self._txt2img.scheduler.config,
             use_karras_sigmas=True,
-            algorithm_type="sde-dpmsolver++"
+            algorithm_type="dpmsolver++"  # Simplified from sde-dpmsolver++
         )
 
         self._img2img = StableDiffusionXLImg2ImgPipeline.from_pipe(self._txt2img)
@@ -74,46 +71,42 @@ class PonyPipeline(BasePipeline):
         for pipe in (self._txt2img, self._img2img):
             if hasattr(pipe, "vae") and pipe.vae is not None:
                 pipe.vae.enable_slicing()
+                # Force VAE to float32 to avoid colorful dot artifacts (NaNs during decode)
+                pipe.vae.to(dtype=torch.float32)
 
         self._mark_loaded_for_cache(cache_path)
 
     def _apply_sampler(self, pipe, sampler_name: str) -> None:
+        """Apply a specific scheduler to the pipeline."""
         from diffusers import schedulers as sched
 
         cls_name = _SAMPLERS.get(sampler_name, "EulerAncestralDiscreteScheduler")
-        cls = getattr(sched, cls_name, None)
-        if cls:
-            kwargs = {}
-            if "Karras" in sampler_name:
-                kwargs["use_karras_sigmas"] = True
-            if "SDE" in sampler_name:
-                kwargs["algorithm_type"] = "sde-dpmsolver++"
-            # Some Pony models like DPM++ 2M Karras also benefit from algorithm_type="sde-dpmsolver++"
-            elif sampler_name == "DPM++ 2M Karras":
-                kwargs["algorithm_type"] = "sde-dpmsolver++"
+        cls = getattr(sched, cls_name, sched.EulerAncestralDiscreteScheduler)
+        
+        kwargs = {}
+        if "Karras" in sampler_name:
+            kwargs["use_karras_sigmas"] = True
+        
+        if sampler_name == "DPM++ 2M Karras":
+            kwargs["algorithm_type"] = "dpmsolver++"
+        elif sampler_name == "DPM++ SDE Karras":
+            kwargs["algorithm_type"] = "sde-dpmsolver++"
 
-            pipe.scheduler = cls.from_config(pipe.scheduler.config, **kwargs)
+        pipe.scheduler = cls.from_config(pipe.scheduler.config, **kwargs)
 
     @staticmethod
-    def _run_pipe_checked(pipe, **kwargs) -> Image.Image:
-
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always", RuntimeWarning)
-            image = pipe(**kwargs).images[0]
-
-        saw_invalid_cast_warning = any(
-            "invalid value encountered in cast" in str(warn.message)
-            for warn in caught
-        )
-
+    def _check_image_quality(image: Image.Image, caught_warnings: list = None) -> Image.Image:
+        """Check the quality of a generated image and raise errors if it collapsed."""
         if image is None:
             raise RuntimeError("Pony pipeline returned empty image output.")
+        
         arr = np.asarray(image)
         if not np.isfinite(arr).all():
             raise RuntimeError(
                 "Pony decode produced invalid pixel values (NaN/Inf). "
                 "Retry with lower resolution/steps or a different seed."
             )
+        
         # Detect near-uniform gray canvas collapse before saving artifacts.
         dynamic_range = int(arr.max()) - int(arr.min())
         if dynamic_range < 4:
@@ -121,6 +114,14 @@ class PonyPipeline(BasePipeline):
                 "Pony output collapsed to a near-uniform image. "
                 "Retry with a different seed or prompt."
             )
+
+        saw_invalid_cast_warning = False
+        if caught_warnings:
+             saw_invalid_cast_warning = any(
+                "invalid value encountered in cast" in str(warn.message)
+                for warn in caught_warnings
+            )
+
         # RuntimeWarning alone can be noisy; fail only when it correlates with low-detail output.
         if saw_invalid_cast_warning and dynamic_range < 10:
             raise RuntimeError(
@@ -253,17 +254,31 @@ class PonyPipeline(BasePipeline):
                 with torch.inference_mode():
                     if mode == "txt2img":
                         self._apply_sampler(self._txt2img, attempt_sampler)
-                        image = self._run_pipe_checked(
-                            self._txt2img,
+                        
+                        # Generate latents
+                        latents = self._txt2img(
                             prompt=prompt,
                             negative_prompt=negative_prompt or None,
                             width=attempt_width,
                             height=attempt_height,
                             num_inference_steps=attempt_steps,
                             guidance_scale=attempt_cfg,
-                            clip_skip=clip_skip,
                             generator=generator,
-                        )
+                            output_type="latent",
+                        ).images[0]
+                        
+                        if not torch.isfinite(latents).all():
+                            raise RuntimeError("Pony UNet produced NaNs in latents!")
+
+                        # Manual VAE decode in float32
+                        latents = latents.unsqueeze(0).to(device="cuda", dtype=torch.float32)
+                        with torch.no_grad():
+                            # SDXL VAE scaling factor is usually 0.13025
+                            scaling_factor = getattr(self._txt2img.vae.config, "scaling_factor", 0.13025)
+                            decoded = self._txt2img.vae.decode(latents / scaling_factor, return_dict=False)[0]
+                            image = self._txt2img.image_processor.postprocess(decoded, output_type="pil")[0]
+                        
+                        image = self._check_image_quality(image)
 
                     elif mode == "img2img":
                         ref_img = self.decode_image(request["reference_image"]).resize(
@@ -271,17 +286,30 @@ class PonyPipeline(BasePipeline):
                             Image.LANCZOS,
                         )
                         self._apply_sampler(self._img2img, attempt_sampler)
-                        image = self._run_pipe_checked(
-                            self._img2img,
+                        
+                        # Generate latents from image
+                        latents = self._img2img(
                             prompt=prompt,
                             negative_prompt=negative_prompt or None,
                             image=ref_img,
                             strength=attempt_denoise,
                             num_inference_steps=attempt_steps,
                             guidance_scale=attempt_cfg,
-                            clip_skip=clip_skip,
                             generator=generator,
-                        )
+                            output_type="latent",
+                        ).images[0]
+
+                        if not torch.isfinite(latents).all():
+                            raise RuntimeError("Pony img2img UNet produced NaNs in latents!")
+
+                        # Manual VAE decode in float32
+                        latents = latents.unsqueeze(0).to(device="cuda", dtype=torch.float32)
+                        with torch.no_grad():
+                            scaling_factor = getattr(self._img2img.vae.config, "scaling_factor", 0.13025)
+                            decoded = self._img2img.vae.decode(latents / scaling_factor, return_dict=False)[0]
+                            image = self._img2img.image_processor.postprocess(decoded, output_type="pil")[0]
+                        
+                        image = self._check_image_quality(image)
                     else:
                         raise ValueError(f"Unsupported mode for pony: {mode}")
                 request["_effective_width"] = attempt_width

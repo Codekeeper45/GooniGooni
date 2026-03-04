@@ -93,7 +93,7 @@
         },
         "steps": {
           "type": "int",
-          "default": 30,
+          "default": 25,
           "min": 20,
           "max": 60,
           "step": 1,
@@ -103,7 +103,7 @@
         },
         "cfg_scale": {
           "type": "float",
-          "default": 6.0,
+          "default": 7.0,
           "min": 1.0,
           "max": 12.0,
           "step": 0.5,
@@ -145,7 +145,13 @@
         { "width": 512, "height": 512, "label": "512×512" },
         { "width": 768, "height": 768, "label": "768×768" },
         { "width": 1024, "height": 1024, "label": "1024×1024" }
-      ]
+      ],
+      
+      "metadata": {
+        "vram_min_gb": 6,
+        "lora_base": "sdxl",
+        "quality_tags": "score_9, score_8_up, score_7_up"
+      }
     },
     
     "Flux_dev_nf4": {
@@ -179,7 +185,7 @@
         },
         "steps": {
           "type": "int",
-          "default": 25,
+          "default": 20,
           "min": 15,
           "max": 50,
           "step": 1,
@@ -188,13 +194,23 @@
         },
         "guidance_scale": {
           "type": "float",
-          "default": 3.5,
+          "default": 1.0,
           "min": 1.0,
           "max": 10.0,
           "step": 0.1,
           "label": "Guidance Scale",
           "advanced": true,
           "help": "How closely to follow the prompt"
+        },
+        "distilled_cfg": {
+          "type": "float",
+          "default": 3.5,
+          "min": 1.0,
+          "max": 10.0,
+          "step": 0.5,
+          "label": "Distilled CFG",
+          "advanced": true,
+          "help": "CFG scale for distilled model"
         },
         "sampler": {
           "type": "enum",
@@ -220,7 +236,13 @@
         { "width": 512, "height": 512, "label": "512×512" },
         { "width": 768, "height": 768, "label": "768×768" },
         { "width": 1024, "height": 1024, "label": "1024×1024" }
-      ]
+      ],
+      
+      "metadata": {
+        "vram_min_gb": 6,
+        "lora_base": "flux",
+        "quality_tags": null
+      }
     }
   },
 
@@ -396,7 +418,13 @@
         { "width": 512, "height": 512, "label": "512×512" },
         { "width": 768, "height": 768, "label": "768×768" },
         { "width": 1024, "height": 1024, "label": "1024×1024" }
-      ]
+      ],
+      
+      "metadata": {
+        "vram_min_gb": 10,
+        "lora_base": null,
+        "quality_tags": null
+      }
     },
     
     "Phr00t_WAN_Rapid_AllInOne_NSFW_v12": {
@@ -533,7 +561,13 @@
         { "width": 512, "height": 512, "label": "512×512" },
         { "width": 768, "height": 768, "label": "768×768" },
         { "width": 1024, "height": 1024, "label": "1024×1024" }
-      ]
+      ],
+      
+      "metadata": {
+        "vram_min_gb": 10,
+        "lora_base": null,
+        "quality_tags": null
+      }
     }
   },
 
@@ -624,6 +658,43 @@
       "description": "Maximum quality",
       "width": 1024, "height": 1024,
       "steps_multiplier": 1.3
+    }
+  },
+
+  "environment": {
+    "type": "auto",
+    "default": "local",
+    "options": ["local", "production"]
+  },
+  "available_modes": {
+    "local": ["local", "remote"],
+    "production": ["remote"]
+  },
+  "default_mode": {
+    "local": "local",
+    "production": "remote"
+  },
+  "local_mode": {
+    "comfyui_url": "http://127.0.0.1:8188",
+    "websocket_url": "ws://127.0.0.1:8188/ws",
+    "health_check_interval_ms": 10000,
+    "connection_timeout_ms": 5000
+  },
+  "remote_mode": {
+    "timeout_ms": 60000,
+    "retry_attempts": 3,
+    "retry_base_delay_ms": 1000
+  },
+  "workflows": {
+    "pony": {
+      "file": "comfy/workflows/pony_txt2img.json",
+      "display_name": "Pony V6 XL",
+      "category": "hentai"
+    },
+    "flux": {
+      "file": "comfy/workflows/flux_txt2img.json",
+      "display_name": "Flux dev nf4",
+      "category": "realistic"
     }
   }
 }

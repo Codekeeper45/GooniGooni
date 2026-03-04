@@ -81,17 +81,35 @@
 npm install
 npm i -D @types/react @types/react-dom
 
-# Copy env file
-cp .env.example .env
-
-# Edit .env
-VITE_API_URL=https://YOUR_WORKSPACE--gooni-gooni-backend.modal.run
-VITE_API_KEY=your-api-key
-VITE_ADMIN_KEY=your-admin-key
-
 # Test dev server
 npm run dev
 ```
+
+#### Environment Files
+
+`.env.local` (for development with Local + Remote mode):
+```env
+VITE_ENVIRONMENT=local
+VITE_API_URL=https://YOUR_WORKSPACE--gooni-gooni-backend.modal.run
+```
+
+`.env.production` (for production — Remote mode only):
+```env
+VITE_ENVIRONMENT=production
+VITE_API_URL=https://YOUR_WORKSPACE--gooni-gooni-backend.modal.run
+```
+
+#### ComfyUI Setup (Local Mode)
+
+Local Mode requires ComfyUI running on `localhost:8188`:
+
+1. Install [ComfyUI](https://github.com/comfyanonymous/ComfyUI)
+2. Place model checkpoints in `ComfyUI/models/checkpoints/`:
+   - `ponyDiffusionV6XL_v6StartWithThisOne.safetensors` (for Pony model)
+   - `flux1-dev-bnb-nf4-v2.safetensors` (for Flux model)
+3. Start ComfyUI: `python main.py --listen 127.0.0.1 --port 8188`
+4. Vite dev server proxies `/comfy-api/*` → `http://127.0.0.1:8188`
+5. The ComfyUI status indicator in the UI shows green when connected
 
 ---
 

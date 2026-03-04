@@ -34,7 +34,7 @@ MODEL_IDS: dict[str, str] = {
 
     # Anime image – Pony Diffusion V6 XL (full SDXL pipeline)
     # Repo: https://huggingface.co/Polenov2024/Pony-Diffusion-V6-XL
-    "pony": os.environ.get("PONY_MODEL_ID", "Polenov2024/Pony-Diffusion-V6-XL"),
+    "pony": os.environ.get("PONY_MODEL_ID", "stablediffusionapi/pony-diffusion-v6-xl"),
 
     # Realistic image – Flux.1 [dev] (base repo, NF4 quantized on-the-fly via BnB)
     # Repo: https://huggingface.co/black-forest-labs/FLUX.1-dev
@@ -93,6 +93,9 @@ VIDEO_FIXED_CONSTRAINTS = {
     "phr00t": {"steps": 40, "cfg_scale": 7.0},    # Optimal: 40 steps, CFG 7.0 (WAN 2.2 Rapid)
 }
 
+# ─── Local admin ───────────────────────────────────────────────────────────────
+LOCAL_ADMIN_DB_PATH = os.environ.get("LOCAL_ADMIN_DB_PATH", "./admin.db")
+
 # ─── Gallery defaults ──────────────────────────────────────────────────────────
 DEFAULT_PAGE_SIZE = 20
 MAX_PAGE_SIZE = 100
@@ -103,6 +106,36 @@ GEN_SESSION_MAX_ACTIVE_TASKS = int(os.environ.get("GEN_SESSION_MAX_ACTIVE_TASKS"
 NO_READY_ACCOUNT_WAIT_SECONDS = int(os.environ.get("NO_READY_ACCOUNT_WAIT_SECONDS", "30"))
 
 # ─── Model metadata (schema exposed via /models endpoint) ──────────────────────
+
+# ─── Environment detection (hybrid mode) ──────────────────────────────────────
+_LOCAL_ENV_VALUES = {"local", "dev", "development", "test"}
+
+
+def get_environment() -> str:
+    """
+    Returns 'local' or 'production' based on APP_ENV.
+    Values local/dev/development/test → local; everything else → production.
+    """
+    app_env = (os.environ.get("APP_ENV") or "").strip().lower()
+    if app_env in _LOCAL_ENV_VALUES:
+        return "local"
+    return "production"
+
+
+def get_available_modes() -> list[str]:
+    """Returns available generation modes for the current environment."""
+    env = get_environment()
+    if env == "local":
+        return ["local", "remote"]
+    return ["remote"]
+
+
+def get_default_mode() -> str:
+    """Returns the default generation mode for the current environment."""
+    env = get_environment()
+    return "local" if env == "local" else "remote"
+
+
 MODELS_SCHEMA = [
     {
         "id": "anisora",

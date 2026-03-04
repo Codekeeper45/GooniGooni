@@ -8,8 +8,17 @@
  * All generation state lives in GenerationContext (MediaGenApp passes it down).
  */
 
-import { useState, useRef, useCallback } from "react";
-import { configManager } from "../../utils/configManager";
+import { useState, useRef, useCallback, useEffect } from "react";
+import { Save, Settings2 } from "lucide-react";
+import { configManager, type ModelId } from "../../utils/configManager";
+import { useGPUInfo } from "../../hooks/useGPUInfo";
+import { useLoRA } from "../../hooks/useLoRA";
+import { useGeneration } from "../../context/GenerationContext";
+import { setActiveLoRAs } from "../../utils/loraState";
+import { GPUInfoBanner } from "../GPUInfoBanner";
+import { LoRASection } from "./LoRASection";
+import { SavePresetDialog, ManagePresetsDialog, type CurrentParams } from "./PresetDialogs";
+import { Button } from "../ui/button";
 
 import { TypeModelSection   } from "./sections/TypeModelSection";
 import { QuickPresetsSection } from "./sections/QuickPresetsSection";
@@ -85,6 +94,54 @@ export function ControlPanel(props: ControlPanelProps) {
   const [promptFocused, setPromptFocused] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
 
+  // GPU info
+  const { gpuInfo, loading: gpuLoading, error: gpuError } = useGPUInfo();
+
+  // Device selection (T039) — persisted to localStorage
+  const [selectedDevice, setSelectedDevice] = useState<string>(() => {
+    try {
+      return localStorage.getItem("gg_device_selection") ?? "gpu";
+    } catch {
+      return "gpu";
+    }
+  });
+  const handleDeviceChange = useCallback((device: string) => {
+    setSelectedDevice(device);
+    try {
+      localStorage.setItem("gg_device_selection", device);
+    } catch { /* ignore */ }
+  }, []);
+
+  // LoRA
+  const { generationMode } = useGeneration();
+  const currentModelId: ModelId = generationType === "video"
+    ? (videoModel as ModelId)
+    : (imageModel as ModelId);
+  const lora = useLoRA(generationType === "image" ? currentModelId : null);
+
+  // Sync LoRA selections to shared state for GenerationContext to read
+  useEffect(() => {
+    setActiveLoRAs(lora.selected);
+  }, [lora.selected]);
+
+  // Preset dialogs
+  const [showSavePreset, setShowSavePreset] = useState(false);
+  const [showManagePresets, setShowManagePresets] = useState(false);
+
+  const currentParams: CurrentParams = {
+    steps: imageSteps,
+    cfg_scale: cfgScaleImage,
+    sampler,
+    scheduler: "normal", // scheduler isn't in ControlPanel props, use sensible default
+    width,
+    height,
+    clip_skip: clipSkip,
+  };
+
+  const currentModelFile = generationType === "video"
+    ? (videoModel as string)
+    : (imageModel as string);
+
   // File input refs
   const fileRef       = useRef<HTMLInputElement>(null);
   const firstFrameRef = useRef<HTMLInputElement>(null);
@@ -127,6 +184,14 @@ export function ControlPanel(props: ControlPanelProps) {
           videoMode={videoMode} setVideoMode={setVideoMode}
           imageMode={imageMode} setImageMode={setImageMode}
           disabled={isGenerating}
+        />
+
+        <GPUInfoBanner
+          gpuInfo={gpuInfo}
+          loading={gpuLoading}
+          error={gpuError}
+          selectedDevice={selectedDevice}
+          onDeviceChange={handleDeviceChange}
         />
 
         <QuickPresetsSection
@@ -185,6 +250,55 @@ export function ControlPanel(props: ControlPanelProps) {
           imageGuidanceScale={imageGuidanceScale} setImageGuidanceScale={setImageGuidanceScale}
           imgDenoisingStrength={imgDenoisingStrength} setImgDenoisingStrength={setImgDenoisingStrength}
           disabled={isGenerating}
+        />
+
+        {generationType === "image" && lora.visible && (
+          <LoRASection
+            files={lora.files}
+            selected={lora.selected}
+            loading={lora.loading}
+            error={lora.error}
+            scanPath={lora.scanPath}
+            visible={lora.visible}
+            isRemoteMode={generationMode === "remote"}
+            toggleLoRA={lora.toggleLoRA}
+            setStrength={lora.setStrength}
+            refresh={lora.refresh}
+            disabled={isGenerating}
+          />
+        )}
+
+        {/* Preset actions */}
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setShowSavePreset(true)}
+            disabled={isGenerating}
+            className="border-white/10 text-zinc-400 hover:text-white text-xs"
+          >
+            <Save className="size-3.5" /> Сохранить как пресет
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setShowManagePresets(true)}
+            className="text-zinc-500 hover:text-white text-xs"
+          >
+            <Settings2 className="size-3.5" /> Пресеты
+          </Button>
+        </div>
+
+        <SavePresetDialog
+          open={showSavePreset}
+          onOpenChange={setShowSavePreset}
+          modelFile={currentModelFile}
+          currentParams={currentParams}
+        />
+
+        <ManagePresetsDialog
+          open={showManagePresets}
+          onOpenChange={setShowManagePresets}
         />
 
       </div>

@@ -6,6 +6,47 @@ import inferenceSettings from "../../inference_settings.json";
 
 export type ModelId = "pony" | "flux" | "anisora" | "phr00t";
 export type GenerationType = "image" | "video";
+export type GenerationModeId = "local" | "remote";
+
+/** Per-environment list of available modes (from inference_settings.json). */
+export interface AvailableModesMap {
+  local: GenerationModeId[];
+  production: GenerationModeId[];
+}
+
+/** Per-environment default mode (from inference_settings.json). */
+export interface DefaultModeMap {
+  local: GenerationModeId;
+  production: GenerationModeId;
+}
+
+/** Local mode connection settings (from inference_settings.json). */
+export interface LocalModeConfig {
+  comfyui_url: string;
+  websocket_url: string;
+  health_check_interval_ms: number;
+  connection_timeout_ms: number;
+}
+
+/** Remote mode connection settings (from inference_settings.json). */
+export interface RemoteModeConfig {
+  timeout_ms: number;
+  retry_attempts: number;
+  retry_base_delay_ms: number;
+}
+
+/** Workflow entry (from inference_settings.json). */
+export interface WorkflowConfig {
+  file: string;
+  display_name: string;
+  category: string;
+}
+
+export interface ModelMetadata {
+  vram_min_gb: number;
+  lora_base: 'sdxl' | 'flux' | null;
+  quality_tags: string | null;
+}
 
 interface ModelConfig {
   id: string;
@@ -18,6 +59,7 @@ interface ModelConfig {
   parameters: Record<string, ParameterConfig>;
   fixed_parameters?: Record<string, FixedParameterConfig>;
   recommended_resolutions: ResolutionConfig[];
+  metadata?: ModelMetadata;
 }
 
 interface ModeConfig {
@@ -294,6 +336,56 @@ export class InferenceConfigManager {
   }
 
   // ─── Build payload for API ──────────────────────────────────────────────────
+
+  // ─── Mode-aware config (hybrid mode) ────────────────────────────────────────
+
+  /** Returns the available_modes map from inference_settings.json. */
+  getAvailableModesMap(): AvailableModesMap {
+    const cfg = this.config as any;
+    return (cfg.available_modes ?? { local: ["local", "remote"], production: ["remote"] }) as AvailableModesMap;
+  }
+
+  /** Returns the default_mode map from inference_settings.json. */
+  getDefaultModeMap(): DefaultModeMap {
+    const cfg = this.config as any;
+    return (cfg.default_mode ?? { local: "local", production: "remote" }) as DefaultModeMap;
+  }
+
+  /** Returns local_mode settings from inference_settings.json. */
+  getLocalModeConfig(): LocalModeConfig {
+    const cfg = this.config as any;
+    return (cfg.local_mode ?? {
+      comfyui_url: "http://127.0.0.1:8188",
+      websocket_url: "ws://127.0.0.1:8188/ws",
+      health_check_interval_ms: 10000,
+      connection_timeout_ms: 5000,
+    }) as LocalModeConfig;
+  }
+
+  /** Returns remote_mode settings from inference_settings.json. */
+  getRemoteModeConfig(): RemoteModeConfig {
+    const cfg = this.config as any;
+    return (cfg.remote_mode ?? {
+      timeout_ms: 60000,
+      retry_attempts: 3,
+      retry_base_delay_ms: 1000,
+    }) as RemoteModeConfig;
+  }
+
+  /** Returns workflow definitions from inference_settings.json, keyed by model. */
+  getWorkflows(): Record<string, WorkflowConfig> {
+    const cfg = this.config as any;
+    return (cfg.workflows ?? {}) as Record<string, WorkflowConfig>;
+  }
+
+  /** Returns workflow config for a specific model, or null if not found. */
+  getWorkflowForModel(modelId: string): WorkflowConfig | null {
+    const workflows = this.getWorkflows();
+    return workflows[modelId] ?? null;
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────────
+
   buildPayload(
     modelId: ModelId,
     mode: string,
@@ -404,6 +496,41 @@ export class InferenceConfigManager {
       const steps = values.steps || 30;
       return Math.round(steps * 0.4);
     }
+  }
+
+  // ─── Get model defaults (flat key→value map) ───────────────────────────────
+  getModelDefaults(modelId: ModelId): Record<string, any> {
+    const model = this.getModel(modelId);
+    if (!model) return {};
+
+    const defaults: Record<string, any> = {};
+
+    // Extract defaults from parameters
+    Object.entries(model.parameters).forEach(([key, param]) => {
+      if (param.default !== undefined) {
+        defaults[key] = param.default;
+      }
+    });
+
+    // Apply fixed parameter values (override tunables)
+    if (model.fixed_parameters) {
+      Object.entries(model.fixed_parameters).forEach(([key, fixed]) => {
+        defaults[key] = fixed.value;
+      });
+    }
+
+    // Add resolution defaults from recommended resolutions
+    const resolution = this.getPreferredInitialResolution(modelId);
+    defaults.width = resolution.width;
+    defaults.height = resolution.height;
+
+    return defaults;
+  }
+
+  // ─── Get model metadata (VRAM, LoRA base, quality tags) ────────────────────
+  getModelMetadata(modelId: ModelId): ModelMetadata | null {
+    const model = this.getModel(modelId);
+    return model?.metadata ?? null;
   }
 }
 

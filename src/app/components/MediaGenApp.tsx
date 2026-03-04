@@ -4,15 +4,22 @@
  * Now just a view orchestrator. All state and logic live in GenerationContext.
  */
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, lazy, Suspense } from "react";
 import { Navbar } from "./Navbar";
 import { ControlPanel } from "./ControlPanel";
 import { OutputPanel } from "./OutputPanel";
 import { HistoryPanel } from "./HistoryPanel";
+import { ModeSwitcher } from "./ModeSwitcher";
 import { useGeneration } from "../context/GenerationContext";
+
+// Dev-only: ComfyUI status indicator — lazy-loaded & tree-shaken in production
+const ComfyUIStatusSection = import.meta.env.DEV
+  ? lazy(() => import(/* @vite-ignore */ "./ComfyUIStatusWrapper"))
+  : () => null;
 
 export function MediaGenApp() {
   const {
+    generationMode, setGenerationMode,
     generationType, setGenerationType,
     videoModel, setVideoModel,
     imageModel, setImageModel,
@@ -44,7 +51,7 @@ export function MediaGenApp() {
     sampler, setSampler,
     imageGuidanceScale, setImageGuidanceScale,
     imgDenoisingStrength, setImgDenoisingStrength,
-    status, progress, statusText, stageDetail, error, result, estSeconds,
+    status, progress, statusText, stageDetail, error, userAction, result, estSeconds,
     generate, retry, regenerate,
     history,
   } = useGeneration();
@@ -93,7 +100,20 @@ export function MediaGenApp() {
       />
 
       <div className="flex-1 flex overflow-hidden min-h-0">
-        <ControlPanel
+        <div className="flex flex-col overflow-hidden">
+          {/* Mode Switcher (Local / Remote) — only visible in local environment */}
+          <div className="px-4 pt-3">
+            <ModeSwitcher
+              activeMode={generationMode}
+              onModeChange={setGenerationMode}
+            />
+            {/* ComfyUI status indicator — dev only, lazy loaded */}
+            <Suspense fallback={null}>
+              <ComfyUIStatusSection generationMode={generationMode} />
+            </Suspense>
+          </div>
+
+          <ControlPanel
           generationType={generationType}
           setGenerationType={setGenerationType}
           videoModel={videoModel}
@@ -165,6 +185,7 @@ export function MediaGenApp() {
           status={status}
           estSeconds={estSeconds}
         />
+        </div>
 
         <OutputPanel
           status={status}
@@ -173,6 +194,7 @@ export function MediaGenApp() {
           stageDetail={stageDetail}
           result={result}
           error={error}
+          userAction={userAction}
           referenceImage={referenceImage}
           generationType={generationType}
           mode={generationType === "video" ? videoMode : imageMode}

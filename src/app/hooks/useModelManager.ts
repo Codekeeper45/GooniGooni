@@ -23,6 +23,8 @@ export interface DownloadTask {
   error?: string;
   percentage: number;
   elapsed: number;
+  speedBps?: number;
+  etaSeconds?: number | null;
 }
 
 export interface CivitAIModel {
@@ -134,6 +136,7 @@ export function useModelManager() {
     comfyuiPath: string | null;
     checkpointsDir: string | null;
     comfyuiRunning?: boolean;
+    gpuAvailable?: boolean;
   } | null>(null);
 
   // CivitAI search
@@ -313,6 +316,7 @@ export function useModelManager() {
     downloads,
     loading,
     comfyStatus,
+    cpuMode: comfyStatus?.gpuAvailable === false,
     searchResults,
     searching,
     searchError,

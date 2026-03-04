@@ -27,7 +27,7 @@ class FluxPipeline(BasePipeline):
             return
 
         from diffusers import FluxPipeline as FluxTxt2Img
-        from diffusers import FluxImg2ImgPipeline
+        from diffusers import FluxImg2ImgPipeline, FluxTransformer2DModel
         from transformers import BitsAndBytesConfig
         import bitsandbytes  # noqa: F401
 
@@ -38,13 +38,20 @@ class FluxPipeline(BasePipeline):
             bnb_4bit_compute_dtype=torch.bfloat16,
         )
 
-        self._txt2img = FluxTxt2Img.from_pretrained(
+        transformer = FluxTransformer2DModel.from_pretrained(
             self.hf_model_id,
-            cache_dir=cache_path,
+            subfolder="transformer",
             quantization_config=nf4_config,
             torch_dtype=torch.bfloat16,
-            device_map="cuda",
+            cache_dir=cache_path,
         )
+
+        self._txt2img = FluxTxt2Img.from_pretrained(
+            self.hf_model_id,
+            transformer=transformer,
+            cache_dir=cache_path,
+            torch_dtype=torch.bfloat16,
+        ).to("cuda")
         self._img2img = FluxImg2ImgPipeline.from_pipe(self._txt2img)
 
         if hasattr(self._txt2img, "vae") and self._txt2img.vae is not None:

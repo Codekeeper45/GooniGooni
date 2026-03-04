@@ -4,12 +4,14 @@ Security helpers for admin endpoints:
 - Audit log writes to SQLite
 - Constant-time key comparison
 - Minimum key length enforcement
+- Local admin password management (admin.db)
 """
 from __future__ import annotations
 
 import hmac
 import hashlib
 import logging
+import os
 import sqlite3
 import threading
 import time
@@ -18,6 +20,23 @@ from datetime import datetime, timezone
 from fastapi import HTTPException, Header, Request, status
 
 logger = logging.getLogger("admin_security")
+
+# ─── Default password hash (pbkdf2_sha256, 600k iterations, salt "gooni-local-salt") ─
+_DEFAULT_SALT = "gooni-local-salt"
+_DEFAULT_ITERATIONS = 600_000
+_DEFAULT_PASSWORD = "admin"
+
+def _make_pbkdf2_hash(password: str, salt: str = _DEFAULT_SALT, iterations: int = _DEFAULT_ITERATIONS) -> str:
+    """Create a pbkdf2_sha256 hash string."""
+    derived = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt.encode("utf-8"),
+        iterations,
+    ).hex()
+    return f"pbkdf2_sha256${iterations}${salt}${derived}"
+
+DEFAULT_ADMIN_HASH = _make_pbkdf2_hash(_DEFAULT_PASSWORD)
 
 _rate_lock = threading.Lock()
 RATE_WINDOW = 60.0
@@ -417,6 +436,18 @@ def verify_admin_key_header(action: str = "admin_session_create"):
         import os as _os
 
         expected = _os.environ.get("ADMIN_KEY", "")
+
+        # Dev mode: auto-generate ADMIN_KEY if not configured
+        if not expected and _os.environ.get("APP_ENV", "").lower() == "development":
+            import secrets as _secrets
+            expected = _secrets.token_urlsafe(32)
+            _os.environ["ADMIN_KEY"] = expected
+            logger.warning(
+                "\n" + "=" * 60
+                + "\n  DEV MODE: Auto-generated ADMIN_KEY:\n  %s"
+                + "\n" + "=" * 60,
+                expected,
+            )
         if not expected:
             _log_action(ip, action, "no_key_configured", success=False)
             raise _admin_error(
@@ -441,37 +472,20 @@ def verify_admin_key_header(action: str = "admin_session_create"):
     return _dep
 
 
-def verify_admin_login_password(request: Request, login: str, password: str, action: str = "admin_login") -> str:
+def verify_admin_login_password(request: Request, login: str, password: str, action: str = "admin_login") -> tuple[str, bool]:
     """
-    Validate admin login/password against env-configured credentials.
-    Required env:
-      - ADMIN_LOGIN
-      - ADMIN_PASSWORD_HASH
+    Validate admin login/password.
+    Dual-path auth:
+      1. If ADMIN_LOGIN + ADMIN_PASSWORD_HASH env vars are set → use env-var auth.
+      2. Else → use local admin.db SQLite auth.
+    Returns (client_ip, is_default_password).
     """
-    import os as _os
+    import storage
 
     ip = _get_client_ip(request)
 
-    expected_login = _os.environ.get("ADMIN_LOGIN", "")
-    expected_password_hash = _os.environ.get("ADMIN_PASSWORD_HASH", "")
-
-    if not expected_login:
-        _log_action(ip, action, "admin_login_misconfigured", success=False)
-        raise _admin_error(
-            code="admin_misconfigured",
-            detail="Admin login is not configured.",
-            user_action="Configure ADMIN_LOGIN and ADMIN_PASSWORD_HASH in backend secrets.",
-            status_code=status.HTTP_403_FORBIDDEN,
-        )
-
-    if not expected_password_hash:
-        _log_action(ip, action, "admin_password_misconfigured", success=False)
-        raise _admin_error(
-            code="admin_misconfigured",
-            detail="Admin password hash is not configured.",
-            user_action="Configure ADMIN_PASSWORD_HASH in backend secrets.",
-            status_code=status.HTTP_403_FORBIDDEN,
-        )
+    expected_login = os.environ.get("ADMIN_LOGIN", "")
+    expected_password_hash = os.environ.get("ADMIN_PASSWORD_HASH", "")
 
     if not login or not password:
         _rate_check_admin_login_failures(ip)
@@ -484,19 +498,165 @@ def verify_admin_login_password(request: Request, login: str, password: str, act
             status_code=status.HTTP_403_FORBIDDEN,
         )
 
-    login_ok = hmac.compare_digest(login.encode("utf-8"), expected_login.encode("utf-8"))
-    password_ok = _verify_admin_password(password, expected_password_hash)
-    if login_ok and password_ok:
+    # Path 1: env-var auth (production)
+    if expected_login and expected_password_hash:
+        login_ok = hmac.compare_digest(login.encode("utf-8"), expected_login.encode("utf-8"))
+        password_ok = _verify_admin_password(password, expected_password_hash)
+        if login_ok and password_ok:
+            _record_admin_login_attempt(ip, success=True)
+            _log_action(ip, action, "auth=env_login_password", success=True)
+            return ip, False
+
+        _rate_check_admin_login_failures(ip)
+        _record_admin_login_attempt(ip, success=False)
+        _log_action(ip, action, "bad_login_password", success=False)
+        raise _admin_error(
+            code="admin_credentials_invalid",
+            detail="Invalid admin credentials.",
+            user_action="Check login and password, then retry.",
+            status_code=status.HTTP_403_FORBIDDEN,
+        )
+
+    # Path 2: local admin.db auth
+    init_local_admin_db()
+    creds = storage.get_admin_credentials()
+    if not creds:
+        _log_action(ip, action, "local_admin_db_missing", success=False)
+        raise _admin_error(
+            code="admin_misconfigured",
+            detail="Admin credentials not initialized.",
+            user_action="Restart the application.",
+            status_code=status.HTTP_403_FORBIDDEN,
+        )
+
+    # For local mode, login must be "admin"
+    if login != "admin":
+        _rate_check_admin_login_failures(ip)
+        _record_admin_login_attempt(ip, success=False)
+        _log_action(ip, action, "bad_local_login", success=False)
+        raise _admin_error(
+            code="admin_credentials_invalid",
+            detail="Invalid admin credentials.",
+            user_action="Check login and password, then retry.",
+            status_code=status.HTTP_403_FORBIDDEN,
+        )
+
+    password_ok = _verify_admin_password(password, creds["password_hash"])
+    if password_ok:
+        is_default = bool(creds.get("is_default", 0))
         _record_admin_login_attempt(ip, success=True)
-        _log_action(ip, action, "auth=login_password", success=True)
-        return ip
+        _log_action(ip, action, f"auth=local_password, is_default={is_default}", success=True)
+        return ip, is_default
 
     _rate_check_admin_login_failures(ip)
     _record_admin_login_attempt(ip, success=False)
-    _log_action(ip, action, "bad_login_password", success=False)
+    _log_action(ip, action, "bad_local_password", success=False)
     raise _admin_error(
         code="admin_credentials_invalid",
         detail="Invalid admin credentials.",
         user_action="Check login and password, then retry.",
         status_code=status.HTTP_403_FORBIDDEN,
     )
+
+
+def init_local_admin_db() -> None:
+    """Initialize local admin.db with default password if not exists."""
+    import storage
+    storage.init_local_admin_db(DEFAULT_ADMIN_HASH)
+
+
+def _recover_corrupted_admin_db() -> None:
+    """
+    Delete corrupted admin.db and recreate with default password.
+    Called when sqlite3.DatabaseError is caught on any admin.db read.
+    """
+    from config import LOCAL_ADMIN_DB_PATH
+    logger.warning("admin.db повреждён, пересоздан с паролем по умолчанию")
+    # On Windows, SQLite may still hold a file lock briefly after exception.
+    # Retry deletion with small delays.
+    import time
+    for attempt in range(5):
+        try:
+            os.remove(LOCAL_ADMIN_DB_PATH)
+            break
+        except FileNotFoundError:
+            break
+        except PermissionError:
+            if attempt < 4:
+                time.sleep(0.1)
+            else:
+                logger.warning("Could not delete corrupted admin.db, will try to overwrite")
+                # If we can't delete, try to truncate
+                try:
+                    open(LOCAL_ADMIN_DB_PATH, "wb").close()
+                except Exception:
+                    pass
+    init_local_admin_db()
+
+
+def verify_local_password(password: str) -> bool:
+    """Verify a password against the local admin.db hash."""
+    import storage
+    try:
+        creds = storage.get_admin_credentials()
+    except sqlite3.DatabaseError:
+        _recover_corrupted_admin_db()
+        creds = storage.get_admin_credentials()
+    if not creds:
+        return False
+    return _verify_admin_password(password, creds["password_hash"])
+
+
+def check_is_default_password() -> bool:
+    """Return True if the local admin password is still the default."""
+    import storage
+    try:
+        creds = storage.get_admin_credentials()
+    except sqlite3.DatabaseError:
+        _recover_corrupted_admin_db()
+        creds = storage.get_admin_credentials()
+    if not creds:
+        return True  # no DB yet = will be default on init
+    return bool(creds.get("is_default", 0))
+
+
+def change_local_admin_password(current_password: str, new_password: str, ip: str = "unknown") -> None:
+    """
+    Change the local admin password.
+    Verifies current password, hashes new, updates storage, logs audit.
+    """
+    import storage
+
+    try:
+        creds = storage.get_admin_credentials()
+    except sqlite3.DatabaseError:
+        _recover_corrupted_admin_db()
+        creds = storage.get_admin_credentials()
+    if not creds:
+        raise _admin_error(
+            code="admin_misconfigured",
+            detail="Admin credentials not initialized.",
+            user_action="Restart the application.",
+            status_code=status.HTTP_403_FORBIDDEN,
+        )
+
+    if not _verify_admin_password(current_password, creds["password_hash"]):
+        _log_action(ip, "password_change", "wrong_current_password", success=False)
+        raise _admin_error(
+            code="admin_credentials_invalid",
+            detail="Current password is incorrect",
+            user_action="Enter correct current password.",
+            status_code=status.HTTP_401_UNAUTHORIZED,
+        )
+
+    if current_password == new_password:
+        raise _admin_error(
+            code="admin_password_same",
+            detail="New password must differ from current password",
+            user_action="Choose a different password.",
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+
+    new_hash = _make_pbkdf2_hash(new_password)
+    storage.update_admin_password(new_hash)
+    _log_action(ip, "password_changed", "local_admin_password_updated", success=True)

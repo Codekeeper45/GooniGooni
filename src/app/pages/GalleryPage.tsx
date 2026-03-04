@@ -109,7 +109,7 @@ export function GalleryPage() {
             }}
           >
             <ArrowLeft className="w-4 h-4" />
-            Studio
+            Студия
           </button>
 
           <div
@@ -137,7 +137,7 @@ export function GalleryPage() {
                 border: "1px solid rgba(79,140,255,0.15)",
               }}
             >
-              Gallery
+              Галерея
             </span>
           </div>
         </div>
@@ -159,7 +159,7 @@ export function GalleryPage() {
               }}
             >
               <Trash2 className="w-3.5 h-3.5" />
-              Clear All
+              Очистить всё
             </button>
           )}
         </div>
@@ -171,9 +171,9 @@ export function GalleryPage() {
         style={{ borderColor: "rgba(255,255,255,0.04)" }}
       >
         {[
-          { label: "Total", value: gallery.length, color: "#9CA3AF" },
-          { label: "Images", value: imageCount, color: "#34D399", Icon: ImageIcon },
-          { label: "Videos", value: videoCount, color: "#60A5FA", Icon: Video },
+          { label: "Всего", value: gallery.length, color: "#9CA3AF" },
+          { label: "Изображения", value: imageCount, color: "#34D399", Icon: ImageIcon },
+          { label: "Видео", value: videoCount, color: "#60A5FA", Icon: Video },
         ].map((stat) => (
           <div key={stat.label} className="flex items-center gap-2">
             {stat.Icon && <stat.Icon className="w-3.5 h-3.5" style={{ color: stat.color }} />}
@@ -212,7 +212,7 @@ export function GalleryPage() {
                   : { color: "#6B7280", border: "1px solid transparent" }
               }
             >
-              {f === "all" ? "All" : f === "image" ? "Images" : "Videos"}
+              {f === "all" ? "Все" : f === "image" ? "Изображения" : "Видео"}
             </button>
           ))}
         </div>
@@ -228,7 +228,7 @@ export function GalleryPage() {
           <Search className="w-3.5 h-3.5 flex-shrink-0" style={{ color: "#4B5563" }} />
           <input
             type="text"
-            placeholder="Search prompts, models..."
+            placeholder="Поиск по промптам, моделям..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             className="bg-transparent outline-none text-xs flex-1"
@@ -253,10 +253,10 @@ export function GalleryPage() {
             style={{ color: "#6B7280", fontFamily: "'Space Grotesk', sans-serif" }}
           >
             <option value="newest" style={{ background: "#151922" }}>
-              Newest first
+              Сначала новые
             </option>
             <option value="oldest" style={{ background: "#151922" }}>
-              Oldest first
+              Сначала старые
             </option>
           </select>
         </div>
@@ -307,15 +307,15 @@ export function GalleryPage() {
             <div className="text-center">
               <p className="text-base" style={{ color: "#4B5563" }}>
                 {searchQuery
-                  ? "No results found"
+                  ? "Ничего не найдено"
                   : gallery.length === 0
-                  ? "Your gallery is empty"
-                  : "No items match the filter"}
+                  ? "Галерея пуста"
+                  : "Нет элементов по фильтру"}
               </p>
               <p className="text-sm mt-2" style={{ color: "#374151" }}>
                 {gallery.length === 0
-                  ? "Generate images and videos to see them here"
-                  : "Try adjusting your search or filter"}
+                  ? "Сгенерируйте изображения и видео, чтобы увидеть их здесь"
+                  : "Попробуйте изменить поиск или фильтр"}
               </p>
             </div>
             {gallery.length === 0 && (
@@ -329,7 +329,7 @@ export function GalleryPage() {
                 }}
               >
                 <ArrowLeft className="w-4 h-4" />
-                Go to Studio
+                Перейти в Студию
               </button>
             )}
           </div>
@@ -399,10 +399,10 @@ export function GalleryPage() {
                 </div>
                 <div>
                   <p className="text-sm" style={{ color: "#E5E7EB" }}>
-                    Clear gallery?
+                    Очистить галерею?
                   </p>
                   <p className="text-xs mt-0.5" style={{ color: "#6B7280" }}>
-                    This will remove all {gallery.length} items
+                    Будут удалены все {gallery.length} элементов
                   </p>
                 </div>
               </div>
@@ -419,7 +419,7 @@ export function GalleryPage() {
                     color: "#EF4444",
                   }}
                 >
-                  Clear All
+                  Очистить всё
                 </button>
                 <button
                   onClick={() => setShowConfirmClear(false)}
@@ -430,7 +430,7 @@ export function GalleryPage() {
                     color: "#9CA3AF",
                   }}
                 >
-                  Cancel
+                  Отмена
                 </button>
               </div>
             </motion.div>
@@ -478,6 +478,7 @@ function GalleryCard({
       <img
         src={thumbSrc}
         alt={item.prompt}
+        loading="lazy"
         className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
       />
 
@@ -495,7 +496,7 @@ function GalleryCard({
         }}
       >
         <TypeIcon className="w-3 h-3" />
-        {item.type === "video" ? "Video" : "Image"}
+        {item.type === "video" ? "Видео" : "Изображение"}
       </div>
 
       {/* Play icon for videos */}
@@ -526,7 +527,7 @@ function GalleryCard({
             background: "rgba(79,140,255,0.85)",
             color: "white",
           }}
-          title="Download"
+          title="Скачать"
         >
           <Download className="w-3 h-3" />
         </button>
@@ -540,7 +541,7 @@ function GalleryCard({
             background: "rgba(239,68,68,0.7)",
             color: "white",
           }}
-          title="Delete"
+          title="Удалить"
         >
           <Trash2 className="w-3 h-3" />
         </button>
@@ -652,7 +653,7 @@ function Lightbox({
               <div className="flex items-center gap-4 mt-3 text-xs" style={{ color: "#6B7280" }}>
                 <div className="flex items-center gap-1.5">
                   <TypeIcon className="w-3.5 h-3.5" />
-                  <span>{item.type === "video" ? "Video" : "Image"}</span>
+                  <span>{item.type === "video" ? "Видео" : "Изображение"}</span>
                 </div>
                 <span>•</span>
                 <span>{item.model}</span>
@@ -674,7 +675,7 @@ function Lightbox({
                 }}
               >
                 <Download className="w-4 h-4" />
-                Download
+                Скачать
               </button>
               <button
                 onClick={onClose}
@@ -685,7 +686,7 @@ function Lightbox({
                   color: "#9CA3AF",
                 }}
               >
-                Close
+                Закрыть
               </button>
             </div>
           </div>
