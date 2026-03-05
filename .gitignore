@@ -45,6 +45,9 @@ modal_volumes/
 
 # Local admin credentials
 admin.db
+backend/admin.db-shm
+backend/admin.db-wal
+.pycache_tmp/
 
 # Local specification artifacts
 specs/
