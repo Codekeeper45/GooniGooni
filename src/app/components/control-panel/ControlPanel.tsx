@@ -271,11 +271,11 @@ export function ControlPanel(props: ControlPanelProps) {
         {/* Preset actions */}
         <div className="flex items-center gap-2">
           <Button
-            variant="outline"
+            variant="ghost"
             size="sm"
             onClick={() => setShowSavePreset(true)}
             disabled={isGenerating}
-            className="border-white/10 text-zinc-400 hover:text-white text-xs"
+            className="bg-white/[0.06] border border-white/10 text-zinc-400 hover:bg-white/10 hover:text-white text-xs"
           >
             <Save className="size-3.5" /> Сохранить как пресет
           </Button>

@@ -15,6 +15,7 @@ export function AdminLoginPage() {
   const [error, setError] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [retryAfterSeconds, setRetryAfterSeconds] = useState(0);
 
   useEffect(() => {
     ensureAdminSession()
@@ -25,6 +26,14 @@ export function AdminLoginPage() {
         }
       });
   }, [nav]);
+
+  useEffect(() => {
+    if (retryAfterSeconds <= 0) return;
+    const timer = window.setInterval(() => {
+      setRetryAfterSeconds((value) => (value > 1 ? value - 1 : 0));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [retryAfterSeconds]);
 
   async function handleLogin(e: React.FormEvent) {
     e.preventDefault();
@@ -37,12 +46,27 @@ export function AdminLoginPage() {
       setError("Fill all fields");
       return;
     }
+    if (retryAfterSeconds > 0) {
+      setError(`Too many attempts. Retry in ${retryAfterSeconds}s.`);
+      return;
+    }
 
     try {
       setLoading(true);
       await createAdminSession(userLogin, userPassword);
       nav("/admin/dashboard");
-    } catch (err) {
+    } catch (err: unknown) {
+      if (err instanceof AdminHttpError) {
+        if (err.status === 429) {
+          const retryAfter = err.retryAfterSeconds ?? 60;
+          setRetryAfterSeconds(retryAfter);
+          const source = err.code === "admin_login_rate_limited" ? "login attempts limit" : "admin API rate limit";
+          setError(`Too many admin requests (${source}). Retry in ${retryAfter}s.`);
+          return;
+        }
+        setError(err.message || "Authentication failed");
+        return;
+      }
       setError(err instanceof Error ? err.message : "Authentication failed");
     } finally {
       setLoading(false);
@@ -100,9 +124,19 @@ export function AdminLoginPage() {
           <h1 style={{ color: "#fff", margin: 0, fontSize: 24, fontWeight: 700 }}>
             Gooni Admin
           </h1>
-          <p style={{ color: "rgba(255,255,255,0.45)", margin: "6px 0 0", fontSize: 14 }}>
-            Пароль по умолчанию: admin
-          </p>
+          <div style={{
+            margin: "12px auto 0",
+            padding: "8px 16px",
+            background: "rgba(234,179,8,0.12)",
+            border: "1px solid rgba(234,179,8,0.3)",
+            borderRadius: 8,
+            color: "#fde68a",
+            fontSize: 13,
+            fontWeight: 500,
+            maxWidth: 280,
+          }}>
+            🔑 Пароль по умолчанию: <strong>admin</strong>
+          </div>
         </div>
 
         <form onSubmit={handleLogin}>
@@ -210,7 +244,7 @@ export function AdminLoginPage() {
 
           <button
             type="submit"
-            disabled={loading}
+            disabled={loading || retryAfterSeconds > 0}
             style={{
               width: "100%",
               padding: "13px 0",
@@ -220,13 +254,13 @@ export function AdminLoginPage() {
               color: "#fff",
               fontWeight: 700,
               fontSize: 15,
-              cursor: loading ? "default" : "pointer",
-              opacity: loading ? 0.7 : 1,
+              cursor: loading || retryAfterSeconds > 0 ? "default" : "pointer",
+              opacity: loading || retryAfterSeconds > 0 ? 0.7 : 1,
               transition: "opacity 0.2s",
               boxShadow: "0 4px 16px rgba(124,58,237,0.4)",
             }}
           >
-            {loading ? "Checking..." : "Sign in"}
+            {loading ? "Checking..." : retryAfterSeconds > 0 ? `Retry in ${retryAfterSeconds}s` : "Sign in"}
           </button>
         </form>
 

@@ -109,6 +109,13 @@ CREATE TABLE IF NOT EXISTS operational_events (
 
 CREATE INDEX IF NOT EXISTS idx_operational_events_created
     ON operational_events(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS runtime_instance_locks (
+    lock_name       TEXT PRIMARY KEY,
+    owner_id        TEXT NOT NULL,
+    acquired_at     TEXT NOT NULL,
+    heartbeat_at    TEXT NOT NULL
+);
 """
 
 
@@ -119,9 +126,11 @@ def _db() -> Generator[sqlite3.Connection, None, None]:
     """Context manager that yields a configured SQLite connection."""
     # Ensure the directory exists (runs inside Modal container)
     Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    busy_timeout_seconds = max(1.0, float(os.environ.get("SQLITE_BUSY_TIMEOUT_SECONDS", "30")))
+    conn = sqlite3.connect(DB_PATH, timeout=busy_timeout_seconds)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute(f"PRAGMA busy_timeout={int(busy_timeout_seconds * 1000)}")
     conn.execute("PRAGMA foreign_keys=ON")
     try:
         yield conn
@@ -594,17 +603,40 @@ def delete_gallery_item(task_id: str) -> bool:
     return True
 
 
-def mark_stale_tasks_failed(max_age_hours: int = 2) -> int:
+def mark_stale_tasks_failed(
+    max_age_hours: Optional[int] = None,
+    *,
+    pending_timeout_seconds: Optional[int] = None,
+    processing_timeout_seconds: Optional[int] = None,
+) -> int:
     """
     Mark stuck pending/processing tasks as failed.
     Returns number of rows updated.
     """
-    cutoff = datetime.now(timezone.utc).timestamp() - (max_age_hours * 3600)
+    if pending_timeout_seconds is None or processing_timeout_seconds is None:
+        if max_age_hours is not None:
+            timeout_seconds = max(int(max_age_hours), 1) * 3600
+            if pending_timeout_seconds is None:
+                pending_timeout_seconds = timeout_seconds
+            if processing_timeout_seconds is None:
+                processing_timeout_seconds = timeout_seconds
+        else:
+            # Local-safe defaults. Can be overridden by env.
+            if pending_timeout_seconds is None:
+                pending_timeout_seconds = max(
+                    30, int(os.environ.get("PENDING_TASK_TIMEOUT_SECONDS", "180"))
+                )
+            if processing_timeout_seconds is None:
+                processing_timeout_seconds = max(
+                    120, int(os.environ.get("PROCESSING_TASK_TIMEOUT_SECONDS", "900"))
+                )
+
+    now_ts = datetime.now(timezone.utc).timestamp()
     updated = 0
     with _db() as conn:
         rows = conn.execute(
             """
-            SELECT id, updated_at
+            SELECT id, status, updated_at
             FROM tasks
             WHERE status IN ('pending', 'processing')
             """
@@ -614,17 +646,111 @@ def mark_stale_tasks_failed(max_age_hours: int = 2) -> int:
                 updated_ts = datetime.fromisoformat(row["updated_at"]).timestamp()
             except Exception:
                 continue
-            if updated_ts < cutoff:
+            status = str(row["status"] or "").lower()
+            timeout_seconds = (
+                pending_timeout_seconds
+                if status == "pending"
+                else processing_timeout_seconds
+            )
+            if timeout_seconds is None:
+                continue
+            cutoff_ts = now_ts - float(timeout_seconds)
+            if updated_ts < cutoff_ts:
+                timeout_label = "pending" if status == "pending" else "processing"
                 conn.execute(
                     """
                     UPDATE tasks
-                    SET status='failed', error_msg=?, updated_at=?
+                    SET status='failed', error_msg=?, stage=?, stage_detail=?, updated_at=?
                     WHERE id=?
                     """,
-                    ("Task expired due to timeout", _now_iso(), row["id"]),
+                    (
+                        f"Task timed out in {timeout_label} state.",
+                        "failed",
+                        f"timeout:{timeout_label}",
+                        _now_iso(),
+                        row["id"],
+                    ),
                 )
                 updated += 1
     return updated
+
+
+def acquire_instance_lock(lock_name: str, owner_id: str, lease_seconds: int = 90) -> tuple[bool, Optional[str]]:
+    """
+    Try to acquire a single-instance runtime lock.
+    Returns (acquired, existing_owner_id_if_not_acquired).
+    """
+    now_iso = _now_iso()
+    now_ts = datetime.now(timezone.utc).timestamp()
+    lease_seconds = max(int(lease_seconds), 15)
+    with _db() as conn:
+        row = conn.execute(
+            """
+            SELECT owner_id, heartbeat_at
+            FROM runtime_instance_locks
+            WHERE lock_name=?
+            """,
+            (lock_name,),
+        ).fetchone()
+        if row:
+            existing_owner = str(row["owner_id"])
+            if existing_owner == owner_id:
+                conn.execute(
+                    """
+                    UPDATE runtime_instance_locks
+                    SET heartbeat_at=?
+                    WHERE lock_name=? AND owner_id=?
+                    """,
+                    (now_iso, lock_name, owner_id),
+                )
+                return True, None
+            try:
+                hb_ts = datetime.fromisoformat(str(row["heartbeat_at"])).timestamp()
+            except Exception:
+                hb_ts = 0.0
+            if now_ts - hb_ts < lease_seconds:
+                return False, existing_owner
+
+        conn.execute(
+            """
+            INSERT INTO runtime_instance_locks(lock_name, owner_id, acquired_at, heartbeat_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(lock_name) DO UPDATE SET
+                owner_id=excluded.owner_id,
+                acquired_at=excluded.acquired_at,
+                heartbeat_at=excluded.heartbeat_at
+            """,
+            (lock_name, owner_id, now_iso, now_iso),
+        )
+    return True, None
+
+
+def refresh_instance_lock(lock_name: str, owner_id: str) -> bool:
+    """Refresh heartbeat for owned lock. Returns False if lock is no longer owned."""
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT owner_id FROM runtime_instance_locks WHERE lock_name=?",
+            (lock_name,),
+        ).fetchone()
+        if row is None or str(row["owner_id"]) != owner_id:
+            return False
+        conn.execute(
+            """
+            UPDATE runtime_instance_locks
+            SET heartbeat_at=?
+            WHERE lock_name=? AND owner_id=?
+            """,
+            (_now_iso(), lock_name, owner_id),
+        )
+    return True
+
+
+def release_instance_lock(lock_name: str, owner_id: str) -> None:
+    with _db() as conn:
+        conn.execute(
+            "DELETE FROM runtime_instance_locks WHERE lock_name=? AND owner_id=?",
+            (lock_name, owner_id),
+        )
 
 
 def cleanup_expired_artifacts(now: Optional[datetime] = None) -> int:

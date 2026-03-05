@@ -1,5 +1,5 @@
 """
-Deployer — runs `modal deploy` with per-account credentials.
+Deployer runs `modal deploy` with per-account credentials.
 
 Each account has its own MODAL_TOKEN_ID + MODAL_TOKEN_SECRET.
 We spawn a subprocess with those env vars injected so that
@@ -7,12 +7,13 @@ We spawn a subprocess with those env vars injected so that
 
 The deploy runs in a background thread so the API response is not blocked.
 Status transitions:
-  pending → (deploy running) → ready
-                             → failed
+  pending -> (deploy running) -> ready
+                                 -> failed
 """
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -62,6 +63,36 @@ _SHARED_SECRET_BINDINGS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("huggingface", ("HF_TOKEN",)),
 )
 
+_AUTH_ERROR_PATTERNS = (
+    "unauthorized",
+    "authentication",
+    "invalid token",
+    "forbidden",
+)
+
+_MODAL_CLI_ERROR_PATTERNS = (
+    "no module named modal",
+    "can't open file",
+    "modal: command not found",
+    "executable file not found",
+)
+
+_WORKSPACE_MISMATCH_PATTERNS = (
+    "build id mismatch",
+    "workspace mismatch",
+)
+
+_ONBOARDING_HINTS = {
+    "missing_shared_env": "Set API_KEY, ADMIN_LOGIN, ADMIN_PASSWORD_HASH, ACCOUNTS_ENCRYPT_KEY, HF_TOKEN in runtime env and retry.",
+    "modal_auth_failed": "Check Modal Token ID/Secret and workspace access, then redeploy.",
+    "modal_secret_sync_failed": "Secret sync failed. Verify shared env values and Modal permissions, then retry.",
+    "modal_cli_unavailable": "Modal CLI is unavailable. Install/enable python -m modal in runtime and retry.",
+    "workspace_mismatch": "Worker endpoint mismatch detected. Redeploy account to the expected workspace/build.",
+    "deploy_failed": "Deploy failed. Check deploy stderr and retry.",
+    "health_failed": "Worker health-check failed. Wait for worker warmup and retry deploy.",
+    "warmup_failed": "Warmup failed. Retry deploy or switch warmup to best-effort.",
+}
+
 
 def required_shared_env_keys() -> tuple[str, ...]:
     seen: list[str] = []
@@ -110,6 +141,39 @@ def _normalize_onboarding_error(code: str, error: str, account: Optional[dict]) 
     if not redacted:
         redacted = "Unknown error"
     return f"{code}: {redacted[:460]}"
+
+
+def _classify_onboarding_failure(
+    *,
+    step: str,
+    raw_error: str,
+) -> tuple[str, str, str]:
+    """
+    Return (error_code, error_hint, failure_type) for onboarding diagnostics.
+    """
+    text = (raw_error or "").lower()
+    failure_type, _ = acc_store._classify_error(raw_error or "unknown")
+
+    if "missing required shared env" in text:
+        return "missing_shared_env", _ONBOARDING_HINTS["missing_shared_env"], "config_failed"
+    if any(p in text for p in _MODAL_CLI_ERROR_PATTERNS):
+        return "modal_cli_unavailable", _ONBOARDING_HINTS["modal_cli_unavailable"], "config_failed"
+    if any(p in text for p in _AUTH_ERROR_PATTERNS):
+        return "modal_auth_failed", _ONBOARDING_HINTS["modal_auth_failed"], "auth_failed"
+    if "secret sync failed" in text:
+        return "modal_secret_sync_failed", _ONBOARDING_HINTS["modal_secret_sync_failed"], "config_failed"
+    if any(p in text for p in _WORKSPACE_MISMATCH_PATTERNS):
+        return "workspace_mismatch", _ONBOARDING_HINTS["workspace_mismatch"], "config_failed"
+
+    if step == "health_check":
+        if _is_health_429_quota_error(raw_error):
+            return "health_failed", _ONBOARDING_HINTS["health_failed"], "quota_exceeded"
+        return "health_failed", _ONBOARDING_HINTS["health_failed"], failure_type
+    if step == "warmup":
+        return "warmup_failed", _ONBOARDING_HINTS["warmup_failed"], failure_type
+    if step == "deploy":
+        return "deploy_failed", _ONBOARDING_HINTS["deploy_failed"], failure_type
+    return "deploy_failed", _ONBOARDING_HINTS["deploy_failed"], failure_type
 
 
 def _audit_onboarding_step(
@@ -229,7 +293,14 @@ def deploy_account(account_id: str) -> None:
             success=True,
             details="step=started",
         )
-        acc_store.update_account_status(account_id, "checking", error=None)
+        acc_store.update_account_status(
+            account_id,
+            "checking",
+            error=None,
+            onboarding_step="checking_tokens",
+            last_error_code=None,
+            last_error_hint=None,
+        )
         _commit_volume()
         _audit_onboarding_step(
             account=account,
@@ -241,21 +312,18 @@ def deploy_account(account_id: str) -> None:
             _sync_workspace_secrets(env, account)
         except Exception as exc:
             raw_error = str(exc)
-            detected_failure_type, _ = acc_store._classify_error(raw_error)
-            if detected_failure_type == "auth_failed":
-                error_code = "invalid_tokens"
-                failure_type = "auth_failed"
-            elif detected_failure_type == "config_failed":
-                error_code = "config_failed"
-                failure_type = "config_failed"
-            else:
-                error_code = "config_failed"
-                failure_type = detected_failure_type
+            error_code, error_hint, failure_type = _classify_onboarding_failure(
+                step="checking_tokens",
+                raw_error=raw_error,
+            )
             normalized_error = _normalize_onboarding_error(error_code, raw_error, account)
             acc_store.mark_account_failed(
                 account_id,
                 normalized_error,
                 failure_type=failure_type,
+                error_code=error_code,
+                error_hint=error_hint,
+                onboarding_step="checking_tokens",
             )
             _audit_onboarding_step(
                 account=account,
@@ -274,8 +342,16 @@ def deploy_account(account_id: str) -> None:
         )
 
         workspace: Optional[str] = None
+        remote_base_url: Optional[str] = None
         deploy_error: Optional[str] = None
-        acc_store.update_account_status(account_id, "deploying", error=None)
+        acc_store.update_account_status(
+            account_id,
+            "deploying",
+            error=None,
+            onboarding_step="deploying_worker",
+            last_error_code=None,
+            last_error_hint=None,
+        )
         _audit_onboarding_step(
             account=account,
             action="account_deploy_started",
@@ -304,7 +380,10 @@ def deploy_account(account_id: str) -> None:
                 )
             else:
                 if result.returncode == 0:
+                    remote_base_url = _extract_modal_base_url(result.stdout)
                     workspace = _extract_workspace(result.stdout)
+                    if not workspace and remote_base_url:
+                        workspace = _extract_workspace_from_url(remote_base_url)
                     if workspace:
                         break
                     deploy_error = "Deploy succeeded but workspace was not detected"
@@ -318,23 +397,38 @@ def deploy_account(account_id: str) -> None:
 
         if not workspace:
             error = deploy_error or "Deploy failed"
-            normalized_error = _normalize_onboarding_error("deploy_failed", error, account)
-            failure_type, _ = acc_store._classify_error(error)
+            error_code, error_hint, failure_type = _classify_onboarding_failure(
+                step="deploy",
+                raw_error=error,
+            )
+            normalized_error = _normalize_onboarding_error(error_code, error, account)
             acc_store.mark_account_failed(
                 account_id,
                 normalized_error,
                 failure_type=failure_type,
+                error_code=error_code,
+                error_hint=error_hint,
+                onboarding_step="deploying_worker",
             )
             _audit_onboarding_step(
                 account=account,
                 action="account_deploy_failed",
                 success=False,
-                details=f"step=deploy; code=deploy_failed; error={normalized_error[:180]}",
+                details=f"step=deploy; code={error_code}; error={normalized_error[:180]}",
             )
-            _audit_failure_outcome(account_id, account, "deploy_failed")
+            _audit_failure_outcome(account_id, account, error_code)
             _commit_volume()
             return
-        acc_store.update_account_status(account_id, "checking", workspace=workspace, error=None)
+        acc_store.update_account_status(
+            account_id,
+            "checking",
+            workspace=workspace,
+            remote_base_url=remote_base_url,
+            error=None,
+            onboarding_step="checking_health",
+            last_error_code=None,
+            last_error_hint=None,
+        )
         _audit_onboarding_step(
             account=account,
             action="account_deploy_passed",
@@ -356,23 +450,26 @@ def deploy_account(account_id: str) -> None:
         )
         if not ok:
             error = health_error or "health check failed"
-            normalized_error = _normalize_onboarding_error("health_failed", error, account)
-            if _is_health_429_quota_error(error):
-                failure_type = "quota_exceeded"
-            else:
-                failure_type, _ = acc_store._classify_error(error)
+            error_code, error_hint, failure_type = _classify_onboarding_failure(
+                step="health_check",
+                raw_error=error,
+            )
+            normalized_error = _normalize_onboarding_error(error_code, error, account)
             acc_store.mark_account_failed(
                 account_id,
                 normalized_error,
                 failure_type=failure_type,
+                error_code=error_code,
+                error_hint=error_hint,
+                onboarding_step="checking_health",
             )
             _audit_onboarding_step(
                 account=account,
                 action="account_healthcheck_failed",
                 success=False,
-                details=f"step=health_check; code=health_failed; error={normalized_error[:180]}",
+                details=f"step=health_check; code={error_code}; error={normalized_error[:180]}",
             )
-            _audit_failure_outcome(account_id, account, "health_failed")
+            _audit_failure_outcome(account_id, account, error_code)
             _commit_volume()
             return
         _audit_onboarding_step(
@@ -382,6 +479,16 @@ def deploy_account(account_id: str) -> None:
             details=f"step=health_check; workspace={workspace}",
         )
         if ACCOUNT_AUTO_WARMUP_MODE != "off":
+            acc_store.update_account_status(
+                account_id,
+                "checking",
+                workspace=workspace,
+                remote_base_url=remote_base_url,
+                error=None,
+                onboarding_step="warming_up",
+                last_error_code=None,
+                last_error_hint=None,
+            )
             _audit_onboarding_step(
                 account=account,
                 action="account_warmup_started",
@@ -399,20 +506,26 @@ def deploy_account(account_id: str) -> None:
             )
             if ACCOUNT_WARMUP_REQUIRED and not warmup_ok:
                 error = warmup_error or "Required warmup failed"
-                normalized_error = _normalize_onboarding_error("warmup_failed", error, account)
-                failure_type, _ = acc_store._classify_error(error)
+                error_code, error_hint, failure_type = _classify_onboarding_failure(
+                    step="warmup",
+                    raw_error=error,
+                )
+                normalized_error = _normalize_onboarding_error(error_code, error, account)
                 acc_store.mark_account_failed(
                     account_id,
                     normalized_error,
                     failure_type=failure_type,
+                    error_code=error_code,
+                    error_hint=error_hint,
+                    onboarding_step="warming_up",
                 )
                 _audit_onboarding_step(
                     account=account,
                     action="account_warmup_failed",
                     success=False,
-                    details=f"step=warmup; code=warmup_failed; error={normalized_error[:180]}",
+                    details=f"step=warmup; code={error_code}; error={normalized_error[:180]}",
                 )
-                _audit_failure_outcome(account_id, account, "warmup_failed")
+                _audit_failure_outcome(account_id, account, error_code)
                 _commit_volume()
                 return
             if not warmup_ok:
@@ -438,7 +551,16 @@ def deploy_account(account_id: str) -> None:
                 details=f"step=warmup; workspace={workspace}; mode=off",
             )
 
-        acc_store.update_account_status(account_id, "ready", workspace=workspace, error=None)
+        acc_store.update_account_status(
+            account_id,
+            "ready",
+            workspace=workspace,
+            remote_base_url=remote_base_url,
+            error=None,
+            onboarding_step="ready",
+            last_error_code=None,
+            last_error_hint=None,
+        )
         _audit_onboarding_step(
             account=account,
             action="account_ready",
@@ -449,20 +571,26 @@ def deploy_account(account_id: str) -> None:
 
     except Exception as exc:
         raw_error = str(exc)
-        error = _normalize_onboarding_error("deploy_failed", raw_error, account)
-        failure_type, _ = acc_store._classify_error(raw_error)
+        error_code, error_hint, failure_type = _classify_onboarding_failure(
+            step="deploy",
+            raw_error=raw_error,
+        )
+        error = _normalize_onboarding_error(error_code, raw_error, account)
         acc_store.mark_account_failed(
             account_id,
             error,
             failure_type=failure_type,
+            error_code=error_code,
+            error_hint=error_hint,
+            onboarding_step="failed",
         )
         _audit_onboarding_step(
             account=account,
             action="account_onboarding_failed",
             success=False,
-            details=f"code=deploy_failed; error={error[:180]}",
+            details=f"code={error_code}; error={error[:180]}",
         )
-        _audit_failure_outcome(account_id, account, "deploy_failed")
+        _audit_failure_outcome(account_id, account, error_code)
         _commit_volume()
 
 
@@ -512,6 +640,33 @@ def _extract_workspace(output: str) -> Optional[str]:
                 return workspace
             except (IndexError, ValueError):
                 pass
+    return None
+
+
+def _extract_workspace_from_url(url: str) -> Optional[str]:
+    normalized = (url or "").strip()
+    if not normalized:
+        return None
+    try:
+        host = normalized.split("://", 1)[1].split("/", 1)[0]
+        if "--" not in host:
+            return None
+        return host.split("--", 1)[0].strip() or None
+    except Exception:
+        return None
+
+
+def _extract_modal_base_url(output: str) -> Optional[str]:
+    """
+    Extract deployed Modal base URL from `modal deploy` stdout.
+    Accepts values like:
+      https://workspace--gooni-api.modal.run
+      https://workspace--gooni-gooni-backend.modal.run
+    """
+    for line in output.splitlines():
+        match = re.search(r"https://[a-zA-Z0-9-]+--[a-zA-Z0-9.-]*modal\.run", line)
+        if match:
+            return match.group(0).rstrip("/")
     return None
 
 

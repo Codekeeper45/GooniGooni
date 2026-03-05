@@ -305,7 +305,8 @@ ADMIN_COOKIE_SAMESITE=lax
 Used by backend integration tests:
 - `BACKEND_URL`
 - `API_KEY`
-- `ADMIN_KEY`
+- `ADMIN_LOGIN`
+- `ADMIN_PASSWORD_HASH`
 - `TEST_REQUEST_TIMEOUT`
 - `TEST_POLL_INTERVAL_SECONDS`
 - `TEST_VIDEO_FLOW_TIMEOUT_SECONDS`
@@ -335,16 +336,22 @@ Used by backend integration tests:
 
 Password handling:
 - `ADMIN_PASSWORD_HASH` is PBKDF2-SHA256
-- Generate a new hash with:
+- Generate all required shared env values automatically:
 
-```bash
-python -c "import os,hashlib,binascii; p='CHANGE_ME'; i=600000; s=binascii.hexlify(os.urandom(16)).decode(); d=hashlib.pbkdf2_hmac('sha256', p.encode(), s.encode(), i).hex(); print(f'pbkdf2_sha256${i}${s}${d}')"
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/bootstrap-shared-env.ps1 -OutputPath .env.generated
 ```
 
-Generate a new Fernet key:
 ```bash
-python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+bash scripts/bootstrap-shared-env.sh .env.generated
 ```
+
+- The generated file includes:
+  - `API_KEY`
+  - `ADMIN_LOGIN`
+  - `ADMIN_PASSWORD_HASH`
+  - `ACCOUNTS_ENCRYPT_KEY`
+  - `HF_TOKEN` placeholder (fill manually)
 
 ## 8. Local development commands
 

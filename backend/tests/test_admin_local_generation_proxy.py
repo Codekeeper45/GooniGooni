@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
+from fastapi.responses import StreamingResponse
 
 BACKEND = str(Path(__file__).parent.parent)
 if BACKEND not in sys.path:
@@ -54,6 +55,24 @@ class _FakeResponse:
 
     def json(self):
         return self._payload
+
+
+class _FakeStreamResponse:
+    def __init__(self, status_code: int = 200, body: bytes = b"", content_type: str = "application/octet-stream"):
+        self.status_code = status_code
+        self._body = body
+        self.headers = {"content-type": content_type}
+        self.text = body.decode(errors="ignore")
+
+    async def aread(self):
+        return self._body
+
+    async def aiter_bytes(self):
+        if self._body:
+            yield self._body
+
+    async def aclose(self):
+        return None
 
 
 def _make_ready_account(label: str, workspace: str) -> str:
@@ -109,7 +128,7 @@ def test_generate_fallbacks_to_second_ready_account_on_429(monkeypatch):
     assert second_row is not None and second_row["status"] == "ready"
 
 
-def test_generate_returns_503_without_local_default_fallback(monkeypatch):
+def test_generate_returns_503_when_local_fallback_not_configured(monkeypatch):
     _make_ready_account("only", "workspace-only")
 
     class FakeAsyncClient:
@@ -131,7 +150,7 @@ def test_generate_returns_503_without_local_default_fallback(monkeypatch):
         asyncio.run(admin_local.generate(_sample_generate_request(), _="session-token"))
 
     assert exc.value.status_code == 503
-    assert exc.value.detail["code"] == "no_ready_accounts"
+    assert exc.value.detail["code"] == "local_fallback_unavailable"
 
     # No local task should be created as implicit fallback.
     with sqlite3.connect(admin_local.storage.DB_PATH) as conn:
@@ -145,3 +164,62 @@ def test_status_rejects_non_composite_task_id():
 
     assert exc.value.status_code == 422
     assert exc.value.detail["code"] == "invalid_task_id"
+
+
+def test_generate_uses_local_fallback_when_remote_accounts_unavailable(monkeypatch):
+    monkeypatch.setenv("LOCAL_FALLBACK_BASE_URL", "http://127.0.0.1:9000")
+    monkeypatch.setenv("LOCAL_FALLBACK_API_KEY", "fallback-key")
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            assert url == "http://127.0.0.1:9000/generate_direct"
+            assert headers and headers.get("X-API-Key") == "fallback-key"
+            return _FakeResponse(200, {"task_id": "local-task-1"})
+
+    monkeypatch.setattr(admin_local.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(
+        admin_local.account_router,
+        "pick",
+        lambda: (_ for _ in ()).throw(admin_local.NoReadyAccountError("no ready")),
+    )
+
+    result = asyncio.run(admin_local.generate(_sample_generate_request(), _="session-token"))
+    assert result.task_id == "__local_fallback__::local-task-1"
+    assert result.status.value == "pending"
+
+
+def test_proxy_binary_returns_streaming_response(monkeypatch):
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def build_request(self, method, url, headers=None):
+            return {"method": method, "url": url, "headers": headers}
+
+        async def send(self, request, stream=True):
+            assert stream is True
+            return _FakeStreamResponse(status_code=200, body=b"abc123", content_type="image/png")
+
+        async def aclose(self):
+            return None
+
+    monkeypatch.setattr(admin_local.httpx, "AsyncClient", FakeAsyncClient)
+    response = asyncio.run(
+        admin_local._proxy_binary(
+            "workspace-a",
+            "task-1",
+            "results",
+            "shared-api",
+            read_timeout=30.0,
+        )
+    )
+    assert isinstance(response, StreamingResponse)

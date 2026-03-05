@@ -3,6 +3,7 @@ Phr00t WAN 2.2 Rapid video pipeline.
 """
 from __future__ import annotations
 
+import os
 import torch
 from PIL import Image
 
@@ -41,6 +42,11 @@ class Phr00tPipeline(BasePipeline):
             filename=self.hf_filename,
             cache_dir=cache_path,
         )
+        if not os.path.isfile(ckpt_path) or not os.access(ckpt_path, os.R_OK):
+            raise RuntimeError(
+                "Model files are unavailable or unreadable. "
+                "Re-download model weights or verify file permissions, then retry."
+            )
 
         # Step 2: load ONLY the transformer from the single file.
         # WanPipeline.from_single_file() is NOT supported in diffusers 0.36+;

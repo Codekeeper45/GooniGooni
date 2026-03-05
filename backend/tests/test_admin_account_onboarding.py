@@ -42,10 +42,11 @@ import admin_local  # noqa: E402
 
 
 def _set_shared_env(monkeypatch):
-    monkeypatch.setenv("API_KEY", "shared_api")
+    monkeypatch.setenv("API_KEY", "shared_api_value_123")
     monkeypatch.setenv("ADMIN_LOGIN", "admin")
-    monkeypatch.setenv("ADMIN_PASSWORD_HASH", "pbkdf2_sha256$600000$salt$hash")
-    monkeypatch.setenv("HF_TOKEN", "hf_test_value")
+    monkeypatch.setenv("ADMIN_PASSWORD_HASH", "pbkdf2_sha256$600000$salt$" + ("a" * 64))
+    monkeypatch.setenv("HF_TOKEN", "hf_test_value_123")
+    monkeypatch.setattr(admin_local, "_check_modal_cli", lambda: {"status": "ok", "version": "modal 1.0"})
 
 
 def test_admin_add_account_fails_fast_when_shared_env_missing(monkeypatch):
@@ -65,7 +66,7 @@ def test_admin_add_account_fails_fast_when_shared_env_missing(monkeypatch):
         )
 
     assert exc.value.status_code == 503
-    assert exc.value.detail["code"] == "admin_env_missing"
+    assert exc.value.detail["code"] == "missing_shared_env"
     assert len(accounts.list_accounts()) == 0
 
 
@@ -93,3 +94,77 @@ def test_admin_add_account_creates_row_and_starts_deploy(monkeypatch):
     row = accounts.get_account(result["id"])
     assert row is not None
     assert row["label"] == "Account-2"
+
+
+def test_admin_setup_requirements_reports_missing_env(monkeypatch):
+    monkeypatch.delenv("API_KEY", raising=False)
+    monkeypatch.delenv("ADMIN_LOGIN", raising=False)
+    monkeypatch.delenv("ADMIN_PASSWORD_HASH", raising=False)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+
+    payload = asyncio.run(admin_local.admin_setup_requirements(_ip="127.0.0.1"))
+    assert payload["ready"] is False
+    assert "API_KEY" in payload["missing_env"]
+    assert payload["required_env"]["API_KEY"]["status"] == "missing"
+
+
+def test_admin_setup_validate_rejects_invalid_hash(monkeypatch):
+    monkeypatch.setenv("API_KEY", "x" * 24)
+    monkeypatch.setenv("ADMIN_LOGIN", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD_HASH", "not-a-valid-hash")
+    monkeypatch.setenv("HF_TOKEN", "hf_token_value")
+    monkeypatch.setattr(admin_local, "_check_modal_cli", lambda: {"status": "ok", "version": "modal 1.0"})
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(admin_local.admin_setup_validate(_ip="127.0.0.1"))
+
+    assert exc.value.status_code == 422
+    assert exc.value.detail["code"] == "admin_setup_not_ready"
+
+
+def test_admin_add_account_duplicate_token_returns_409(monkeypatch):
+    _set_shared_env(monkeypatch)
+    monkeypatch.setattr(admin_local, "deploy_account_async", lambda _account_id: None)
+
+    first = asyncio.run(
+        admin_local.admin_add_account(
+            label="Account-A",
+            token_id="dup-token-id",
+            token_secret="secret-a",
+            _ip="127.0.0.1",
+        )
+    )
+    assert first["status"] == "pending"
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            admin_local.admin_add_account(
+                label="Account-B",
+                token_id="dup-token-id",
+                token_secret="secret-b",
+                _ip="127.0.0.1",
+            )
+        )
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail["code"] == "account_already_exists"
+
+
+def test_admin_setup_validate_reports_modal_cli_unavailable(monkeypatch):
+    _set_shared_env(monkeypatch)
+    monkeypatch.setattr(
+        admin_local,
+        "_check_modal_cli",
+        lambda: {"status": "fail", "message": "No module named modal"},
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(admin_local.admin_setup_validate(_ip="127.0.0.1"))
+
+    assert exc.value.status_code == 503
+    assert exc.value.detail["code"] == "admin_setup_not_ready"
+    metadata = exc.value.detail.get("metadata", {})
+    categories = metadata.get("categories", [])
+    assert any(c.get("code") == "modal_cli_unavailable" for c in categories)
+    monkeypatch.setattr(admin_local, "_check_modal_cli", lambda: {"status": "ok", "version": "modal 1.0"})
+    monkeypatch.setattr(admin_local, "_check_modal_cli", lambda: {"status": "ok", "version": "modal 1.0"})

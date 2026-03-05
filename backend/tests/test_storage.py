@@ -340,6 +340,52 @@ class TestSessionAndRetentionHelpers:
         assert raw["result_path"] is None
         assert raw["preview_path"] is None
 
+
+class TestTaskMaintenanceAndRuntimeLock:
+    def test_mark_stale_tasks_failed_uses_separate_timeouts(self):
+        pending_id = storage.create_task(
+            model="pony", gen_type="image", mode="txt2img",
+            prompt="pending", negative_prompt="", parameters={},
+            width=512, height=512, seed=1,
+        )
+        processing_id = storage.create_task(
+            model="flux", gen_type="image", mode="txt2img",
+            prompt="processing", negative_prompt="", parameters={},
+            width=512, height=512, seed=2,
+        )
+        storage.update_task_status(processing_id, "processing", progress=30)
+
+        old_ts = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
+        with storage._db() as conn:
+            conn.execute("UPDATE tasks SET updated_at=? WHERE id=?", (old_ts, pending_id))
+            conn.execute("UPDATE tasks SET updated_at=? WHERE id=?", (old_ts, processing_id))
+
+        updated = storage.mark_stale_tasks_failed(
+            pending_timeout_seconds=60,
+            processing_timeout_seconds=600,
+        )
+        assert updated == 2
+
+        p_row = storage.get_raw_task(pending_id)
+        pr_row = storage.get_raw_task(processing_id)
+        assert p_row is not None and p_row["stage_detail"] == "timeout:pending"
+        assert pr_row is not None and pr_row["stage_detail"] == "timeout:processing"
+
+    def test_runtime_instance_lock_rejects_second_owner_until_released(self):
+        acquired, owner = storage.acquire_instance_lock("admin_local", "owner-a", lease_seconds=120)
+        assert acquired is True
+        assert owner is None
+
+        acquired_b, owner_b = storage.acquire_instance_lock("admin_local", "owner-b", lease_seconds=120)
+        assert acquired_b is False
+        assert owner_b == "owner-a"
+
+        storage.release_instance_lock("admin_local", "owner-a")
+        acquired_b2, owner_b2 = storage.acquire_instance_lock("admin_local", "owner-b", lease_seconds=120)
+        assert acquired_b2 is True
+        assert owner_b2 is None
+
+
 class TestDeleteGalleryItem:
     def test_delete_existing_task(self):
         tid = storage.create_task(

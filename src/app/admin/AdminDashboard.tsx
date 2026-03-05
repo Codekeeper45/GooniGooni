@@ -19,6 +19,9 @@ interface Account {
   use_count: number;
   last_used: string | null;
   last_error: string | null;
+  last_error_code?: string | null;
+  last_error_hint?: string | null;
+  onboarding_step?: string | null;
   added_at: string;
 }
 
@@ -36,6 +39,20 @@ interface OperationalDiagnostics {
   queue_overloaded_count: number;
   queue_timeout_count: number;
   fallback_count: number;
+}
+
+interface SetupRequirements {
+  ready: boolean;
+  required_env: Record<string, { status: "ok" | "missing" | "invalid"; message?: string }>;
+  missing_env: string[];
+  validation_errors: string[];
+  checks?: {
+    env?: { status: "ok" | "fail"; missing?: string[]; invalid?: string[] };
+    admin_hash?: { status: "ok" | "missing" | "invalid"; message?: string };
+    accounts_encrypt_key?: { status: "ok" | "missing" | "invalid"; message?: string };
+    modal_cli?: { status: "ok" | "fail"; version?: string; message?: string };
+  };
+  categories?: Array<{ code: string; detail: string; user_action: string }>;
 }
 
 type Tab = "accounts" | "logs";
@@ -100,6 +117,35 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
+function onboardingStepLabel(step?: string | null): string {
+  const value = (step || "").trim();
+  if (!value) return "—";
+  const map: Record<string, string> = {
+    pending: "Pending",
+    checking: "Checking",
+    deploying: "Deploying",
+    ready: "Ready",
+    failed: "Failed",
+    checking_tokens: "Token check",
+    deploying_worker: "Deploy worker",
+    checking_health: "Health check",
+    warming_up: "Warmup",
+  };
+  return map[value] ?? value;
+}
+
+function onboardingHintText(acc: Account): string {
+  if (acc.last_error_hint) return acc.last_error_hint;
+  const code = (acc.last_error_code || "").toLowerCase();
+  if (!code) return "";
+  if (code === "missing_shared_env") return "Set shared env vars in runtime and retry.";
+  if (code === "modal_auth_failed") return "Check Token ID/Secret and workspace access.";
+  if (code === "modal_secret_sync_failed") return "Verify shared secrets and deploy again.";
+  if (code === "modal_cli_unavailable") return "Install Modal CLI in runtime.";
+  if (code === "workspace_mismatch") return "Redeploy account to correct workspace/build.";
+  return "";
+}
+
 export function AdminDashboard() {
   const nav = useNavigate();
   const [authState, setAuthState] = useState<"checking" | "ready" | "denied">("checking");
@@ -116,13 +162,30 @@ export function AdminDashboard() {
   const [tokenSecret, setTokenSecret] = useState("");
   const [showSecret, setShowSecret] = useState(false);
   const [addLoading, setAddLoading] = useState(false);
+  const [formError, setFormError] = useState("");
   const [isDefaultPassword, setIsDefaultPassword] = useState(false);
   const [showChangePassword, setShowChangePassword] = useState(false);
+  const [setupRequirements, setSetupRequirements] = useState<SetupRequirements | null>(null);
+  const [adminRateLimitSeconds, setAdminRateLimitSeconds] = useState(0);
 
   const showToast = (msg: string, ok = true) => {
     setToast({ msg, ok });
     setTimeout(() => setToast(null), 3500);
   };
+
+  const applyRateLimit = useCallback((seconds: number, source: string) => {
+    const next = Number.isFinite(seconds) && seconds > 0 ? seconds : 5;
+    setAdminRateLimitSeconds((current) => (current > next ? current : next));
+    showToast(`Rate limit (${source}). Retry in ${next}s.`, false);
+  }, []);
+
+  useEffect(() => {
+    if (adminRateLimitSeconds <= 0) return;
+    const timer = window.setInterval(() => {
+      setAdminRateLimitSeconds((value) => (value > 1 ? value - 1 : 0));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [adminRateLimitSeconds]);
 
   useEffect(() => {
     let cancelled = false;
@@ -141,8 +204,8 @@ export function AdminDashboard() {
             return;
           }
           if (err.status === 429) {
+            applyRateLimit(err.retryAfterSeconds ?? 5, "session check");
             setAuthState("ready");
-            showToast("Too many admin requests. Please wait and retry.", false);
             return;
           }
         }
@@ -152,7 +215,7 @@ export function AdminDashboard() {
     return () => {
       cancelled = true;
     };
-  }, [nav]);
+  }, [nav, applyRateLimit]);
 
   const fetchAccounts = useCallback(async () => {
     try {
@@ -163,7 +226,7 @@ export function AdminDashboard() {
       if (!res.ok) {
         if (res.status === 429) {
           const wait = retryAfterSeconds(res);
-          showToast(`Rate limit reached. Retrying in ${wait}s.`, false);
+          applyRateLimit(wait, "accounts");
           setTimeout(() => {
             void fetchAccounts();
           }, wait * 1000);
@@ -179,7 +242,7 @@ export function AdminDashboard() {
     } catch {
       showToast("Network error while loading accounts.", false);
     }
-  }, [nav]);
+  }, [nav, applyRateLimit]);
 
   const fetchLogs = useCallback(async () => {
     try {
@@ -192,12 +255,30 @@ export function AdminDashboard() {
         setLogs(data.logs ?? []);
       } else if (res.status === 429) {
         const wait = retryAfterSeconds(res);
-        showToast(`Logs are rate limited. Retry in ${wait}s.`, false);
+        applyRateLimit(wait, "logs");
       }
     } catch {
       // endpoint can be unavailable during startup
     }
-  }, [nav]);
+  }, [nav, applyRateLimit]);
+
+  const fetchSetupRequirements = useCallback(async () => {
+    try {
+      const res = await adminFetch("/admin/setup/requirements");
+      if (await handleAuthFailureIfNeeded(res, nav)) return;
+      if (!res.ok) {
+        if (res.status === 429) {
+          applyRateLimit(retryAfterSeconds(res), "setup");
+          return;
+        }
+        return;
+      }
+      const data = (await res.json()) as SetupRequirements;
+      setSetupRequirements(data);
+    } catch {
+      // best effort
+    }
+  }, [applyRateLimit, nav]);
 
   const fetchSessionInfo = useCallback(async () => {
     try {
@@ -214,8 +295,8 @@ export function AdminDashboard() {
   useEffect(() => {
     if (authState !== "ready") return;
     setLoading(true);
-    Promise.all([fetchAccounts(), fetchLogs(), fetchSessionInfo()]).finally(() => setLoading(false));
-  }, [authState, fetchAccounts, fetchLogs, fetchSessionInfo]);
+    Promise.all([fetchAccounts(), fetchLogs(), fetchSessionInfo(), fetchSetupRequirements()]).finally(() => setLoading(false));
+  }, [authState, fetchAccounts, fetchLogs, fetchSessionInfo, fetchSetupRequirements]);
 
   useEffect(() => {
     if (authState !== "ready") return;
@@ -229,6 +310,10 @@ export function AdminDashboard() {
 
   async function doAction(path: string, method = "POST", okMessage = "Done") {
     try {
+      if (adminRateLimitSeconds > 0) {
+        showToast(`Retry in ${adminRateLimitSeconds}s.`, false);
+        return;
+      }
       const res = await adminFetch(path, { method });
       if (await handleAuthFailureIfNeeded(res, nav)) {
         return;
@@ -239,7 +324,7 @@ export function AdminDashboard() {
       } else {
         if (res.status === 429) {
           const wait = retryAfterSeconds(res);
-          showToast(`Rate limit reached. Retry in ${wait}s.`, false);
+          applyRateLimit(wait, "action");
           return;
         }
         const error = await readAdminErrorPayload(res);
@@ -252,8 +337,17 @@ export function AdminDashboard() {
 
   async function handleAddAccount(e: React.FormEvent) {
     e.preventDefault();
-    if (!label || !tokenId || !tokenSecret) {
-      showToast("Fill all fields", false);
+    setFormError("");
+    if (adminRateLimitSeconds > 0) {
+      setFormError(`Too many admin requests. Retry in ${adminRateLimitSeconds}s.`);
+      return;
+    }
+    if (!label.trim() || !tokenId.trim() || !tokenSecret.trim()) {
+      setFormError("Fill all required fields.");
+      return;
+    }
+    if (setupRequirements && !setupRequirements.ready) {
+      setFormError("Environment is not ready. Complete setup requirements first.");
       return;
     }
     setAddLoading(true);
@@ -266,25 +360,25 @@ export function AdminDashboard() {
         return;
       }
       if (res.ok) {
-        showToast("Account added. Health check started.");
+        showToast("Account added. Auto-onboarding started (pending → checking → deploying → ready).");
         setLabel("");
         setTokenId("");
         setTokenSecret("");
-        await fetchAccounts();
+        await Promise.all([fetchAccounts(), fetchSetupRequirements()]);
       } else {
         if (res.status === 429) {
           const wait = retryAfterSeconds(res);
-          showToast(`Rate limit reached. Retry in ${wait}s.`, false);
+          applyRateLimit(wait, "add account");
           return;
         }
         const error = await readAdminErrorPayload(res);
-        showToast(`Error: ${error.detail}`, false);
+        setFormError(error.detail || "Failed to add account.");
       }
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") {
-        showToast("Таймаут запроса: сервер не ответил вовремя", false);
+        setFormError("Request timed out: backend did not respond in time.");
       } else {
-        showToast("Сетевая ошибка: проверьте доступность backend /api", false);
+        setFormError("Network error: check backend /api availability.");
       }
     } finally {
       setAddLoading(false);
@@ -475,6 +569,62 @@ export function AdminDashboard() {
         {tab === "accounts" && (
           <>
             <div style={card}>
+              {setupRequirements && !setupRequirements.ready && (
+                <div
+                  style={{
+                    background: "rgba(245,158,11,0.14)",
+                    border: "1px solid rgba(245,158,11,0.45)",
+                    borderRadius: 10,
+                    padding: "14px 16px",
+                    marginBottom: 14,
+                  }}
+                >
+                  <div style={{ fontWeight: 700, color: "#fcd34d", marginBottom: 6 }}>
+                    Setup required before adding Modal accounts
+                  </div>
+                  <div style={{ fontSize: 13, color: "rgba(255,255,255,0.8)", marginBottom: 8 }}>
+                    Missing/invalid env:{" "}
+                    {[...setupRequirements.missing_env, ...(setupRequirements.validation_errors || [])].join(", ") || "none"}
+                  </div>
+                  {(setupRequirements.categories || []).length > 0 && (
+                    <div style={{ fontSize: 12, color: "rgba(255,255,255,0.85)", marginBottom: 8, lineHeight: 1.5 }}>
+                      {(setupRequirements.categories || []).map((cat) => (
+                        <div key={cat.code}>
+                          <strong>{cat.code}</strong>: {cat.detail} {cat.user_action}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {setupRequirements.checks?.modal_cli?.status === "ok" && (
+                    <div style={{ fontSize: 12, color: "rgba(134,239,172,0.95)", marginBottom: 8 }}>
+                      Modal CLI: {setupRequirements.checks.modal_cli.version || "ok"}
+                    </div>
+                  )}
+                  <div style={{ fontSize: 12, color: "rgba(255,255,255,0.75)", lineHeight: 1.4 }}>
+                    Required keys: API_KEY, ADMIN_LOGIN, ADMIN_PASSWORD_HASH, ACCOUNTS_ENCRYPT_KEY, HF_TOKEN.
+                    Generate/fill them in VM env, restart container, then refresh this page.
+                  </div>
+                  <div style={{ marginTop: 8, fontSize: 12 }}>
+                    <a
+                      href="https://modal.com/signup"
+                      target="_blank"
+                      rel="noreferrer"
+                      style={{ color: "#93c5fd", textDecoration: "underline" }}
+                    >
+                      Create Modal account
+                    </a>
+                    {" · "}
+                    <a
+                      href="https://modal.com/docs/guide/tokens"
+                      target="_blank"
+                      rel="noreferrer"
+                      style={{ color: "#93c5fd", textDecoration: "underline" }}
+                    >
+                      Where to find Token ID / Secret
+                    </a>
+                  </div>
+                </div>
+              )}
               <h3 style={{ margin: "0 0 16px", fontSize: 16, color: "#c4b5fd" }}>Add Modal account</h3>
               <form onSubmit={handleAddAccount}>
                 <div
@@ -489,13 +639,27 @@ export function AdminDashboard() {
                     <label style={{ fontSize: 12, color: "rgba(255,255,255,0.5)", display: "block", marginBottom: 5 }}>
                       Account label
                     </label>
-                    <input style={input} placeholder="Workspace 1" value={label} onChange={(e) => setLabel(e.target.value)} required />
+                    <input
+                      style={input}
+                      placeholder="Example: Studio Account 1"
+                      title="Any friendly name shown in admin panel."
+                      value={label}
+                      onChange={(e) => setLabel(e.target.value)}
+                      required
+                    />
                   </div>
                   <div>
                     <label style={{ fontSize: 12, color: "rgba(255,255,255,0.5)", display: "block", marginBottom: 5 }}>
                       Token ID
                     </label>
-                    <input style={input} placeholder="ak-xxxx" value={tokenId} onChange={(e) => setTokenId(e.target.value)} required />
+                    <input
+                      style={input}
+                      placeholder="ak-xxxx"
+                      title="Modal dashboard → Settings → Access tokens → Token ID"
+                      value={tokenId}
+                      onChange={(e) => setTokenId(e.target.value)}
+                      required
+                    />
                   </div>
                   <div>
                     <label style={{ fontSize: 12, color: "rgba(255,255,255,0.5)", display: "block", marginBottom: 5 }}>
@@ -506,6 +670,7 @@ export function AdminDashboard() {
                         type={showSecret ? "text" : "password"}
                         style={{ ...input, paddingRight: 36 }}
                         placeholder="as-xxxxx"
+                        title="Modal dashboard → Settings → Access tokens → Token Secret"
                         value={tokenSecret}
                         onChange={(e) => setTokenSecret(e.target.value)}
                         required
@@ -531,7 +696,14 @@ export function AdminDashboard() {
                   </div>
                   <button
                     type="submit"
-                    disabled={addLoading}
+                    disabled={
+                      addLoading ||
+                      adminRateLimitSeconds > 0 ||
+                      !label.trim() ||
+                      !tokenId.trim() ||
+                      !tokenSecret.trim() ||
+                      (!!setupRequirements && !setupRequirements.ready)
+                    }
                     style={{
                       ...btn("linear-gradient(135deg,#7c3aed,#a855f7)"),
                       padding: "10px 18px",
@@ -539,9 +711,28 @@ export function AdminDashboard() {
                       boxShadow: "0 4px 12px rgba(124,58,237,0.3)",
                     }}
                   >
-                    {addLoading ? "..." : "Add"}
+                    {addLoading
+                      ? "..."
+                      : adminRateLimitSeconds > 0
+                      ? `Retry in ${adminRateLimitSeconds}s`
+                      : "Add"}
                   </button>
                 </div>
+                {formError && (
+                  <div
+                    style={{
+                      marginTop: 10,
+                      padding: "10px 12px",
+                      borderRadius: 8,
+                      background: "rgba(239,68,68,0.14)",
+                      border: "1px solid rgba(239,68,68,0.45)",
+                      color: "#fecaca",
+                      fontSize: 13,
+                    }}
+                  >
+                    {formError}
+                  </div>
+                )}
               </form>
             </div>
 
@@ -623,6 +814,20 @@ export function AdminDashboard() {
                         <td style={{ padding: "10px 8px", fontSize: 13, color: "rgba(255,255,255,0.55)" }}>{acc.workspace ?? "-"}</td>
                         <td style={{ padding: "10px 8px" }}>
                           <StatusBadge status={acc.status} />
+                          <div
+                            style={{
+                              fontSize: 11,
+                              color: "rgba(255,255,255,0.7)",
+                              marginTop: 2,
+                            }}
+                          >
+                            Step: {onboardingStepLabel(acc.onboarding_step)}
+                          </div>
+                          {acc.last_error_code && (
+                            <div style={{ fontSize: 11, color: "#fda4af", marginTop: 2 }}>
+                              Code: {acc.last_error_code}
+                            </div>
+                          )}
                           {acc.last_error && (
                             <div
                               title={acc.last_error}
@@ -637,6 +842,18 @@ export function AdminDashboard() {
                               }}
                             >
                               {acc.last_error}
+                            </div>
+                          )}
+                          {!!onboardingHintText(acc) && (
+                            <div
+                              style={{
+                                fontSize: 11,
+                                color: "rgba(253,230,138,0.95)",
+                                marginTop: 2,
+                                maxWidth: 220,
+                              }}
+                            >
+                              {onboardingHintText(acc)}
                             </div>
                           )}
                         </td>

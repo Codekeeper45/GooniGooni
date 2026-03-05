@@ -44,15 +44,22 @@ def _is_local_unsecured_mode() -> bool:
     return False
 
 
+def _allow_api_key_query() -> bool:
+    """
+    Query-string API key is disabled by default to avoid secret leakage via browser history/logs.
+    Can be enabled explicitly with ALLOW_API_KEY_QUERY=1 for legacy clients.
+    """
+    return os.environ.get("ALLOW_API_KEY_QUERY", "0").strip() in {"1", "true", "yes", "on"}
+
+
 def verify_api_key(
     header_key: str = Security(_API_KEY_HEADER),
     query_key: str = Query(None, alias="api_key"),
 ) -> str:
     """
     FastAPI dependency that raises on missing/invalid API key.
-    Accepts the key via X-API-Key header OR ?api_key= query param.
-    Query param support is required for <video src> / <img src> tags in the browser,
-    which cannot send custom headers. Inter-account proxying uses headers.
+    Accepts X-API-Key header by default.
+    Optional ?api_key= query auth is available only with ALLOW_API_KEY_QUERY=1.
     Uses constant-time comparison to avoid timing attacks.
     """
     expected = os.environ.get("API_KEY", "")
@@ -74,12 +81,12 @@ def verify_api_key(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
-    api_key = header_key or query_key
+    api_key = header_key or (query_key if _allow_api_key_query() else None)
     if not api_key or not hmac.compare_digest(api_key.encode(), expected.encode()):
         raise _auth_error(
             code="invalid_api_key",
-            detail="Invalid or missing X-API-Key.",
-            user_action="Refresh the page and create a new session.",
+            detail="Invalid or missing API key.",
+            user_action="Use X-API-Key header or session cookie and retry.",
             status_code=status.HTTP_403_FORBIDDEN,
         )
     return api_key

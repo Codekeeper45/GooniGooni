@@ -15,6 +15,7 @@ Local serve (no GPU, for testing routes):
 """
 
 import os
+import shutil
 import sys
 import threading
 from datetime import datetime
@@ -160,6 +161,40 @@ def _gpu_budget_gb(gpu_class: str) -> float:
         return 24.0
 
 
+def _ensure_free_disk_space(*, path: str, min_free_gb: float) -> None:
+    try:
+        usage = shutil.disk_usage(path)
+        free_gb = usage.free / (1024 ** 3)
+        if free_gb < min_free_gb:
+            raise RuntimeError(
+                f"Not enough free disk space ({free_gb:.2f} GB). "
+                f"At least {min_free_gb:.2f} GB is required to save generation artifacts."
+            )
+    except FileNotFoundError:
+        raise RuntimeError("Results storage path is unavailable.")
+    except OSError as exc:
+        raise RuntimeError(f"Failed to check free disk space: {exc}")
+
+
+def _friendly_model_load_error(exc: Exception) -> Optional[str]:
+    msg = str(exc).lower()
+    model_file_tokens = (
+        "safetensors",
+        "permission denied",
+        "no such file",
+        "not found",
+        "failed to open",
+        "ioerror",
+        "oserror",
+    )
+    if any(token in msg for token in model_file_tokens):
+        return (
+            "Model files are unavailable or unreadable. "
+            "Re-download model weights or verify file permissions, then retry."
+        )
+    return None
+
+
 def _map_worker_error(exc: Exception, gpu_class: str) -> tuple[str, str]:
     from config import OOM_ERROR_CODE
 
@@ -172,6 +207,13 @@ def _map_worker_error(exc: Exception, gpu_class: str) -> tuple[str, str]:
             "Reduce resolution, frames, or steps and retry.",
             "gpu_oom",
         )
+    if "no space left on device" in lowered or "not enough free disk space" in lowered:
+        return (
+            "Not enough disk space to save result files. Free up disk space and retry generation.",
+            "disk_space_insufficient",
+        )
+    if "model files are unavailable or unreadable" in lowered:
+        return (message, "model_file_unreadable")
     return message, type(exc).__name__
 
 
@@ -221,7 +263,13 @@ def _get_video_pipeline(model_id_key: str, *, degraded_mode: bool = False):
         else:
             raise ValueError(f"Unknown video model: {model_id_key}")
 
-        pipeline.load(MODEL_CACHE_PATH)
+        try:
+            pipeline.load(MODEL_CACHE_PATH)
+        except Exception as exc:
+            friendly = _friendly_model_load_error(exc)
+            if friendly:
+                raise RuntimeError(friendly) from exc
+            raise
         _video_pipeline_cache[model_id_key] = pipeline
         try:
             import storage
@@ -266,7 +314,13 @@ def _get_image_pipeline(model_id_key: str):
         else:
             raise ValueError(f"Unknown image model: {model_id_key}")
 
-        pipeline.load(MODEL_CACHE_PATH)
+        try:
+            pipeline.load(MODEL_CACHE_PATH)
+        except Exception as exc:
+            friendly = _friendly_model_load_error(exc)
+            if friendly:
+                raise RuntimeError(friendly) from exc
+            raise
         _image_pipeline_cache[model_id_key] = pipeline
         try:
             import storage
@@ -322,6 +376,8 @@ def _execute_video_generation(
 
     results_vol.reload()
     storage.init_db()
+    min_free_gb = max(0.1, float(os.environ.get("MIN_FREE_DISK_GB", "1.0")))
+    _ensure_free_disk_space(path=RESULTS_PATH, min_free_gb=min_free_gb)
     _update_status(
         task_id,
         "processing",
@@ -581,6 +637,8 @@ def _execute_image_generation(
 
     results_vol.reload()
     storage.init_db()
+    min_free_gb = max(0.1, float(os.environ.get("MIN_FREE_DISK_GB", "1.0")))
+    _ensure_free_disk_space(path=RESULTS_PATH, min_free_gb=min_free_gb)
     model_id_key = request_dict["model"]
 
     _update_status(

@@ -174,16 +174,29 @@ export function resolveMediaUrl(
   const fallback = fallbackPath.startsWith("/api/") ? fallbackPath : buildUrl("/api", fallbackPath);
   if (!rawUrl) return fallback;
 
+  const stripApiKeyFromSearch = (search: string): string => {
+    const q = new URLSearchParams(search || "");
+    q.delete("api_key");
+    const encoded = q.toString();
+    return encoded ? `?${encoded}` : "";
+  };
+
   const rewritePath = (pathname: string, search: string): string => {
     if (pathname.startsWith("/results/") || pathname.startsWith("/preview/")) {
-      return `/api${pathname}${search}`;
+      return `/api${pathname}${stripApiKeyFromSearch(search)}`;
     }
     return "";
   };
 
   if (rawUrl.startsWith("/")) {
-    const rewritten = rewritePath(rawUrl, "");
-    return rewritten || rawUrl;
+    try {
+      const parsed = new URL(rawUrl, window.location.origin);
+      const rewritten = rewritePath(parsed.pathname, parsed.search);
+      return rewritten || `${parsed.pathname}${stripApiKeyFromSearch(parsed.search)}`;
+    } catch {
+      const rewritten = rewritePath(rawUrl, "");
+      return rewritten || rawUrl.replace(/([?&])api_key=[^&]*(&)?/gi, (_, p1, p2) => (p1 === "?" && p2 ? "?" : ""));
+    }
   }
 
   try {
@@ -193,7 +206,7 @@ export function resolveMediaUrl(
       const pathMatch = parsed.pathname.match(/^\/(results|preview)\/(.+)$/);
       if (pathMatch) {
         const [, kind, remoteTaskId] = pathMatch;
-        return `/api/${kind}/${modalMatch[1]}::${remoteTaskId}${parsed.search}`;
+        return `/api/${kind}/${modalMatch[1]}::${remoteTaskId}${stripApiKeyFromSearch(parsed.search)}`;
       }
     }
 

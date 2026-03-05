@@ -32,7 +32,7 @@
 | Package manager | ⚠️ `npm` | No lockfile committed — run `npm install` |
 | TypeScript types | ⚠️ | `@types/react` missing as devDep — `npm i -D @types/react @types/react-dom` |
 | `VITE_API_URL` env | ✅ | `.env.example` present |
-| `VITE_ADMIN_KEY` env | ✅ | Added to `.env.example` |
+| Admin login/password env | ✅ | `ADMIN_LOGIN` + `ADMIN_PASSWORD_HASH` in backend env |
 
 ### Backend (Python + Modal)
 | Check | Status | Notes |
@@ -40,7 +40,7 @@
 | FastAPI + Pydantic v2 | ✅ | `requirements.txt` |
 | Modal SDK `>=0.64` | ✅ | |
 | Auth (`X-API-Key`) | ✅ | `auth.py` — env `API_KEY` |
-| Admin auth (`X-Admin-Key`) | ✅ | `app.py` — env `ADMIN_KEY` |
+| Admin auth (session cookie + login/password) | ✅ | `admin_local.py` + `admin_security.py` |
 | SQLite storage | ✅ | `storage.py`, WAL mode |
 | Account rotation | ✅ | `accounts.py`, `router.py` |
 | Unit tests (89 passing) | ✅ | `pytest backend/tests/` |
@@ -115,13 +115,25 @@ Local Mode requires ComfyUI running on `localhost:8188`:
 
 ### 3. Backend Setup — Modal
 
+Generate shared env values first:
+
+```bash
+# Linux/macOS
+bash scripts/bootstrap-shared-env.sh .env.generated
+
+# Windows PowerShell
+powershell -ExecutionPolicy Bypass -File scripts/bootstrap-shared-env.ps1 -OutputPath .env.generated
+```
+
+
 ```bash
 # Authenticate
 modal setup            # opens browser for OAuth
 
-# Create required secrets
+# Create required secrets (shared onboarding env)
 modal secret create gooni-api-key   API_KEY=your-strong-api-key
-modal secret create gooni-admin     ADMIN_KEY=your-strong-admin-key
+modal secret create gooni-admin     ADMIN_LOGIN=admin ADMIN_PASSWORD_HASH='pbkdf2_sha256$600000$<salt>$<hex>'
+modal secret create gooni-accounts  ACCOUNTS_ENCRYPT_KEY='<fernet-key>'
 modal secret create huggingface     HF_TOKEN=hf_your_token_here
 
 # Deploy backend (creates Modal Volumes automatically)
@@ -198,13 +210,15 @@ docker run -d \
 | Variable | Where | Description |
 |---|---|---|
 | `API_KEY` | Modal Secret `gooni-api-key` | Auth key for all API endpoints |
-| `ADMIN_KEY` | Modal Secret `gooni-admin` | Auth key for admin panel |
+| `ADMIN_LOGIN` | VM env + Modal Secret `gooni-admin` | Admin username for cookie login |
+| `ADMIN_PASSWORD_HASH` | VM env + Modal Secret `gooni-admin` | PBKDF2/Bcrypt hash for admin password |
+| `ACCOUNTS_ENCRYPT_KEY` | VM env + Modal Secret `gooni-accounts` | Fernet key for encrypting account secrets |
 | `HF_TOKEN` | Modal Secret `huggingface` | HuggingFace token (FLUX gated model) |
 | `VIDEO_GPU` | Modal env | Default: `A10G` |
 | `IMAGE_GPU` | Modal env | Default: `T4` |
 | `VITE_API_URL` | Frontend `.env` | Modal backend URL |
 | `VITE_API_KEY` | Frontend `.env` | Same as `API_KEY` |
-| `VITE_ADMIN_KEY` | Frontend `.env` | Same as `ADMIN_KEY` |
+| `LOCAL_FALLBACK_BASE_URL` | VM env (optional) | Optional local fallback endpoint for `/generate_direct` |
 
 ---
 
@@ -245,7 +259,7 @@ gooni-gooni/
 - [ ] `npm install` run → `node_modules/` present
 - [ ] `.env` created from `.env.example`
 - [ ] `modal setup` done (authenticated)
-- [ ] Modal Secrets created: `gooni-api-key`, `gooni-admin`, `huggingface`
+- [ ] Modal Secrets created: `gooni-api-key`, `gooni-admin`, `gooni-accounts`, `huggingface`
 - [ ] `modal deploy backend/app.py` — URL obtained
 - [ ] `VITE_API_URL` in `.env` updated with Modal URL
 - [ ] `npm run build` succeeds → `dist/` created

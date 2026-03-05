@@ -39,6 +39,13 @@ def test_add_account_initial_status_pending():
     row = accounts.get_account(account_id)
     assert row is not None
     assert row["status"] == "pending"
+    assert row["onboarding_step"] == "pending"
+
+
+def test_add_account_duplicate_token_id_raises():
+    accounts.add_account("Test", "dup_token_id", "tok_secret")
+    with pytest.raises(accounts.DuplicateAccountError):
+        accounts.add_account("Test2", "dup_token_id", "tok_secret_2")
 
 
 def test_allowed_fsm_pending_to_checking_to_ready():
@@ -60,6 +67,19 @@ def test_allowed_fsm_with_deploying_stage():
     assert row is not None
     assert row["status"] == "ready"
     assert row["workspace"] == "ws-deploy"
+
+
+def test_update_account_status_persists_remote_base_url():
+    account_id = accounts.add_account("DeployFlow", "tok_id_uniq", "tok_secret")
+    accounts.update_account_status(
+        account_id,
+        "checking",
+        workspace="ws-test",
+        remote_base_url="https://ws-test--gooni-api.modal.run/",
+    )
+    row = accounts.get_account(account_id)
+    assert row is not None
+    assert row["remote_base_url"] == "https://ws-test--gooni-api.modal.run"
 
 
 def test_forbidden_ready_to_pending_transition():
@@ -200,6 +220,9 @@ def test_disable_enable_cycle():
     accounts.enable_account(account_id)
     row = accounts.get_account(account_id)
     assert row["status"] == "ready"
+    assert row["onboarding_step"] == "ready"
+    assert row["last_error_code"] is None
+    assert row["last_error_hint"] is None
 
 
 def test_status_transition_logging(caplog):
@@ -236,6 +259,8 @@ def test_mark_account_failed_config_error_disables_immediately():
     row = accounts.get_account(account_id)
     assert row["status"] == "disabled"
     assert row["failure_type"] == "config_failed"
+    assert row["last_error_code"] == "modal_secret_sync_failed"
+    assert row["last_error_hint"] is not None
 
 
 def test_recover_failed_accounts_after_cooldown():

@@ -9,6 +9,7 @@ export interface AdminErrorPayload {
   status: number;
   code?: string;
   detail: string;
+  retryAfterSeconds?: number;
 }
 
 const ADMIN_SESSION_ERROR_CODES = new Set([
@@ -20,12 +21,14 @@ const ADMIN_SESSION_ERROR_CODES = new Set([
 export class AdminHttpError extends Error {
   readonly status: number;
   readonly code?: string;
+  readonly retryAfterSeconds?: number;
 
   constructor(payload: AdminErrorPayload) {
     super(payload.detail);
     this.name = "AdminHttpError";
     this.status = payload.status;
     this.code = payload.code;
+    this.retryAfterSeconds = payload.retryAfterSeconds;
   }
 }
 
@@ -86,6 +89,9 @@ export function isAdminSessionErrorCode(code?: string): boolean {
 }
 
 async function parseErrorPayload(response: Response): Promise<AdminErrorPayload> {
+  const retryAfterHeader = response.headers.get("retry-after");
+  const parsedRetryAfter = retryAfterHeader ? Number.parseInt(retryAfterHeader, 10) : Number.NaN;
+  const retryAfterSeconds = Number.isFinite(parsedRetryAfter) && parsedRetryAfter > 0 ? parsedRetryAfter : undefined;
   try {
     const payload = await response.json();
     if (payload?.detail && typeof payload.detail === "object") {
@@ -96,15 +102,16 @@ async function parseErrorPayload(response: Response): Promise<AdminErrorPayload>
           typeof payload.detail.detail === "string"
             ? payload.detail.detail
             : `HTTP ${response.status}`,
+        retryAfterSeconds,
       };
     }
     if (typeof payload?.detail === "string") {
-      return { status: response.status, detail: payload.detail };
+      return { status: response.status, detail: payload.detail, retryAfterSeconds };
     }
   } catch {
     // ignore parse errors
   }
-  return { status: response.status, detail: `HTTP ${response.status}` };
+  return { status: response.status, detail: `HTTP ${response.status}`, retryAfterSeconds };
 }
 
 export async function readAdminErrorPayload(response: Response): Promise<AdminErrorPayload> {
@@ -130,6 +137,11 @@ export async function ensureAdminSession(): Promise<void> {
   });
   if (!response.ok) {
     throw new AdminHttpError(await parseErrorPayload(response));
+  }
+  // Guard against SPA fallback returning HTML instead of real API JSON
+  const ct = response.headers.get("content-type") ?? "";
+  if (!ct.includes("application/json")) {
+    throw new AdminHttpError({ status: 502, code: "admin_session_missing", detail: "Admin backend is not reachable." });
   }
 }
 

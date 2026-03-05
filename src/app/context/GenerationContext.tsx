@@ -286,6 +286,7 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const abortRef = useRef(false);
   const localClientRef = useRef<GenerationClient | null>(null);
+  const activePollingTaskRef = useRef<string | null>(null);
 
   // Cancellation-aware mode setter (FR-018, FR-026)
   const handleSetGenerationMode = useCallback((newMode: GenerationModeId) => {
@@ -436,9 +437,16 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
       clearInterval(pollIntervalRef.current);
       pollIntervalRef.current = null;
     }
+    activePollingTaskRef.current = null;
   }, []);
 
   const startPolling = useCallback((tid: string, resolvedSeed: number, options?: { resume?: boolean }) => {
+    if (activePollingTaskRef.current === tid && pollIntervalRef.current) {
+      return;
+    }
+    stopPolling();
+    abortRef.current = false;
+    activePollingTaskRef.current = tid;
     let consecutiveErrors = 0;
     const startedAtMs = Date.now();
     let queuedAtMs: number | null = null;
@@ -454,6 +462,7 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
       setStageDetail("failed");
       setError(message);
       setUserAction(action ?? null);
+      setTaskId(null);
       setHistory(prev =>
         prev.map(h =>
           h.taskId === tid
@@ -549,6 +558,7 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
           setProgress(100);
           setStageDetail(typeof data.stage_detail === "string" ? data.stage_detail : "ok");
           stopPolling();
+          setTaskId(null);
 
           try {
             addToGallery({
@@ -595,6 +605,7 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
 
   // Resume polling on mount if taskId is set and status is generating
   useEffect(() => {
+    abortRef.current = false;
     if (status === "generating" && taskId) {
       startPolling(taskId, seed, { resume: true });
     }
@@ -604,10 +615,41 @@ export function GenerationProvider({ children }: { children: React.ReactNode }) 
     };
   }, []); // Run once on mount
 
+  const resumePollingIfNeeded = useCallback(() => {
+    if (status !== "generating" || !taskId) return;
+    if (pollIntervalRef.current) return;
+    startPolling(taskId, seed, { resume: true });
+  }, [status, taskId, seed, startPolling]);
+
+  useEffect(() => {
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        resumePollingIfNeeded();
+      }
+    };
+    const onOnline = () => {
+      resumePollingIfNeeded();
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    window.addEventListener("online", onOnline);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      window.removeEventListener("online", onOnline);
+    };
+  }, [resumePollingIfNeeded]);
+
+  useEffect(() => {
+    if (status === "generating") return;
+    stopPolling();
+    abortRef.current = false;
+  }, [status, stopPolling]);
+
   // Actions
   const generate = useCallback(async () => {
     if (!prompt.trim() || status === "generating") return;
 
+    stopPolling();
+    abortRef.current = false;
     setStatus("generating");
     setProgress(0);
     setStatusText("Инициализация...");

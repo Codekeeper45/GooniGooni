@@ -33,6 +33,20 @@ _ALLOWED_TRANSITIONS = {
     "disabled": {"disabled", "ready", "checking"},
 }
 
+_DEFAULT_HINTS_BY_ERROR_CODE = {
+    "missing_shared_env": "Set required shared env vars and retry onboarding.",
+    "modal_auth_failed": "Verify Modal Token ID/Secret and workspace access, then redeploy.",
+    "modal_secret_sync_failed": "Check shared secrets configuration and retry deploy.",
+    "modal_cli_unavailable": "Install Modal CLI in runtime and restart onboarding.",
+    "workspace_mismatch": "Verify workspace mapping/build and redeploy account.",
+    "deploy_failed": "Check deploy logs and retry.",
+    "health_failed": "Worker health-check failed; redeploy account and retry.",
+    "warmup_failed": "Warmup failed; retry deploy or disable required warmup.",
+    "quota_exceeded": "Increase Modal balance/limits or use another account.",
+    "auth_failed": "Fix account credentials and enable account again.",
+    "config_failed": "Fix shared config/secrets and retry onboarding.",
+}
+
 # ── Error classification ────────────────────────────────────────────────────
 _QUOTA_PATTERNS = ("quota", "limit exceeded", "insufficient credits", "rate limit")
 _AUTH_PATTERNS = ("authentication", "unauthorized", "invalid token", "auth failed")
@@ -40,6 +54,10 @@ _TIMEOUT_PATTERNS = ("timeout", "timed out")
 _CONTAINER_PATTERNS = ("container", "deployment failed")
 _HEALTH_PATTERNS = ("health check", "endpoint not responding")
 _CONFIG_PATTERNS = ("secret sync failed", "missing required shared env", "config_failed")
+
+
+class DuplicateAccountError(RuntimeError):
+    """Raised when account token/workspace duplicates an existing record."""
 
 
 def _classify_error(error: str) -> tuple[str, str]:
@@ -65,6 +83,31 @@ def _classify_error(error: str) -> tuple[str, str]:
     if any(p in lower for p in _HEALTH_PATTERNS):
         return "health_check_failed", "auto_recover"
     return "unknown", "auto_recover"
+
+
+def _default_error_code_for_failure_type(failure_type: str) -> str:
+    if failure_type == "quota_exceeded":
+        return "quota_exceeded"
+    if failure_type == "auth_failed":
+        return "modal_auth_failed"
+    if failure_type == "config_failed":
+        return "modal_secret_sync_failed"
+    if failure_type == "timeout":
+        return "deploy_timeout"
+    if failure_type == "container_failed":
+        return "deploy_failed"
+    if failure_type == "health_check_failed":
+        return "health_failed"
+    return "unknown_error"
+
+
+def _default_error_hint(error_code: str, fallback_error: str) -> str:
+    hint = _DEFAULT_HINTS_BY_ERROR_CODE.get(error_code)
+    if hint:
+        return hint
+    if fallback_error:
+        return "Check account details and retry."
+    return "Retry onboarding."
 
 
 def _now_iso() -> str:
@@ -133,6 +176,7 @@ def init_accounts_table() -> None:
                 token_id            TEXT NOT NULL,
                 token_secret        TEXT NOT NULL,
                 workspace           TEXT,
+                remote_base_url     TEXT,
                 status              TEXT NOT NULL DEFAULT 'pending',
                 added_at            TEXT NOT NULL,
                 last_used           TEXT,
@@ -142,7 +186,10 @@ def init_accounts_table() -> None:
                 fail_count          INTEGER NOT NULL DEFAULT 0,
                 failure_type        TEXT,
                 last_health_check   TEXT,
-                health_check_result TEXT
+                health_check_result TEXT,
+                onboarding_step     TEXT NOT NULL DEFAULT 'pending',
+                last_error_code     TEXT,
+                last_error_hint     TEXT
             )
             """
         )
@@ -154,6 +201,10 @@ def init_accounts_table() -> None:
             "ALTER TABLE modal_accounts ADD COLUMN health_check_result TEXT",
             "ALTER TABLE modal_accounts ADD COLUMN monthly_limit_usd REAL NOT NULL DEFAULT 50.0",
             "ALTER TABLE modal_accounts ADD COLUMN used_usd REAL NOT NULL DEFAULT 0.0",
+            "ALTER TABLE modal_accounts ADD COLUMN remote_base_url TEXT",
+            "ALTER TABLE modal_accounts ADD COLUMN onboarding_step TEXT NOT NULL DEFAULT 'pending'",
+            "ALTER TABLE modal_accounts ADD COLUMN last_error_code TEXT",
+            "ALTER TABLE modal_accounts ADD COLUMN last_error_hint TEXT",
         ):
             try:
                 conn.execute(ddl)
@@ -228,11 +279,19 @@ def add_account(
     now = _now_iso()
     enc_secret = _encrypt_secret(token_secret)
     with _lock, _db() as conn:
+        existing_by_token = conn.execute(
+            "SELECT id, label FROM modal_accounts WHERE token_id=? LIMIT 1",
+            (token_id,),
+        ).fetchone()
+        if existing_by_token is not None:
+            raise DuplicateAccountError(
+                f"Account with this token_id already exists (id={existing_by_token['id']})."
+            )
         conn.execute(
             """
             INSERT INTO modal_accounts
-              (id, label, token_id, token_secret, status, added_at)
-            VALUES (?, ?, ?, ?, 'pending', ?)
+              (id, label, token_id, token_secret, status, added_at, remote_base_url, onboarding_step)
+            VALUES (?, ?, ?, ?, 'pending', ?, NULL, 'pending')
             """,
             (account_id, label, token_id, enc_secret, now),
         )
@@ -249,6 +308,18 @@ def get_account(account_id: str) -> Optional[dict]:
             "SELECT * FROM modal_accounts WHERE id=?", (account_id,)
         ).fetchone()
     return _to_internal(row) if row else None
+
+
+def get_account_by_workspace(workspace: str) -> Optional[dict]:
+    ws = (workspace or "").strip()
+    if not ws:
+        return None
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT * FROM modal_accounts WHERE workspace=? ORDER BY added_at DESC LIMIT 1",
+            (ws,),
+        ).fetchone()
+    return _to_public(row) if row else None
 
 
 def list_accounts() -> list[dict]:
@@ -349,7 +420,11 @@ def update_account_status(
     account_id: str,
     status: str,
     workspace: Optional[str] = None,
+    remote_base_url: Optional[str] = None,
     error: Optional[str] = None,
+    onboarding_step: Optional[str] = None,
+    last_error_code: Optional[str] = None,
+    last_error_hint: Optional[str] = None,
 ) -> None:
     if status not in _ALLOWED_STATUSES:
         raise ValueError(f"Unknown account status: {status}")
@@ -359,10 +434,35 @@ def update_account_status(
     if workspace is not None:
         fields.append("workspace = ?")
         values.append(workspace)
+    if remote_base_url is not None:
+        normalized_base = (remote_base_url or "").strip().rstrip("/")
+        if normalized_base:
+            fields.append("remote_base_url = ?")
+            values.append(normalized_base)
+        else:
+            fields.append("remote_base_url = NULL")
+    if onboarding_step is not None:
+        fields.append("onboarding_step = ?")
+        values.append(onboarding_step)
+    if last_error_code is not None:
+        fields.append("last_error_code = ?")
+        values.append(last_error_code)
+    if last_error_hint is not None:
+        fields.append("last_error_hint = ?")
+        values.append(last_error_hint)
     if status == "ready":
         # Successful readiness clears failure metadata.
         values[1] = None
         fields.append("failed_at = NULL")
+        fields.append("failure_type = NULL")
+        fields.append("fail_count = 0")
+        fields.append("last_error_code = NULL")
+        fields.append("last_error_hint = NULL")
+        if onboarding_step is None:
+            fields.append("onboarding_step = 'ready'")
+    elif onboarding_step is None:
+        fields.append("onboarding_step = ?")
+        values.append(status)
     values.append(account_id)
 
     with _lock, _db() as conn:
@@ -378,6 +478,15 @@ def update_account_status(
             raise ValueError(
                 f"Forbidden account status transition: {prev_status} -> {status}"
             )
+        if workspace is not None and workspace.strip():
+            existing_ws = conn.execute(
+                "SELECT id, label FROM modal_accounts WHERE workspace=? AND id<>? LIMIT 1",
+                (workspace.strip(), account_id),
+            ).fetchone()
+            if existing_ws is not None:
+                raise DuplicateAccountError(
+                    f"Workspace '{workspace.strip()}' is already assigned to account id={existing_ws['id']}."
+                )
 
         conn.execute(
             f"UPDATE modal_accounts SET {', '.join(fields)} WHERE id=?",
@@ -398,6 +507,9 @@ def mark_account_failed(
     error: str,
     max_fail_count: int = 6,
     failure_type: Optional[str] = None,
+    error_code: Optional[str] = None,
+    error_hint: Optional[str] = None,
+    onboarding_step: str = "failed",
 ) -> None:
     """
     Mark account failed and increment failure counter.
@@ -411,6 +523,10 @@ def mark_account_failed(
     """
     if failure_type is None:
         failure_type, _ = _classify_error(error)
+    if not error_code:
+        error_code = _default_error_code_for_failure_type(failure_type)
+    if not error_hint:
+        error_hint = _default_error_hint(error_code, error)
 
     recovery_policy = (
         "manual_only"
@@ -442,18 +558,30 @@ def mark_account_failed(
         conn.execute(
             """
             UPDATE modal_accounts
-            SET status=?, last_error=?, failed_at=?, fail_count=?, failure_type=?
+            SET status=?, last_error=?, failed_at=?, fail_count=?, failure_type=?,
+                last_error_code=?, last_error_hint=?, onboarding_step=?
             WHERE id=?
             """,
-            (next_status, error, now, new_fail_count, failure_type, account_id),
+            (
+                next_status,
+                error,
+                now,
+                new_fail_count,
+                failure_type,
+                error_code,
+                error_hint,
+                onboarding_step,
+                account_id,
+            ),
         )
         logger.warning(
-            "account_mark_failed account_id=%s prev=%s new=%s fail_count=%s failure_type=%s error=%s",
+            "account_mark_failed account_id=%s prev=%s new=%s fail_count=%s failure_type=%s code=%s error=%s",
             account_id,
             prev_status,
             next_status,
             new_fail_count,
             failure_type,
+            error_code,
             error,
         )
 
@@ -497,7 +625,8 @@ def recover_failed_accounts(cooldown_seconds: int = 300) -> int:
                 conn.execute(
                     """
                     UPDATE modal_accounts
-                    SET status='ready', last_error=NULL, failed_at=NULL, failure_type=NULL
+                    SET status='ready', last_error=NULL, failed_at=NULL, failure_type=NULL,
+                        fail_count=0, last_error_code=NULL, last_error_hint=NULL, onboarding_step='ready'
                     WHERE id=?
                     """,
                     (row["id"],),
@@ -544,7 +673,8 @@ def enable_account(account_id: str) -> None:
         conn.execute(
             """
             UPDATE modal_accounts
-            SET status='ready', last_error=NULL, failed_at=NULL, failure_type=NULL, fail_count=0
+            SET status='ready', last_error=NULL, failed_at=NULL, failure_type=NULL, fail_count=0,
+                last_error_code=NULL, last_error_hint=NULL, onboarding_step='ready'
             WHERE id=?
             """,
             (account_id,),

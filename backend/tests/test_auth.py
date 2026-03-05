@@ -40,6 +40,25 @@ def test_verify_api_key_accepts_valid_header(monkeypatch):
     assert verify_api_key(header_key="secret-key", query_key=None) == "secret-key"
 
 
+def test_verify_api_key_query_disabled_by_default(monkeypatch):
+    monkeypatch.setenv("API_KEY", "secret-key")
+    monkeypatch.delenv("ALLOW_API_KEY_QUERY", raising=False)
+    from auth import verify_api_key
+
+    with pytest.raises(HTTPException) as exc:
+        verify_api_key(header_key=None, query_key="secret-key")
+    assert exc.value.status_code == 403
+    assert exc.value.detail["code"] == "invalid_api_key"
+
+
+def test_verify_api_key_query_enabled_with_env(monkeypatch):
+    monkeypatch.setenv("API_KEY", "secret-key")
+    monkeypatch.setenv("ALLOW_API_KEY_QUERY", "1")
+    from auth import verify_api_key
+
+    assert verify_api_key(header_key=None, query_key="secret-key") == "secret-key"
+
+
 def test_verify_api_key_rejects_missing(monkeypatch):
     monkeypatch.setenv("API_KEY", "secret-key")
     from auth import verify_api_key

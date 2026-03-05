@@ -138,6 +138,8 @@ def test_deploy_account_health_429_disables_account(monkeypatch):
     assert row["status"] == "disabled"
     assert row["failure_type"] == "quota_exceeded"
     assert (row["last_error"] or "").startswith("health_failed:")
+    assert row["last_error_code"] == "health_failed"
+    assert row["onboarding_step"] == "checking_health"
 
 
 def test_deploy_account_requires_warmup_before_ready(monkeypatch):
@@ -198,7 +200,9 @@ def test_deploy_account_masks_secret_values_on_sync_failure(monkeypatch):
     assert row is not None
     assert row["status"] == "disabled"
     assert row["failure_type"] == "config_failed"
-    assert (row["last_error"] or "").startswith("config_failed:")
+    assert (row["last_error"] or "").startswith("modal_secret_sync_failed:")
+    assert row["last_error_code"] == "modal_secret_sync_failed"
+    assert row["onboarding_step"] == "checking_tokens"
     assert "huggingface" in (row["last_error"] or "")
     assert hf_token not in (row["last_error"] or "")
 
@@ -362,3 +366,19 @@ def test_deploy_account_writes_onboarding_audit_steps(monkeypatch):
     assert "account_deploy_started" in actions
     assert "account_healthcheck_started" in actions
     assert "account_ready" in actions
+
+
+def test_deploy_account_sets_missing_shared_env_error_code(monkeypatch):
+    monkeypatch.delenv("API_KEY", raising=False)
+    monkeypatch.delenv("ADMIN_LOGIN", raising=False)
+    monkeypatch.delenv("ADMIN_PASSWORD_HASH", raising=False)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    account_id = accounts.add_account("EnvMissing", "tok_id_env", "tok_secret_env")
+
+    deployer.deploy_account(account_id)
+
+    row = accounts.get_account(account_id)
+    assert row is not None
+    assert row["status"] == "disabled"
+    assert row["last_error_code"] == "missing_shared_env"
+    assert row["onboarding_step"] == "checking_tokens"
