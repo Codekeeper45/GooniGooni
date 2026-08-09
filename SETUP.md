@@ -1,236 +1,110 @@
-# Gooni Gooni — Project Setup & Deployment Guide
+# Установка и деплой
 
-## 📐 Architecture Overview
+## 1. Modal backend
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│  USER BROWSER                                                │
-└────────────────────────┬─────────────────────────────────────┘
-                         │ HTTPS
-┌────────────────────────▼─────────────────────────────────────┐
-│  GCP VM (OpenClaw)   — Docker container                      │
-│  nginx  :80/:443  → serves built React SPA (dist/)          │
-│  nginx proxy /api/*  → Modal backend URL                     │
-└────────────────────────┬─────────────────────────────────────┘
-                         │ HTTPS (Modal URL)
-┌────────────────────────▼─────────────────────────────────────┐
-│  Modal Cloud (serverless)                                    │
-│  FastAPI ASGI  app — gooni-gooni-backend                     │
-│  ├── run_video_generation()  — A10G GPU                      │
-│  └── run_image_generation()  — T4 GPU                        │
-│  Volumes: model-cache, results (SQLite DB + files)           │
-└──────────────────────────────────────────────────────────────┘
-```
-
-## ✅ Audit Results
-
-### Frontend (React + Vite)
-| Check | Status | Notes |
-|---|---|---|
-| React 18 + Vite 6 | ✅ | `package.json` configured |
-| TailwindCSS 4 | ✅ | Via `@tailwindcss/vite` plugin |
-| Package manager | ⚠️ `npm` | No lockfile committed — run `npm install` |
-| TypeScript types | ⚠️ | `@types/react` missing as devDep — `npm i -D @types/react @types/react-dom` |
-| `VITE_API_URL` env | ✅ | `.env.example` present |
-| `VITE_ADMIN_KEY` env | ✅ | Added to `.env.example` |
-
-### Backend (Python + Modal)
-| Check | Status | Notes |
-|---|---|---|
-| FastAPI + Pydantic v2 | ✅ | `requirements.txt` |
-| Modal SDK `>=0.64` | ✅ | |
-| Auth (`X-API-Key`) | ✅ | `auth.py` — env `API_KEY` |
-| Admin auth (`X-Admin-Key`) | ✅ | `app.py` — env `ADMIN_KEY` |
-| SQLite storage | ✅ | `storage.py`, WAL mode |
-| Account rotation | ✅ | `accounts.py`, `router.py` |
-| Unit tests (89 passing) | ✅ | `pytest backend/tests/` |
-| Phr00t model (safetensors) | ✅ | `from_single_file()` |
-| AniSora V3.2 subfolder | ✅ | subfolder=`V3.2` |
-| HF token for gated models | ⚠️ | Needed for FLUX.1-dev — set `HF_TOKEN` secret |
-
-### Issues to Fix Before Production
-| Issue | Fix |
-|---|---|
-| No `package-lock.json` / `pnpm-lock.yaml` | Run `npm install` to generate |
-| No `@types/react` devDep | `npm i -D @types/react @types/react-dom` |
-| `AdminPanel.tsx` not wired to `App.tsx` | Add `onAdminClick` state in `App.tsx` |
-| `HF_TOKEN` Modal secret | Required for `black-forest-labs/FLUX.1-dev` (gated) |
-| No `.gitignore` | Create (see below) |
-
----
-
-## 🚀 Step-by-Step Setup
-
-### 1. Prerequisites
-
-| Tool | Version | Install |
-|---|---|---|
-| Node.js | ≥ 20 | `winget install OpenJS.NodeJS` |
-| npm | ≥ 10 | Included with Node |
-| Python | 3.11 | `winget install Python.Python.3.11` |
-| Modal CLI | ≥ 0.64 | `pip install modal` |
-| Docker Desktop | latest | [docker.com/get-started](https://www.docker.com/get-started/) |
-| gcloud CLI | latest | [cloud.google.com/sdk](https://cloud.google.com/sdk/) |
-
----
-
-### 2. Frontend Setup
+Установите и авторизуйте Modal:
 
 ```bash
-# In project root
-npm install
-npm i -D @types/react @types/react-dom
+python -m pip install "modal>=1.1.4,<2"
+modal setup
+```
 
-# Copy env file
+Создайте ключ API:
+
+```bash
+modal secret create gooni-api-key API_KEY="replace-with-a-long-random-key"
+```
+
+Разверните backend из корня репозитория:
+
+```bash
+modal deploy backend/app.py
+```
+
+После деплоя Modal покажет URL вида:
+
+```text
+https://YOUR-WORKSPACE--gooni-api.modal.run
+```
+
+Модель публичная, поэтому Hugging Face token не обязателен. Первый cold start скачивает модель в persistent Volume `model-cache`; следующие генерации повторно используют модель внутри живого GPU-контейнера.
+
+Опциональные переменные:
+
+| Переменная | По умолчанию | Назначение |
+|---|---:|---|
+| `PONY_MODEL_ID` | `Polenov2024/Pony-Diffusion-V6-XL` | Другой совместимый SDXL pipeline |
+| `IMAGE_GPU` | `T4` | Тип Modal GPU |
+| `IMAGE_TIMEOUT` | `600` | Timeout одного inference |
+| `IMAGE_STARTUP_TIMEOUT` | `900` | Timeout загрузки модели |
+| `IMAGE_MAX_CONTAINERS` | `1` | Параллельные GPU-контейнеры |
+| `CORS_ORIGINS` | `*` | Список frontend origins через запятую |
+
+## 2. Frontend
+
+Создайте `.env`:
+
+```bash
 cp .env.example .env
+```
 
-# Edit .env
-VITE_API_URL=https://YOUR_WORKSPACE--gooni-gooni-backend.modal.run
-VITE_API_KEY=your-api-key
-VITE_ADMIN_KEY=your-admin-key
+Укажите только публичный адрес backend:
 
-# Test dev server
+```dotenv
+VITE_API_URL=https://YOUR-WORKSPACE--gooni-api.modal.run
+```
+
+API key не встраивается в JavaScript bundle. Откройте **Settings** в приложении, вставьте URL и ключ, затем нажмите **Test connection**.
+
+Локальная разработка:
+
+```bash
+npm ci
 npm run dev
 ```
 
----
-
-### 3. Backend Setup — Modal
+Production build:
 
 ```bash
-# Authenticate
-modal setup            # opens browser for OAuth
-
-# Create required secrets
-modal secret create gooni-api-key   API_KEY=your-strong-api-key
-modal secret create gooni-admin     ADMIN_KEY=your-strong-admin-key
-modal secret create huggingface     HF_TOKEN=hf_your_token_here
-
-# Deploy backend (creates Modal Volumes automatically)
-modal deploy backend/app.py
-
-# The deploy output prints the URL — copy it to VITE_API_URL
-# Example: https://myworkspace--gooni-gooni-backend.modal.run
-```
-
-#### First-run: Pre-cache models
-```bash
-# After deploy, trigger a dummy generation to warm model cache
-# (models download on first generation — subsequent calls are fast)
-curl -X POST https://YOUR_URL/generate \
-  -H "X-API-Key: your-api-key" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"flux","type":"image","mode":"txt2img","prompt":"test"}'
-```
-
----
-
-### 4. Build Frontend for Production
-
-```bash
-# Set production env
-cp .env.example .env.production
-# Edit .env.production with real Modal URL
-
-# Build
 npm run build
-# Output: dist/  (static files ready to serve)
 ```
 
----
-
-### 5. Docker — Build & Push Frontend
+Docker:
 
 ```bash
-# Build image
-docker build -t gooni-gooni-frontend:latest .
-
-# Test locally
-docker run -p 8080:80 gooni-gooni-frontend:latest
-# Open http://localhost:8080
-
-# Push to DockerHub
-docker login
-docker tag gooni-gooni-frontend:latest YOUR_DOCKERHUB_USER/gooni-gooni:latest
-docker push YOUR_DOCKERHUB_USER/gooni-gooni:latest
+docker compose up --build
 ```
 
----
+Откройте `http://localhost:8080`.
 
-### 6. Deploy to GCP (OpenClaw VM)
+## 3. Проверка
 
 ```bash
-# SSH into your OpenClaw VM
-gcloud compute ssh openclaw --zone YOUR_ZONE
-
-# On the VM — pull and run
-docker pull YOUR_DOCKERHUB_USER/gooni-gooni:latest
-docker run -d \
-  --name gooni \
-  --restart unless-stopped \
-  -p 80:80 \
-  -p 443:443 \
-  YOUR_DOCKERHUB_USER/gooni-gooni:latest
+python -m compileall -q backend
+python backend/tests/run_contract_checks.py
+npm run build
 ```
 
----
+После установки test-зависимостей:
 
-## 🔐 Environment Variables Reference
-
-| Variable | Where | Description |
-|---|---|---|
-| `API_KEY` | Modal Secret `gooni-api-key` | Auth key for all API endpoints |
-| `ADMIN_KEY` | Modal Secret `gooni-admin` | Auth key for admin panel |
-| `HF_TOKEN` | Modal Secret `huggingface` | HuggingFace token (FLUX gated model) |
-| `VIDEO_GPU` | Modal env | Default: `A10G` |
-| `IMAGE_GPU` | Modal env | Default: `T4` |
-| `VITE_API_URL` | Frontend `.env` | Modal backend URL |
-| `VITE_API_KEY` | Frontend `.env` | Same as `API_KEY` |
-| `VITE_ADMIN_KEY` | Frontend `.env` | Same as `ADMIN_KEY` |
-
----
-
-## 🐳 Docker Files Created
-
-| File | Purpose |
-|---|---|
-| `Dockerfile` | Multi-stage: build React → nginx |
-| `docker-compose.yml` | Local dev orchestration |
-| `nginx.conf` | SPA routing + API proxy |
-| `.dockerignore` | Exclude node_modules etc. |
-
----
-
-## 📁 Project Structure
-
-```
-gooni-gooni/
-├── src/                  # React frontend
-│   ├── app/              # Components, pages, contexts
-│   └── styles/           # CSS
-├── backend/              # Modal Python backend
-│   ├── app.py            # Main Modal app (FastAPI + GPU functions)
-│   ├── models/           # Pipeline implementations
-│   ├── accounts.py       # Multi-account store
-│   ├── router.py         # Account rotation
-│   └── deployer.py       # Per-account deploy helper
-├── Dockerfile            # Frontend container
-├── docker-compose.yml    # Local orchestration
-├── nginx.conf            # Nginx config for SPA + proxy
-└── .env.example          # Environment template
+```bash
+python -m pip install pytest httpx fastapi
+pytest backend/tests -m "not live_gpu"
 ```
 
----
+Реальный GPU smoke test:
 
-## 📋 Readiness Checklist
+```bash
+pytest backend/tests/test_api.py -m live_gpu \
+  --base-url https://YOUR-WORKSPACE--gooni-api.modal.run \
+  --api-key YOUR_KEY
+```
 
-- [ ] `npm install` run → `node_modules/` present
-- [ ] `.env` created from `.env.example`
-- [ ] `modal setup` done (authenticated)
-- [ ] Modal Secrets created: `gooni-api-key`, `gooni-admin`, `huggingface`
-- [ ] `modal deploy backend/app.py` — URL obtained
-- [ ] `VITE_API_URL` in `.env` updated with Modal URL
-- [ ] `npm run build` succeeds → `dist/` created
-- [ ] Docker image built and pushed to DockerHub
-- [ ] GCP VM running and Docker installed
-- [ ] Container deployed on GCP
+## Поведение состояний
+
+- `/generate` возвращает Modal FunctionCall ID.
+- Пока call исполняется, `/status` возвращает `processing`.
+- Любое исключение model startup или inference возвращается как `failed`.
+- Успешный call возвращает manifest и ссылки на результат.
+- Кнопка Cancel вызывает `FunctionCall.cancel()`.
+- UI переживает перезагрузку страницы, повторяет временно упавший polling пять раз и не стирает backend-ошибку.

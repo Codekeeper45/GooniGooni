@@ -1,679 +1,446 @@
-import { useState, useEffect } from "react";
-import { Navbar } from "./Navbar";
-import { ControlPanel } from "./ControlPanel";
-import { OutputPanel } from "./OutputPanel";
-import { HistoryPanel } from "./HistoryPanel";
+import { useEffect, useRef, useState } from "react";
+import { CheckCircle2, Eye, EyeOff, Loader2, X } from "lucide-react";
+import {
+  ApiError,
+  PONY_CONTRACT,
+  cancelTask,
+  fetchAsset,
+  generateImage,
+  getTaskStatus,
+  loadApiSettings,
+  saveApiSettings,
+  testConnection,
+  type ApiSettings,
+  type GenerationPayload,
+  type ResultSummary,
+} from "../api";
 import { useGallery } from "../context/GalleryContext";
-import type { GalleryItem } from "../context/GalleryContext";
-import type { 
-  GenerationType, 
-  VideoModel, 
-  ImageModel,
-  VideoMode,
-  ImageMode,
-  GenerationStatus 
-} from "./ControlPanel";
-import type { HistoryItem } from "./HistoryPanel";
+import { ControlPanel, type GenerationForm } from "./ControlPanel";
+import { Navbar } from "./Navbar";
+import { OutputPanel, type UiStatus } from "./OutputPanel";
 
-const API_URL = ((import.meta as any).env.VITE_API_URL as string | undefined) ?? "";
+const ACTIVE_TASK_KEY = "gooni_active_task_v2";
 
-// ─── Generation status messages ───────────────────────────────────────────────
+const DEFAULT_FORM: GenerationForm = {
+  mode: PONY_CONTRACT.model.default_mode as GenerationForm["mode"],
+  prompt: "",
+  negativePrompt: PONY_CONTRACT.defaults.negative_prompt,
+  width: PONY_CONTRACT.defaults.width,
+  height: PONY_CONTRACT.defaults.height,
+  steps: PONY_CONTRACT.defaults.steps,
+  cfgScale: PONY_CONTRACT.defaults.cfg_scale,
+  sampler: PONY_CONTRACT.defaults.sampler as GenerationForm["sampler"],
+  clipSkip: PONY_CONTRACT.defaults.clip_skip,
+  denoisingStrength: PONY_CONTRACT.defaults.denoising_strength,
+  seed: PONY_CONTRACT.defaults.seed,
+  outputFormat: PONY_CONTRACT.defaults.output_format as GenerationForm["outputFormat"],
+  referenceImage: null,
+  referenceName: null,
+};
 
-function getStatusText(progress: number, type: GenerationType): string {
-  if (type === "video") {
-    if (progress < 8) return "Initializing video model...";
-    if (progress < 20) return "Encoding prompt...";
-    if (progress < 45) return "Rendering frames...";
-    if (progress < 75) return "Upscaling...";
-    if (progress < 92) return "Applying enhancements...";
-    return "Finalizing video...";
-  } else {
-    if (progress < 15) return "Loading image model...";
-    if (progress < 35) return "Processing prompt...";
-    if (progress < 70) return "Generating image...";
-    if (progress < 92) return "Refining details...";
-    return "Finalizing...";
-  }
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
-import { configManager } from "../utils/configManager";
-import type { ModelId } from "../utils/configManager";
+function validateForm(form: GenerationForm): string | null {
+  if (!form.prompt.trim()) return "Prompt is required.";
+  const limits = PONY_CONTRACT.limits;
+  if (
+    form.width < limits.width.min ||
+    form.width > limits.width.max ||
+    form.width % limits.width.step !== 0
+  ) {
+    return "Width must be 512–1536 and divisible by 8.";
+  }
+  if (
+    form.height < limits.height.min ||
+    form.height > limits.height.max ||
+    form.height % limits.height.step !== 0
+  ) {
+    return "Height must be 512–1536 and divisible by 8.";
+  }
+  if (form.width * form.height > limits.max_pixels) {
+    return `Width × height must not exceed ${limits.max_pixels.toLocaleString()} pixels on the configured GPU.`;
+  }
+  if (form.mode === "img2img" && !form.referenceImage) {
+    return "Upload a reference image for image-to-image mode.";
+  }
+  if (form.seed < limits.seed.min || form.seed > limits.seed.max) {
+    return "Seed must be -1 or an integer up to 2147483647.";
+  }
+  return null;
+}
 
-// ─── API Integration ─────────────────────────────────────────────────────────
-async function generateMediaAPI(
-  onProgress: (p: number) => void,
-  onStatusText: (text: string) => void,
-  params: any,
-  onTaskCreated?: (task_id: string) => void
-): Promise<{ url: string; thumbnailUrl?: string }> {
-  // Build structured payload via configManager
-  const modelId: ModelId = params.type === "video" ? params.videoModel : params.imageModel;
-  const mode = params.type === "video" ? params.videoMode : params.imageMode;
-
-  const values = {
-    ...params,
-    num_frames: params.numFrames,
-    steps: params.type === "video" ? params.videoSteps : params.imageSteps,
-    cfg_scale: params.type === "video" ? params.cfgScaleVideo : params.cfgScaleImage,
-    guidance_scale: params.type === "video" ? params.guidanceScale : params.imageGuidanceScale,
-    output_format: params.outputFormat,
-    reference_image: params.referenceImage,
-    init_image: params.referenceImage,
-    first_frame_image: params.firstFrameImage,
-    last_frame_image: params.lastFrameImage,
-    arbitrary_frames: params.arbitraryFrames.map((f: any) => ({
-      frame_index: f.frameIndex,
-      image: f.image
-    }))
+function buildPayload(form: GenerationForm): GenerationPayload {
+  return {
+    model: "pony",
+    type: "image",
+    mode: form.mode,
+    prompt: form.prompt.trim(),
+    negative_prompt: form.negativePrompt.trim(),
+    width: form.width,
+    height: form.height,
+    steps: form.steps,
+    cfg_scale: form.cfgScale,
+    sampler: form.sampler,
+    clip_skip: form.clipSkip,
+    denoising_strength: form.denoisingStrength,
+    seed: form.seed,
+    output_format: form.outputFormat,
+    reference_image: form.mode === "img2img" ? form.referenceImage : null,
   };
-
-  const payload = configManager.buildPayload(modelId, mode, values);
-
-  console.log("🚀 Payload for inference:", payload);
-  console.log("📋 Advanced settings:", params.useAdvancedSettings ? "ON" : "OFF");
-
-  if (!API_URL) {
-    throw new Error("Backend not configured. Set VITE_API_URL in .env and rebuild the app.");
-  }
-
-  const API_KEY = localStorage.getItem("mg_api_key") ?? "";
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    ...(API_KEY ? { "X-API-Key": API_KEY } : {}),
-  };
-
-  const genRes = await fetch(`${API_URL}/generate`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(payload),
-  });
-
-  if (!genRes.ok) {
-    const detail = await genRes.text();
-    throw new Error(`Generate failed (${genRes.status}): ${detail}`);
-  }
-
-  const { task_id } = await genRes.json() as { task_id: string };
-  console.log(`📦 Task created: ${task_id}`);
-  onTaskCreated?.(task_id);
-  onProgress(5);
-
-  return pollTask(task_id, params.type, onProgress, onStatusText);
 }
 
-// ─── Active task persistence helpers ─────────────────────────────────────────
-const ACTIVE_TASK_KEY = "gg_active_task";
+function SettingsDialog({
+  open,
+  onClose,
+}: {
+  open: boolean;
+  onClose: () => void;
+}) {
+  const [draft, setDraft] = useState<ApiSettings>(loadApiSettings);
+  const [showKey, setShowKey] = useState(false);
+  const [testState, setTestState] = useState<"idle" | "testing" | "ok" | "error">("idle");
+  const [testMessage, setTestMessage] = useState("");
 
-interface ActiveTask {
-  task_id: string;
-  type: string;
-  prompt: string;
-  modelName: string;
-  width: number;
-  height: number;
-  seed: number;
-  startedAt: number;
-}
-
-function saveActiveTask(t: ActiveTask) {
-  localStorage.setItem(ACTIVE_TASK_KEY, JSON.stringify(t));
-}
-function clearActiveTask() {
-  localStorage.removeItem(ACTIVE_TASK_KEY);
-}
-function getActiveTask(): ActiveTask | null {
-  try {
-    const raw = localStorage.getItem(ACTIVE_TASK_KEY);
-    return raw ? (JSON.parse(raw) as ActiveTask) : null;
-  } catch {
-    return null;
-  }
-}
-
-/** Poll task until done/failed — reusable for both new and resumed tasks. */
-async function pollTask(
-  task_id: string,
-  type: GenerationType,
-  onProgress: (p: number) => void,
-  onStatusText: (text: string) => void
-): Promise<{ url: string; thumbnailUrl?: string }> {
-  const API_KEY = localStorage.getItem("mg_api_key") ?? "";
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    ...(API_KEY ? { "X-API-Key": API_KEY } : {}),
-  };
-  const POLL_INTERVAL_MS = 3000;
-  const MAX_POLLS = 400;
-
-  for (let poll = 0; poll < MAX_POLLS; poll++) {
-    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
-    const statusRes = await fetch(`${API_URL}/status/${task_id}`, { headers });
-    if (!statusRes.ok) throw new Error(`Status check failed (${statusRes.status})`);
-    const { status, progress, error } = await statusRes.json() as {
-      status: string; progress: number; error?: string;
-    };
-    onProgress(status === "done" ? 100 : Math.max(5, Math.min(99, progress ?? 0)));
-    
-    if (status === "failed") throw new Error(error ?? "Generation failed on the server");
-    
-    // Fallback to local text mapping if no explicit error to render
-    onStatusText(status === "pending" ? "Pending in queue..." : getStatusText(progress ?? 0, type));
-
-    if (status === "done") {
-      let resultUrl = `${API_URL}/results/${task_id}`;
-      let previewUrl = `${API_URL}/preview/${task_id}`;
-      if (API_KEY) {
-        resultUrl += `?api_key=${encodeURIComponent(API_KEY)}`;
-        previewUrl += `?api_key=${encodeURIComponent(API_KEY)}`;
-      }
-      return { url: resultUrl, thumbnailUrl: type === "video" ? previewUrl : undefined };
-    }
-  }
-  throw new Error("Generation timed out after polling limit reached");
-}
-
-
-function calcEstSeconds(
-  type: GenerationType,
-  videoFrames?: number,
-  imageSteps?: number
-): number {
-  if (type === "video") {
-    // num_frames / fps * complexity_factor
-    const frames = videoFrames || 81;
-    return Math.round((frames / 16) * 3.5);
-  } else {
-    // steps * step_time
-    const steps = imageSteps || 30;
-    return Math.round(steps * 0.4);
-  }
-}
-
-// ─── Main Component ────────────────────────────────────────────────────────────
-export function MediaGenApp() {
-  const { addToGallery } = useGallery();
-
-  // ── Persisted state ─────────────────────────────────────────────────────────
-  const [prompt, setPromptRaw] = useState<string>(
-    () => localStorage.getItem("mg_prompt") ?? ""
-  );
-  const setPrompt = (p: string) => {
-    setPromptRaw(p);
-    localStorage.setItem("mg_prompt", p);
-  };
-
-  // ── Type & Model selection ───────────────────────────────────────────────────
-  const [generationType, setGenerationType] = useState<GenerationType>("video");
-  const [videoModel, setVideoModel] = useState<VideoModel>("anisora");
-  const [imageModel, setImageModel] = useState<ImageModel>("pony");
-
-  // ── Mode selection ───────────────────────────────────────────────────────────
-  const [videoMode, setVideoMode] = useState<VideoMode>("t2v");
-  const [imageMode, setImageMode] = useState<ImageMode>("txt2img");
-
-  // ── Common parameters ─────────────────────────────────────────────────────────
-  const [negativePrompt, setNegativePrompt] = useState("");
-  const [width, setWidth] = useState(512);
-  const [height, setHeight] = useState(512);
-  const [seed, setSeed] = useState<number>(-1);
-  const [batchSize, setBatchSize] = useState(1);
-  const [outputFormat, setOutputFormat] = useState("mp4");
-
-  // ── Reference images (multiple modes) ─────────────────────────────────────────
-  const [referenceImage, setReferenceImage] = useState<string | null>(null);
-  const [firstFrameImage, setFirstFrameImage] = useState<string | null>(null);
-  const [lastFrameImage, setLastFrameImage] = useState<string | null>(null);
-  const [arbitraryFrames, setArbitraryFrames] = useState<
-    Array<{ id: string; frameIndex: number; image: string }>
-  >([]);
-
-  // ── Video-specific parameters ─────────────────────────────────────────────────
-  const [numFrames, setNumFrames] = useState(81);
-  const [videoSteps, setVideoSteps] = useState(8);
-  const [guidanceScale, setGuidanceScale] = useState(1.0);
-  const [fps, setFps] = useState(16);
-  const [motionScore, setMotionScore] = useState(3.0);
-  const [cfgScaleVideo, setCfgScaleVideo] = useState(1.0);
-  const [referenceStrength, setReferenceStrength] = useState(0.85);
-  const [lightingVariant, setLightingVariant] = useState<"high_noise" | "low_noise">("low_noise");
-  const [denoisingStrength, setDenoisingStrength] = useState(0.7);
-
-  // ── Image-specific parameters ─────────────────────────────────────────────────
-  const [imageSteps, setImageSteps] = useState(30);
-  const [cfgScaleImage, setCfgScaleImage] = useState(6);
-  const [clipSkip, setClipSkip] = useState(2);
-  const [sampler, setSampler] = useState("Euler a");
-  const [imageGuidanceScale, setImageGuidanceScale] = useState(3.5);
-  const [imgDenoisingStrength, setImgDenoisingStrength] = useState(0.7);
-
-  // ── Advanced settings control ────────────────────────────────────────────────
-  const [useAdvancedSettings, setUseAdvancedSettings] = useState(false);
-
-  // ── Generation state ──────────────────────────────────────────────────────────
-  const [status, setStatus] = useState<GenerationStatus>("idle");
-  const [progress, setProgress] = useState(0);
-  const [statusText, setStatusText] = useState("");
-  const [result, setResult] = useState<{
-    url: string;
-    thumbnailUrl?: string;
-    seed: number;
-    width: number;
-    height: number;
-    prompt: string;
-    model: string;
-    type: GenerationType;
-  } | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  // ── History & Gallery ─────────────────────────────────────────────────────────
-  const [history, setHistory] = useState<HistoryItem[]>([]);
-  const [showHistory, setShowHistory] = useState(false);
-
-  // Update status text as progress changes
   useEffect(() => {
-    if (status === "generating") {
-      setStatusText(getStatusText(progress, generationType));
+    if (open) {
+      setDraft(loadApiSettings());
+      setTestState("idle");
+      setTestMessage("");
     }
-  }, [progress, status, generationType]);
+  }, [open]);
 
-  // Auto-update defaults when model changes
-  useEffect(() => {
-    if (generationType === "video") {
-      if (videoModel === "anisora") {
-        setVideoSteps(8);
-        setGuidanceScale(1.0);
-        setFps(16);
-        setMotionScore(3.0);
-      } else if (videoModel === "phr00t") {
-        setVideoSteps(4);
-        setCfgScaleVideo(1.0);
-        setFps(16);
-      }
-    } else {
-      if (imageModel === "pony") {
-        setImageSteps(30);
-        setCfgScaleImage(6);
-        setClipSkip(2);
-        setSampler("Euler a");
-      } else if (imageModel === "flux") {
-        setImageSteps(25);
-        setImageGuidanceScale(3.5);
-        setSampler("Euler");
-      }
-    }
-  }, [generationType, videoModel, imageModel]);
+  if (!open) return null;
 
-  // ── Resume generation from localStorage on page load ─────────────────────────
-  useEffect(() => {
-    const saved = getActiveTask();
-    if (!saved || !saved.task_id) return;
+  const save = () => {
+    saveApiSettings(draft);
+    onClose();
+  };
 
-    // Only resume if task started less than 25 minutes ago to avoid stale tasks
-    if (Date.now() - saved.startedAt > 25 * 60 * 1000) {
-      clearActiveTask();
-      return;
-    }
-
-    setStatus("generating");
-    setProgress(5);
-    setStatusText(getStatusText(5, saved.type as GenerationType));
-    setError(null);
-    setResult(null);
-
-    pollTask(saved.task_id, saved.type as GenerationType, setProgress, setStatusText)
-      .then(({ url: resultUrl, thumbnailUrl }) => {
-        const newResult = {
-          url: resultUrl,
-          thumbnailUrl,
-          seed: saved.seed,
-          width: saved.width,
-          height: saved.height,
-          prompt: saved.prompt,
-          model: saved.modelName,
-          type: saved.type as GenerationType,
-        };
-        setResult(newResult);
-        setStatus("done");
-        setProgress(100);
-        clearActiveTask();
-      })
-      .catch((err) => {
-        clearActiveTask();
-        setStatus("error");
-        setError(err instanceof Error ? err.message : "Generation failed");
-      });
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const estSeconds = calcEstSeconds(
-    generationType,
-    generationType === "video" ? numFrames : undefined,
-    generationType === "image" ? imageSteps : undefined
-  );
-
-  // ── Generate ──────────────────────────────────────────────────────────────────
-  const handleGenerate = async () => {
-    if (!prompt.trim()) return;
-    
-    if (generationType === "video") {
-      if (videoMode === "i2v" && !referenceImage) {
-        return;
-      }
-      if (videoMode === "first_last_frame" && (!firstFrameImage || !lastFrameImage)) {
-        return;
-      }
-    } else {
-      if (imageMode === "img2img" && !referenceImage) {
-        return;
-      }
-    }
-    
-    if (status === "generating") return;
-
-    const finalSeed = useAdvancedSettings ? seed : -1;
-    const finalNegativePrompt = useAdvancedSettings ? negativePrompt : "";
-    
-    const resolvedSeed = finalSeed === -1 ? Math.floor(Math.random() * 2147483647) : finalSeed;
-
-    setStatus("generating");
-    setProgress(0);
-    setStatusText(getStatusText(0, generationType));
-    setError(null);
-    setResult(null);
-
+  const test = async () => {
+    saveApiSettings(draft);
+    setTestState("testing");
+    setTestMessage("");
     try {
-      const modelName =
-        generationType === "video"
-          ? videoModel === "anisora"
-            ? "Index-AniSora V3.2"
-            : "Phr00t WAN 2.2 Rapid"
-          : imageModel === "pony"
-            ? "Pony Diffusion V6 XL"
-            : "Flux.1 [dev] nf4";
-
-      clearActiveTask();
-      const { url: resultUrl, thumbnailUrl } = await generateMediaAPI(
-        (p) => setProgress(p),
-        (text) => setStatusText(text),
-        {
-          type: generationType,
-          useAdvancedSettings,
-          prompt,
-          negativePrompt: finalNegativePrompt,
-          width,
-          height,
-          seed: resolvedSeed,
-          outputFormat,
-          videoModel,
-          videoMode,
-          numFrames,
-          videoSteps,
-          fps,
-          guidanceScale,
-          cfgScaleVideo,
-          motionScore,
-          lightingVariant,
-          denoisingStrength,
-          referenceImage,
-          referenceStrength,
-          firstFrameImage,
-          lastFrameImage,
-          arbitraryFrames,
-          imageModel,
-          imageMode,
-          imageSteps,
-          cfgScaleImage,
-          imageGuidanceScale,
-          clipSkip,
-          sampler,
-          imgDenoisingStrength,
-        },
-        // Save real task_id as soon as server assigns it
-        (task_id) => saveActiveTask({
-          task_id,
-          type: generationType,
-          prompt,
-          modelName,
-          width,
-          height,
-          seed: resolvedSeed,
-          startedAt: Date.now(),
-        })
-      );
-
-      clearActiveTask();
-      const newResult = {
-        url: resultUrl,
-        thumbnailUrl,
-        seed: resolvedSeed,
-        width,
-        height,
-        prompt,
-        model: modelName,
-        type: generationType,
-      };
-
-      setResult(newResult);
-      setStatus("done");
-      setProgress(100);
-
-      // Add to history
-      const historyItem: HistoryItem = {
-        id: Date.now().toString(),
-        prompt,
-        type: generationType,
-        model: modelName,
-        thumbnailUrl: thumbnailUrl || resultUrl,
-        width,
-        height,
-        seed: resolvedSeed,
-        createdAt: new Date(),
-      };
-      setHistory((prev) => [historyItem, ...prev.slice(0, 49)]);
-
-      // Add to gallery via context
-      const galleryItem: GalleryItem = {
-        id: Date.now().toString(),
-        url: resultUrl,
-        thumbnailUrl,
-        prompt,
-        type: generationType,
-        model: modelName,
-        width,
-        height,
-        seed: resolvedSeed,
-        createdAt: new Date(),
-      };
-      addToGallery(galleryItem);
-    } catch (err) {
-      clearActiveTask();
-      setStatus("error");
-      setError(err instanceof Error ? err.message : "Connection to inference server failed.");
+      await testConnection();
+      setTestState("ok");
+      setTestMessage("Backend and API key are valid.");
+    } catch (error) {
+      setTestState("error");
+      setTestMessage(error instanceof Error ? error.message : "Connection failed");
     }
-  };
-
-  const handleRetry = () => {
-    setStatus("idle");
-    setError(null);
-  };
-
-  const handleRegenerate = () => {
-    handleGenerate();
-  };
-
-  const handleReuseHistory = (item: HistoryItem) => {
-    setPrompt(item.prompt);
-    setGenerationType(item.type);
-    setWidth(item.width);
-    setHeight(item.height);
-    setShowHistory(false);
-  };
-
-  // ── Handlers for multiple frames ──────────────────────────────────────────────
-  const handleArbitraryFrameAdd = (frameIndex: number, image: string) => {
-    setArbitraryFrames((prev) => [
-      ...prev,
-      { id: Date.now().toString(), frameIndex, image },
-    ]);
-  };
-
-  const handleArbitraryFrameRemove = (id: string) => {
-    setArbitraryFrames((prev) => prev.filter((f) => f.id !== id));
-  };
-
-  const handleArbitraryFrameUpdate = (id: string, frameIndex: number) => {
-    setArbitraryFrames((prev) =>
-      prev.map((f) => (f.id === id ? { ...f, frameIndex } : f))
-    );
-  };
-
-  // Clear frames when mode changes
-  const handleVideoModeChange = (mode: VideoMode) => {
-    setVideoMode(mode);
-    // Clear all reference images
-    setReferenceImage(null);
-    setFirstFrameImage(null);
-    setLastFrameImage(null);
-    setArbitraryFrames([]);
-  };
-
-  const handleImageModeChange = (mode: ImageMode) => {
-    setImageMode(mode);
-    setReferenceImage(null);
   };
 
   return (
-    <div
-      className="h-screen flex flex-col overflow-hidden"
-      style={{
-        background: "#0F1117",
-        fontFamily: "'Space Grotesk', sans-serif",
-        color: "#E5E7EB",
-      }}
-    >
-      {/* ── Navbar ─────────────────────────────────────────────────────────── */}
-      <Navbar
-        onHistoryClick={() => setShowHistory(true)}
-        historyCount={history.length}
-      />
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
+      <div className="w-full max-w-lg rounded-2xl border border-white/10 bg-[#151922] shadow-2xl">
+        <div className="flex items-center justify-between border-b border-white/[0.06] px-5 py-4">
+          <div>
+            <p className="text-sm text-gray-100">Backend settings</p>
+            <p className="mt-0.5 text-xs text-gray-500">Stored only in this browser</p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-lg p-2 text-gray-500 hover:bg-white/5 hover:text-gray-200"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="space-y-4 p-5">
+          <label className="block space-y-2">
+            <span className="text-xs text-gray-400">Modal API URL</span>
+            <input
+              value={draft.apiUrl}
+              onChange={(event) => setDraft({ ...draft, apiUrl: event.target.value })}
+              placeholder="https://your-workspace--gooni-api.modal.run"
+              className="w-full rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2.5 text-sm text-gray-200 outline-none focus:border-blue-500/50"
+            />
+          </label>
+          <label className="block space-y-2">
+            <span className="text-xs text-gray-400">API key</span>
+            <div className="relative">
+              <input
+                type={showKey ? "text" : "password"}
+                value={draft.apiKey}
+                onChange={(event) => setDraft({ ...draft, apiKey: event.target.value })}
+                placeholder="Matches Modal secret gooni-api-key"
+                className="w-full rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2.5 pr-11 text-sm text-gray-200 outline-none focus:border-blue-500/50"
+              />
+              <button
+                type="button"
+                onClick={() => setShowKey((value) => !value)}
+                className="absolute right-2 top-1/2 -translate-y-1/2 rounded-lg p-2 text-gray-500 hover:text-gray-200"
+                aria-label={showKey ? "Hide API key" : "Show API key"}
+              >
+                {showKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+              </button>
+            </div>
+          </label>
+          <p className="rounded-xl bg-white/[0.03] px-3 py-2 text-[11px] leading-relaxed text-gray-500">
+            The key is sent only in the X-API-Key header. It is never appended to image
+            URLs or browser history.
+          </p>
+          {testState !== "idle" && (
+            <p
+              className={`flex items-center gap-2 rounded-xl px-3 py-2 text-xs ${
+                testState === "ok"
+                  ? "bg-emerald-500/10 text-emerald-300"
+                  : testState === "error"
+                    ? "bg-red-500/10 text-red-300"
+                    : "bg-blue-500/10 text-blue-300"
+              }`}
+            >
+              {testState === "testing" && <Loader2 className="h-4 w-4 animate-spin" />}
+              {testState === "ok" && <CheckCircle2 className="h-4 w-4" />}
+              {testState === "testing" ? "Testing connection..." : testMessage}
+            </p>
+          )}
+        </div>
+        <div className="flex justify-end gap-2 border-t border-white/[0.06] px-5 py-4">
+          <button
+            type="button"
+            onClick={test}
+            disabled={testState === "testing"}
+            className="rounded-xl border border-white/10 px-4 py-2 text-xs text-gray-300 hover:bg-white/5 disabled:opacity-50"
+          >
+            Test connection
+          </button>
+          <button
+            type="button"
+            onClick={save}
+            className="rounded-xl bg-blue-500 px-4 py-2 text-xs text-white hover:bg-blue-400"
+          >
+            Save
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
-      {/* ── Main layout ────────────────────────────────────────────────────── */}
-      <div className="flex-1 flex overflow-hidden min-h-0">
-        {/* Left: Control Panel */}
+export function MediaGenApp() {
+  const [form, setForm] = useState<GenerationForm>(DEFAULT_FORM);
+  const [uiStatus, setUiStatus] = useState<UiStatus>("idle");
+  const [statusText, setStatusText] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [validationError, setValidationError] = useState<string | null>(null);
+  const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
+  const [result, setResult] = useState<(ResultSummary & { objectUrl: string }) | null>(
+    null,
+  );
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const runToken = useRef(0);
+  const resultUrl = useRef<string | null>(null);
+  const { refresh: refreshGallery } = useGallery();
+
+  const replaceResultUrl = (url: string | null) => {
+    if (resultUrl.current) URL.revokeObjectURL(resultUrl.current);
+    resultUrl.current = url;
+  };
+
+  const finishWithError = (message: string) => {
+    localStorage.removeItem(ACTIVE_TASK_KEY);
+    setActiveTaskId(null);
+    setUiStatus("error");
+    setError(message);
+    setStatusText("Generation failed");
+  };
+
+  const pollTask = async (taskId: string, token: number) => {
+    let transientFailures = 0;
+    while (runToken.current === token) {
+      try {
+        const response = await getTaskStatus(taskId);
+        transientFailures = 0;
+        if (runToken.current !== token) return;
+        setStatusText(response.message);
+
+        if (response.status === "done") {
+          if (!response.result || !response.result_url) {
+            finishWithError("Backend returned done without result metadata.");
+            return;
+          }
+          const blob = await fetchAsset(response.result_url);
+          if (runToken.current !== token) return;
+          const objectUrl = URL.createObjectURL(blob);
+          replaceResultUrl(objectUrl);
+          setResult({ ...response.result, objectUrl });
+          setUiStatus("success");
+          setActiveTaskId(null);
+          localStorage.removeItem(ACTIVE_TASK_KEY);
+          await refreshGallery();
+          return;
+        }
+        if (response.status === "failed") {
+          finishWithError(response.error || response.message);
+          return;
+        }
+        if (response.status === "cancelled") {
+          setUiStatus("cancelled");
+          setActiveTaskId(null);
+          localStorage.removeItem(ACTIVE_TASK_KEY);
+          return;
+        }
+      } catch (caught) {
+        transientFailures += 1;
+        const message = caught instanceof Error ? caught.message : "Status request failed";
+        if (caught instanceof ApiError && [401, 403].includes(caught.status)) {
+          finishWithError(`${message}. Check Settings.`);
+          return;
+        }
+        if (transientFailures >= 5) {
+          finishWithError(
+            `Lost connection after 5 retries: ${message}. The backend task may still be running.`,
+          );
+          return;
+        }
+        setStatusText(`Connection interrupted. Retrying (${transientFailures}/5)...`);
+        await sleep(Math.min(3000 * 2 ** (transientFailures - 1), 15000));
+        continue;
+      }
+      await sleep(3000);
+    }
+  };
+
+  useEffect(() => {
+    const savedTask = localStorage.getItem(ACTIVE_TASK_KEY);
+    if (savedTask && loadApiSettings().apiUrl) {
+      setActiveTaskId(savedTask);
+      setUiStatus("generating");
+      setStatusText("Restoring active generation...");
+      const token = ++runToken.current;
+      void pollTask(savedTask, token);
+    }
+    return () => {
+      runToken.current += 1;
+      replaceResultUrl(null);
+    };
+    // Restore exactly once when the application mounts.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const updateForm = <K extends keyof GenerationForm>(
+    key: K,
+    value: GenerationForm[K],
+  ) => {
+    setForm((current) => {
+      const next = { ...current, [key]: value };
+      if (key === "mode" && value === "txt2img") {
+        next.referenceImage = null;
+        next.referenceName = null;
+      }
+      return next;
+    });
+    setValidationError(null);
+  };
+
+  const handleReferenceFile = (file: File | null) => {
+    if (!file) {
+      updateForm("referenceImage", null);
+      updateForm("referenceName", null);
+      return;
+    }
+    if (!["image/png", "image/jpeg", "image/webp"].includes(file.type)) {
+      setValidationError("Reference must be PNG, JPEG or WebP.");
+      return;
+    }
+    if (file.size > PONY_CONTRACT.limits.reference_max_bytes) {
+      setValidationError("Reference image must be smaller than 10 MB.");
+      return;
+    }
+    const reader = new FileReader();
+    reader.onerror = () => setValidationError("Could not read the reference image.");
+    reader.onload = () => {
+      updateForm("referenceImage", String(reader.result));
+      updateForm("referenceName", file.name);
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const startGeneration = async () => {
+    const invalid = validateForm(form);
+    if (invalid) {
+      setValidationError(invalid);
+      return;
+    }
+    if (!loadApiSettings().apiUrl) {
+      setSettingsOpen(true);
+      setValidationError("Configure the backend URL before generating.");
+      return;
+    }
+
+    const token = ++runToken.current;
+    replaceResultUrl(null);
+    setResult(null);
+    setError(null);
+    setValidationError(null);
+    setUiStatus("generating");
+    setStatusText("Submitting generation...");
+    try {
+      const queued = await generateImage(buildPayload(form));
+      if (runToken.current !== token) return;
+      setActiveTaskId(queued.task_id);
+      localStorage.setItem(ACTIVE_TASK_KEY, queued.task_id);
+      setStatusText(queued.message);
+      await pollTask(queued.task_id, token);
+    } catch (caught) {
+      if (runToken.current !== token) return;
+      const message = caught instanceof Error ? caught.message : "Could not submit generation";
+      finishWithError(message);
+      if (caught instanceof ApiError && [0, 401, 403].includes(caught.status)) {
+        setSettingsOpen(true);
+      }
+    }
+  };
+
+  const stopGeneration = async () => {
+    if (!activeTaskId) return;
+    setStatusText("Cancelling generation...");
+    try {
+      await cancelTask(activeTaskId);
+      runToken.current += 1;
+      setUiStatus("cancelled");
+      setActiveTaskId(null);
+      localStorage.removeItem(ACTIVE_TASK_KEY);
+    } catch (caught) {
+      setStatusText("Generation is still running");
+      setError(caught instanceof Error ? caught.message : "Could not cancel generation");
+    }
+  };
+
+  const downloadResult = () => {
+    if (!result) return;
+    const anchor = document.createElement("a");
+    anchor.href = result.objectUrl;
+    anchor.download = `gooni-${result.id}.${result.output_format === "jpeg" ? "jpg" : "png"}`;
+    anchor.click();
+  };
+
+  return (
+    <div className="flex min-h-screen flex-col bg-[#0f1117] text-gray-100">
+      <Navbar onSettings={() => setSettingsOpen(true)} />
+      <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
         <ControlPanel
-          // Type & Model
-          generationType={generationType}
-          setGenerationType={setGenerationType}
-          videoModel={videoModel}
-          setVideoModel={setVideoModel}
-          imageModel={imageModel}
-          setImageModel={setImageModel}
-          
-          // Mode
-          videoMode={videoMode}
-          setVideoMode={handleVideoModeChange}
-          imageMode={imageMode}
-          setImageMode={handleImageModeChange}
-          
-          // Advanced Settings Control
-          useAdvancedSettings={useAdvancedSettings}
-          setUseAdvancedSettings={setUseAdvancedSettings}
-          
-          // Common params
-          prompt={prompt}
-          setPrompt={setPrompt}
-          negativePrompt={negativePrompt}
-          setNegativePrompt={setNegativePrompt}
-          width={width}
-          setWidth={setWidth}
-          height={height}
-          setHeight={setHeight}
-          seed={seed}
-          setSeed={setSeed}
-          batchSize={batchSize}
-          setBatchSize={setBatchSize}
-          outputFormat={outputFormat}
-          setOutputFormat={setOutputFormat}
-          
-          // Reference images
-          referenceImage={referenceImage}
-          onImageUpload={(data) => setReferenceImage(data)}
-          onImageRemove={() => setReferenceImage(null)}
-          firstFrameImage={firstFrameImage}
-          lastFrameImage={lastFrameImage}
-          onFirstFrameUpload={(data) => setFirstFrameImage(data)}
-          onLastFrameUpload={(data) => setLastFrameImage(data)}
-          onFirstFrameRemove={() => setFirstFrameImage(null)}
-          onLastFrameRemove={() => setLastFrameImage(null)}
-          arbitraryFrames={arbitraryFrames}
-          onArbitraryFrameAdd={handleArbitraryFrameAdd}
-          onArbitraryFrameRemove={handleArbitraryFrameRemove}
-          onArbitraryFrameUpdate={handleArbitraryFrameUpdate}
-          
-          // Video params
-          numFrames={numFrames}
-          setNumFrames={setNumFrames}
-          videoSteps={videoSteps}
-          setVideoSteps={setVideoSteps}
-          guidanceScale={guidanceScale}
-          setGuidanceScale={setGuidanceScale}
-          fps={fps}
-          setFps={setFps}
-          motionScore={motionScore}
-          setMotionScore={setMotionScore}
-          cfgScaleVideo={cfgScaleVideo}
-          setCfgScaleVideo={setCfgScaleVideo}
-          referenceStrength={referenceStrength}
-          setReferenceStrength={setReferenceStrength}
-          lightingVariant={lightingVariant}
-          setLightingVariant={setLightingVariant}
-          denoisingStrength={denoisingStrength}
-          setDenoisingStrength={setDenoisingStrength}
-          
-          // Image params
-          imageSteps={imageSteps}
-          setImageSteps={setImageSteps}
-          cfgScaleImage={cfgScaleImage}
-          setCfgScaleImage={setCfgScaleImage}
-          clipSkip={clipSkip}
-          setClipSkip={setClipSkip}
-          sampler={sampler}
-          setSampler={setSampler}
-          imageGuidanceScale={imageGuidanceScale}
-          setImageGuidanceScale={setImageGuidanceScale}
-          imgDenoisingStrength={imgDenoisingStrength}
-          setImgDenoisingStrength={setImgDenoisingStrength}
-          
-          // Actions
-          onGenerate={handleGenerate}
-          status={status}
-          estSeconds={estSeconds}
+          form={form}
+          disabled={uiStatus === "generating"}
+          validationError={validationError}
+          onChange={updateForm}
+          onReferenceFile={handleReferenceFile}
+          onGenerate={startGeneration}
         />
-
-        {/* Right: Output Panel */}
         <OutputPanel
-          status={status}
-          progress={progress}
+          status={uiStatus}
           statusText={statusText}
-          result={result}
           error={error}
-          referenceImage={referenceImage}
-          generationType={generationType}
-          mode={generationType === "video" ? videoMode : imageMode}
-          onRetry={handleRetry}
-          onRegenerate={handleRegenerate}
-          estSeconds={estSeconds}
+          result={result}
+          onCancel={stopGeneration}
+          onRetry={startGeneration}
+          onDownload={downloadResult}
         />
       </div>
-
-      {/* History side panel */}
-      <HistoryPanel
-        isOpen={showHistory}
-        onClose={() => setShowHistory(false)}
-        history={history}
-        onReuse={handleReuseHistory}
-        onClear={() => setHistory([])}
-      />
+      <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </div>
   );
 }

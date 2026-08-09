@@ -1,10 +1,7 @@
-"""
-Unit tests for backend/storage.py
-Uses a temporary SQLite database — no GPU, no Modal, no real files.
-"""
-import os
+"""File-per-result storage tests; no SQLite and no Modal required."""
+import json
 import sys
-import tempfile
+import uuid
 from pathlib import Path
 
 import pytest
@@ -13,206 +10,85 @@ BACKEND = str(Path(__file__).parent.parent)
 if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
 
+import storage
+
 
 @pytest.fixture(autouse=True)
-def tmp_db(tmp_path, monkeypatch):
-    """Redirect DB_PATH to a temp file for every test."""
-    db_file = str(tmp_path / "test_gallery.db")
-    monkeypatch.setenv("RESULTS_PATH", str(tmp_path))
-
-    import config
-    monkeypatch.setattr(config, "DB_PATH", db_file)
-    monkeypatch.setattr(config, "RESULTS_PATH", str(tmp_path))
-
-    import storage
-    # Re-patch the module-level constants storage uses
-    monkeypatch.setattr(storage, "DB_PATH", db_file)
-    monkeypatch.setattr(storage, "RESULTS_PATH", str(tmp_path))
-    storage.init_db()
-    yield tmp_path
+def isolated_results(tmp_path, monkeypatch):
+    monkeypatch.setattr(storage, "ITEMS_PATH", str(tmp_path / "items"))
+    return tmp_path
 
 
-import storage  # noqa: E402 (after fixture definition)
+def request_payload(prompt="test"):
+    return {
+        "model": "pony",
+        "type": "image",
+        "mode": "txt2img",
+        "prompt": prompt,
+        "negative_prompt": "bad",
+        "width": 1024,
+        "height": 1024,
+        "steps": 30,
+        "cfg_scale": 6.0,
+        "sampler": "Euler a",
+        "clip_skip": 2,
+        "denoising_strength": 0.7,
+        "seed": -1,
+        "output_format": "png",
+        "reference_image": None,
+    }
 
 
-# ─── create_task ─────────────────────────────────────────────────────────────
-
-class TestCreateTask:
-    def test_returns_uuid_string(self):
-        task_id = storage.create_task(
-            model="pony", gen_type="image", mode="txt2img",
-            prompt="test", negative_prompt="", parameters={},
-            width=512, height=512, seed=-1,
-        )
-        assert isinstance(task_id, str)
-        assert len(task_id) == 36  # UUID-4 format
-
-    def test_creates_pending_status(self):
-        task_id = storage.create_task(
-            model="pony", gen_type="image", mode="txt2img",
-            prompt="test", negative_prompt="", parameters={},
-            width=512, height=512, seed=-1,
-        )
-        result = storage.get_task(task_id)
-        assert result is not None
-        assert result.status.value == "pending"
-        assert result.progress == 0
-
-    def test_stores_all_fields(self):
-        task_id = storage.create_task(
-            model="flux", gen_type="image", mode="img2img",
-            prompt="hello world", negative_prompt="bad quality",
-            parameters={"steps": 25}, width=1024, height=768, seed=42,
-        )
-        result = storage.get_task(task_id)
-        assert result.task_id == task_id
+def create_complete_item(prompt="test"):
+    result_id = str(uuid.uuid4())
+    result = Path(storage.result_file_path(result_id, "png"))
+    result.parent.mkdir(parents=True, exist_ok=True)
+    result.write_bytes(b"png")
+    Path(storage.preview_file_path(result_id)).write_bytes(b"jpg")
+    storage.write_manifest(result_id, request_payload(prompt), 42)
+    return result_id
 
 
-# ─── update_task_status ───────────────────────────────────────────────────────
-
-class TestUpdateTaskStatus:
-    def _make_task(self):
-        return storage.create_task(
-            model="pony", gen_type="image", mode="txt2img",
-            prompt="test", negative_prompt="", parameters={},
-            width=512, height=512, seed=0,
-        )
-
-    def test_update_to_processing(self):
-        tid = self._make_task()
-        storage.update_task_status(tid, "processing", progress=20)
-        result = storage.get_task(tid)
-        assert result.status.value == "processing"
-        assert result.progress == 20
-
-    def test_update_to_done_with_paths(self):
-        tid = self._make_task()
-        storage.update_task_status(
-            tid, "done", progress=100,
-            result_path="/results/abc/result.png",
-            preview_path="/results/abc/preview.jpg",
-        )
-        result = storage.get_task(tid)
-        assert result.status.value == "done"
-        assert result.progress == 100
-
-    def test_update_to_failed_with_error(self):
-        tid = self._make_task()
-        storage.update_task_status(tid, "failed", error_msg="CUDA OOM")
-        result = storage.get_task(tid)
-        assert result.status.value == "failed"
-        assert result.error == "CUDA OOM"
-
-    def test_idempotent_update(self):
-        tid = self._make_task()
-        storage.update_task_status(tid, "processing", progress=50)
-        storage.update_task_status(tid, "processing", progress=80)
-        result = storage.get_task(tid)
-        assert result.progress == 80
+def test_manifest_round_trip():
+    result_id = create_complete_item("hello")
+    manifest = storage.read_manifest(result_id)
+    assert manifest["id"] == result_id
+    assert manifest["prompt"] == "hello"
+    assert manifest["seed"] == 42
 
 
-# ─── get_task ─────────────────────────────────────────────────────────────────
-
-class TestGetTask:
-    def test_returns_none_for_unknown_id(self):
-        result = storage.get_task("nonexistent-id-xyz")
-        assert result is None
-
-    def test_returns_correct_task(self):
-        tid1 = storage.create_task(
-            model="anisora", gen_type="video", mode="t2v",
-            prompt="video one", negative_prompt="", parameters={},
-            width=720, height=1280, seed=1,
-        )
-        tid2 = storage.create_task(
-            model="flux", gen_type="image", mode="txt2img",
-            prompt="image two", negative_prompt="", parameters={},
-            width=1024, height=1024, seed=2,
-        )
-        r1 = storage.get_task(tid1)
-        r2 = storage.get_task(tid2)
-        assert r1.task_id == tid1
-        assert r2.task_id == tid2
+def test_gallery_only_lists_complete_items():
+    complete_id = create_complete_item()
+    incomplete_id = str(uuid.uuid4())
+    storage.write_manifest(incomplete_id, request_payload(), 1)
+    items, total = storage.list_gallery(1, 24)
+    assert total == 1
+    assert items[0]["id"] == complete_id
 
 
-# ─── list_gallery ─────────────────────────────────────────────────────────────
-
-class TestListGallery:
-    def _add_done_task(self, model="pony", gen_type="image"):
-        tid = storage.create_task(
-            model=model, gen_type=gen_type, mode="txt2img",
-            prompt="gallery test", negative_prompt="", parameters={},
-            width=512, height=512, seed=0,
-        )
-        storage.update_task_status(
-            tid, "done", progress=100,
-            result_path=f"/results/{tid}/result.png",
-            preview_path=f"/results/{tid}/preview.jpg",
-        )
-        return tid
-
-    def test_empty_gallery(self):
-        items, total = storage.list_gallery()
-        assert items == []
-        assert total == 0
-
-    def test_returns_done_tasks(self):
-        self._add_done_task()
-        items, total = storage.list_gallery()
-        assert total == 1
-        assert len(items) == 1
-
-    def test_excludes_pending_tasks(self):
-        storage.create_task(
-            model="pony", gen_type="image", mode="txt2img",
-            prompt="pending task", negative_prompt="", parameters={},
-            width=512, height=512, seed=0,
-        )
-        items, total = storage.list_gallery()
-        assert total == 0
-
-    def test_pagination(self):
-        for _ in range(5):
-            self._add_done_task()
-        items, total = storage.list_gallery(page=1, per_page=3)
-        assert total == 5
-        assert len(items) == 3
-
-        items2, _ = storage.list_gallery(page=2, per_page=3)
-        assert len(items2) == 2
-
-    def test_model_filter(self):
-        self._add_done_task(model="pony")
-        self._add_done_task(model="flux", gen_type="image")
-        items, total = storage.list_gallery(model_filter="pony")
-        assert total == 1
-        assert items[0].model == "pony"
-
-    def test_type_filter(self):
-        self._add_done_task(model="pony", gen_type="image")
-        self._add_done_task(model="anisora", gen_type="video")
-        items, total = storage.list_gallery(type_filter="video")
-        assert total == 1
-        assert items[0].type == "video"
+def test_gallery_paginates_newest_first():
+    ids = [create_complete_item(str(index)) for index in range(3)]
+    for index, result_id in enumerate(ids):
+        manifest_path = Path(storage.preview_file_path(result_id)).parent / "manifest.json"
+        data = json.loads(manifest_path.read_text())
+        data["created_at"] = f"2026-01-0{index + 1}T00:00:00+00:00"
+        manifest_path.write_text(json.dumps(data))
+    first, total = storage.list_gallery(1, 2)
+    second, _ = storage.list_gallery(2, 2)
+    assert total == 3
+    assert [item["prompt"] for item in first] == ["2", "1"]
+    assert [item["prompt"] for item in second] == ["0"]
 
 
-# ─── delete_gallery_item ──────────────────────────────────────────────────────
+def test_delete_removes_only_target_directory():
+    first = create_complete_item("first")
+    second = create_complete_item("second")
+    assert storage.delete_gallery_item(first) is True
+    assert storage.read_manifest(first) is None
+    assert storage.read_manifest(second) is not None
 
-class TestDeleteGalleryItem:
-    def test_delete_existing_task(self):
-        tid = storage.create_task(
-            model="pony", gen_type="image", mode="txt2img",
-            prompt="delete test", negative_prompt="", parameters={},
-            width=512, height=512, seed=0,
-        )
-        storage.update_task_status(
-            tid, "done", progress=100,
-            result_path=f"/results/{tid}/result.png",
-        )
-        deleted = storage.delete_gallery_item(tid)
-        assert deleted is True
-        assert storage.get_task(tid) is None
 
-    def test_delete_nonexistent_task(self):
-        deleted = storage.delete_gallery_item("does-not-exist")
-        assert deleted is False
+@pytest.mark.parametrize("unsafe_id", ["../secret", "x", "a" * 36, ""])
+def test_path_traversal_ids_are_rejected(unsafe_id):
+    with pytest.raises(ValueError):
+        storage.get_result_path(unsafe_id)

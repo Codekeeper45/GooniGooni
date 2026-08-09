@@ -1,285 +1,135 @@
-"""
-SQLite-backed storage layer for gallery metadata and task tracking.
-The database lives inside the Modal 'results' Volume at /results/gallery.db.
+"""File-per-result storage.
+
+Each generation owns a separate directory, so Modal containers never modify the
+same file concurrently. Task execution state comes from Modal FunctionCall, not
+from this volume.
 """
 from __future__ import annotations
 
 import json
 import os
-import sqlite3
+import shutil
 import uuid
-from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Generator, Optional
+from typing import Any
 
-from config import DB_PATH, RESULTS_PATH, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE
-from schemas import GalleryItemResponse, StatusResponse, TaskStatus
+from config import ITEMS_PATH, MAX_PAGE_SIZE
 
-
-# ─── Schema DDL ───────────────────────────────────────────────────────────────
-
-_CREATE_TASKS_SQL = """
-CREATE TABLE IF NOT EXISTS tasks (
-    id          TEXT PRIMARY KEY,
-    status      TEXT NOT NULL DEFAULT 'pending',
-    progress    INTEGER NOT NULL DEFAULT 0,
-    model       TEXT NOT NULL,
-    type        TEXT NOT NULL,
-    mode        TEXT NOT NULL,
-    prompt      TEXT NOT NULL,
-    negative_prompt TEXT NOT NULL DEFAULT '',
-    parameters  TEXT NOT NULL DEFAULT '{}',
-    width       INTEGER NOT NULL DEFAULT 720,
-    height      INTEGER NOT NULL DEFAULT 1280,
-    seed        INTEGER NOT NULL DEFAULT -1,
-    result_path TEXT,
-    preview_path TEXT,
-    error_msg   TEXT,
-    created_at  TEXT NOT NULL,
-    updated_at  TEXT NOT NULL
-);
-"""
-
-_CREATE_IDX_SQL = """
-CREATE INDEX IF NOT EXISTS idx_tasks_status   ON tasks(status);
-CREATE INDEX IF NOT EXISTS idx_tasks_model    ON tasks(model);
-CREATE INDEX IF NOT EXISTS idx_tasks_created  ON tasks(created_at DESC);
-"""
-
-
-# ─── Connection helper ────────────────────────────────────────────────────────
-
-@contextmanager
-def _db() -> Generator[sqlite3.Connection, None, None]:
-    """Context manager that yields a configured SQLite connection."""
-    # Ensure the directory exists (runs inside Modal container)
-    Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
+def _validate_id(result_id: str) -> str:
     try:
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+        parsed = uuid.UUID(result_id)
+    except (ValueError, AttributeError) as exc:
+        raise ValueError("Invalid result id") from exc
+    if parsed.version != 4 or str(parsed) != result_id:
+        raise ValueError("Invalid result id")
+    return result_id
 
 
-def init_db() -> None:
-    """Create tables and indexes if they don't exist. Call on startup."""
-    with _db() as conn:
-        conn.executescript(_CREATE_TASKS_SQL + _CREATE_IDX_SQL)
+def _item_dir(result_id: str) -> Path:
+    return Path(ITEMS_PATH) / _validate_id(result_id)
 
 
-# ─── Task CRUD ────────────────────────────────────────────────────────────────
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def create_task(
-    model: str,
-    gen_type: str,
-    mode: str,
-    prompt: str,
-    negative_prompt: str,
-    parameters: dict[str, Any],
-    width: int,
-    height: int,
-    seed: int,
-) -> str:
-    """Insert a new task row and return the generated task_id."""
-    task_id = str(uuid.uuid4())
-    now = _now_iso()
-    with _db() as conn:
-        conn.execute(
-            """
-            INSERT INTO tasks
-              (id, status, progress, model, type, mode, prompt, negative_prompt,
-               parameters, width, height, seed, created_at, updated_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-            """,
-            (
-                task_id, "pending", 0, model, gen_type, mode,
-                prompt, negative_prompt,
-                json.dumps(parameters),
-                width, height, seed, now, now,
-            ),
-        )
-    return task_id
+def result_file_path(result_id: str, output_format: str) -> str:
+    extension = "jpg" if output_format == "jpeg" else "png"
+    return str(_item_dir(result_id) / f"result.{extension}")
 
 
-def update_task_status(
-    task_id: str,
-    status: str,
-    progress: int = 0,
-    result_path: Optional[str] = None,
-    preview_path: Optional[str] = None,
-    error_msg: Optional[str] = None,
-) -> None:
-    """Update task status, progress, and optional result/preview paths.
-    Only non-None optional fields are written — avoids overwriting
-    previously saved paths during intermediate progress updates.
-    """
-    now = _now_iso()
-    fields = ["status=?", "progress=?", "updated_at=?"]
-    values: list[Any] = [status, progress, now]
-    if result_path is not None:
-        fields.append("result_path=?")
-        values.append(result_path)
-    if preview_path is not None:
-        fields.append("preview_path=?")
-        values.append(preview_path)
-    if error_msg is not None:
-        fields.append("error_msg=?")
-        values.append(error_msg)
-    values.append(task_id)
-    with _db() as conn:
-        conn.execute(
-            f"UPDATE tasks SET {', '.join(fields)} WHERE id=?",
-            values,
-        )
+def preview_file_path(result_id: str) -> str:
+    return str(_item_dir(result_id) / "preview.jpg")
 
 
-def get_task(task_id: str) -> Optional[StatusResponse]:
-    """Return a StatusResponse for a single task, or None if not found."""
-    with _db() as conn:
-        row = conn.execute(
-            "SELECT * FROM tasks WHERE id=?", (task_id,)
-        ).fetchone()
+def _manifest_path(result_id: str) -> Path:
+    return _item_dir(result_id) / "manifest.json"
 
-    if row is None:
+
+def write_manifest(
+    result_id: str,
+    request: dict[str, Any],
+    resolved_seed: int,
+    created_at: str | None = None,
+) -> dict[str, Any]:
+    item_dir = _item_dir(result_id)
+    item_dir.mkdir(parents=True, exist_ok=True)
+    created_at = created_at or datetime.now(timezone.utc).isoformat()
+    manifest = {
+        "schema_version": 1,
+        "id": result_id,
+        "model": "pony",
+        "mode": request["mode"],
+        "prompt": request["prompt"],
+        "negative_prompt": request.get("negative_prompt", ""),
+        "width": request["width"],
+        "height": request["height"],
+        "steps": request["steps"],
+        "cfg_scale": request["cfg_scale"],
+        "sampler": request["sampler"],
+        "clip_skip": request["clip_skip"],
+        "denoising_strength": request["denoising_strength"],
+        "seed": resolved_seed,
+        "output_format": request["output_format"],
+        "created_at": created_at,
+    }
+    target = _manifest_path(result_id)
+    temporary = target.with_suffix(".json.tmp")
+    temporary.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    os.replace(temporary, target)
+    return manifest
+
+
+def read_manifest(result_id: str) -> dict[str, Any] | None:
+    path = _manifest_path(result_id)
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
         return None
 
-    base_url = os.environ.get("PUBLIC_BASE_URL", "")
-    return StatusResponse(
-        task_id=row["id"],
-        status=TaskStatus(row["status"]),
-        progress=row["progress"],
-        result_url=f"{base_url}/results/{row['id']}" if row["result_path"] else None,
-        preview_url=f"{base_url}/preview/{row['id']}" if row["preview_path"] else None,
-        error=row["error_msg"],
-        created_at=datetime.fromisoformat(row["created_at"]),
-        updated_at=datetime.fromisoformat(row["updated_at"]),
-    )
 
+def list_gallery(page: int, per_page: int) -> tuple[list[dict[str, Any]], int]:
+    page = max(1, page)
+    per_page = max(1, min(per_page, MAX_PAGE_SIZE))
+    root = Path(ITEMS_PATH)
+    if not root.exists():
+        return [], 0
 
-# ─── Gallery CRUD ─────────────────────────────────────────────────────────────
+    items: list[dict[str, Any]] = []
+    for manifest_path in root.glob("*/manifest.json"):
+        try:
+            data = json.loads(manifest_path.read_text(encoding="utf-8"))
+            result_path = Path(result_file_path(data["id"], data["output_format"]))
+            preview_path = Path(preview_file_path(data["id"]))
+            if result_path.is_file() and preview_path.is_file():
+                items.append(data)
+        except (KeyError, OSError, ValueError, json.JSONDecodeError):
+            continue
 
-def list_gallery(
-    page: int = 1,
-    per_page: int = DEFAULT_PAGE_SIZE,
-    sort: str = "created_at",
-    model_filter: Optional[str] = None,
-    type_filter: Optional[str] = None,
-) -> tuple[list[GalleryItemResponse], int]:
-    """
-    Return a paginated list of completed gallery items and the total count.
-    Only rows with status='done' are included.
-    """
-    per_page = min(per_page, MAX_PAGE_SIZE)
+    items.sort(key=lambda item: item.get("created_at", ""), reverse=True)
+    total = len(items)
     offset = (page - 1) * per_page
-
-    # Whitelist sort columns to prevent SQL injection
-    allowed_sorts = {"created_at", "model", "width", "height"}
-    if sort not in allowed_sorts:
-        sort = "created_at"
-
-    where_clauses = ["status = 'done'"]
-    params: list[Any] = []
-
-    if model_filter:
-        where_clauses.append("model = ?")
-        params.append(model_filter)
-
-    if type_filter:
-        where_clauses.append("type = ?")
-        params.append(type_filter)
-
-    where_sql = " AND ".join(where_clauses)
-    base_url = os.environ.get("PUBLIC_BASE_URL", "")
-
-    with _db() as conn:
-        total = conn.execute(
-            f"SELECT COUNT(*) FROM tasks WHERE {where_sql}", params
-        ).fetchone()[0]
-
-        rows = conn.execute(
-            f"""
-            SELECT * FROM tasks WHERE {where_sql}
-            ORDER BY {sort} DESC
-            LIMIT ? OFFSET ?
-            """,
-            params + [per_page, offset],
-        ).fetchall()
-
-    items = [
-        GalleryItemResponse(
-            id=row["id"],
-            model=row["model"],
-            type=row["type"],
-            mode=row["mode"],
-            prompt=row["prompt"],
-            negative_prompt=row["negative_prompt"],
-            parameters=json.loads(row["parameters"] or "{}"),
-            width=row["width"],
-            height=row["height"],
-            seed=row["seed"],
-            created_at=datetime.fromisoformat(row["created_at"]),
-            preview_url=f"{base_url}/preview/{row['id']}",
-            result_url=f"{base_url}/results/{row['id']}",
-        )
-        for row in rows
-        if row["result_path"]  # Skip rows without result files
-    ]
-
-    return items, total
+    return items[offset : offset + per_page], total
 
 
-def delete_gallery_item(task_id: str) -> bool:
-    """
-    Delete the task row and its files from the results volume.
-    Returns True if a row was deleted, False if not found.
-    """
-    with _db() as conn:
-        row = conn.execute(
-            "SELECT result_path, preview_path FROM tasks WHERE id=?", (task_id,)
-        ).fetchone()
-
-        if row is None:
-            return False
-
-        # Remove files from volume
-        for path in (row["result_path"], row["preview_path"]):
-            if path and os.path.exists(path):
-                try:
-                    os.remove(path)
-                except OSError:
-                    pass  # Best-effort cleanup
-
-        conn.execute("DELETE FROM tasks WHERE id=?", (task_id,))
-
+def delete_gallery_item(result_id: str) -> bool:
+    item_dir = _item_dir(result_id)
+    if not item_dir.is_dir():
+        return False
+    shutil.rmtree(item_dir)
     return True
 
 
-# ─── File path helpers ────────────────────────────────────────────────────────
-
-def task_dir(task_id: str) -> Path:
-    """Return the directory for a task's files (creates it if needed)."""
-    d = Path(RESULTS_PATH) / task_id
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-def result_file_path(task_id: str, extension: str) -> str:
-    """Return the absolute path for the main result file."""
-    return str(task_dir(task_id) / f"result.{extension}")
+def get_result_path(result_id: str) -> str | None:
+    manifest = read_manifest(result_id)
+    if not manifest:
+        return None
+    path = result_file_path(result_id, manifest["output_format"])
+    return path if os.path.isfile(path) else None
 
 
-def preview_file_path(task_id: str) -> str:
-    """Return the absolute path for the preview JPEG thumbnail."""
-    return str(task_dir(task_id) / "preview.jpg")
+def get_preview_path(result_id: str) -> str | None:
+    path = preview_file_path(result_id)
+    return path if os.path.isfile(path) else None

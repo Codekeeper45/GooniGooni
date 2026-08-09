@@ -1,7 +1,5 @@
-"""
-Unit tests for backend/schemas.py
-Tests Pydantic validation logic — no Modal, no GPU, no network.
-"""
+"""Strict Pony-only request/response contract tests."""
+import base64
 import sys
 from pathlib import Path
 
@@ -12,171 +10,91 @@ BACKEND = str(Path(__file__).parent.parent)
 if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
 
-from schemas import GenerateRequest, GenerateResponse, StatusResponse, TaskStatus
+from config import PONY_CONTRACT
+from schemas import GenerateRequest, StatusResponse, TaskStatus
 
 
-# ─── Helpers ──────────────────────────────────────────────────────────────────
-
-def make_req(**kwargs):
-    """Build a minimal valid payload and merge kwargs."""
-    base = {
-        "model": "pony",
-        "type": "image",
-        "mode": "txt2img",
-        "prompt": "test prompt",
-    }
-    base.update(kwargs)
-    return GenerateRequest(**base)
+def make_request(**overrides):
+    payload = {"prompt": "score_9, detailed character"}
+    payload.update(overrides)
+    return GenerateRequest(**payload)
 
 
-# ─── Happy-path construction for each model + mode ────────────────────────────
-
-class TestValidRequests:
-    def test_pony_txt2img(self):
-        req = make_req(model="pony", type="image", mode="txt2img")
-        assert req.model.value == "pony"
-        assert req.mode == "txt2img"
-
-    def test_pony_img2img(self):
-        req = make_req(model="pony", type="image", mode="img2img")
-        assert req.mode == "img2img"
-
-    def test_flux_txt2img(self):
-        req = make_req(model="flux", type="image", mode="txt2img")
-        assert req.model.value == "flux"
-
-    def test_flux_img2img(self):
-        req = make_req(model="flux", type="image", mode="img2img")
-        assert req.mode == "img2img"
-
-    def test_anisora_t2v(self):
-        req = make_req(model="anisora", type="video", mode="t2v")
-        assert req.type.value == "video"
-
-    def test_anisora_i2v(self):
-        make_req(model="anisora", type="video", mode="i2v")
-
-    def test_anisora_first_last_frame(self):
-        make_req(model="anisora", type="video", mode="first_last_frame")
-
-    def test_anisora_arbitrary_frame(self):
-        make_req(model="anisora", type="video", mode="arbitrary_frame")
-
-    def test_phr00t_t2v(self):
-        make_req(model="phr00t", type="video", mode="t2v")
-
-    def test_phr00t_i2v(self):
-        make_req(model="phr00t", type="video", mode="i2v")
-
-    def test_phr00t_first_last_frame(self):
-        make_req(model="phr00t", type="video", mode="first_last_frame")
+def test_defaults_come_from_shared_contract():
+    request = make_request()
+    defaults = PONY_CONTRACT["defaults"]
+    assert request.model == "pony"
+    assert request.type == "image"
+    assert request.mode == PONY_CONTRACT["model"]["default_mode"]
+    assert request.width == defaults["width"]
+    assert request.height == defaults["height"]
+    assert request.steps == defaults["steps"]
+    assert request.cfg_scale == defaults["cfg_scale"]
+    assert request.sampler == defaults["sampler"]
+    assert request.clip_skip == defaults["clip_skip"]
+    assert request.denoising_strength == defaults["denoising_strength"]
+    assert request.seed == defaults["seed"]
+    assert request.output_format == defaults["output_format"]
 
 
-# ─── Mode incompatibility validation ──────────────────────────────────────────
-
-class TestModeValidation:
-    def test_phr00t_arbitrary_frame_rejected(self):
-        with pytest.raises(ValidationError) as exc_info:
-            make_req(model="phr00t", type="video", mode="arbitrary_frame")
-        errors = exc_info.value.errors()
-        assert any("mode" in str(e) for e in errors)
-
-    def test_pony_t2v_rejected(self):
-        """Image model cannot use video mode."""
-        with pytest.raises(ValidationError):
-            make_req(model="pony", type="image", mode="t2v")
-
-    def test_anisora_txt2img_rejected(self):
-        """Video model cannot use image mode."""
-        with pytest.raises(ValidationError):
-            make_req(model="anisora", type="video", mode="txt2img")
-
-    def test_unknown_model_rejected(self):
-        with pytest.raises(ValidationError):
-            make_req(model="foobar", type="image", mode="txt2img")
-
-    def test_unknown_type_rejected(self):
-        with pytest.raises(ValidationError):
-            make_req(model="pony", type="audio", mode="txt2img")
+@pytest.mark.parametrize("field,value", [
+    ("model", "flux"),
+    ("type", "video"),
+    ("mode", "t2v"),
+    ("sampler", "made up"),
+    ("output_format", "webm"),
+])
+def test_removed_capabilities_are_rejected(field, value):
+    with pytest.raises(ValidationError):
+        make_request(**{field: value})
 
 
-# ─── Field constraints ────────────────────────────────────────────────────────
-
-class TestFieldConstraints:
-    def test_prompt_required(self):
-        with pytest.raises(ValidationError):
-            GenerateRequest(model="pony", type="image", mode="txt2img", prompt="")
-
-    def test_prompt_max_length(self):
-        with pytest.raises(ValidationError):
-            make_req(prompt="x" * 2001)
-
-    def test_negative_prompt_default_empty_string(self):
-        req = make_req()
-        assert req.negative_prompt == ""
-
-    def test_negative_prompt_max_length(self):
-        with pytest.raises(ValidationError):
-            make_req(negative_prompt="x" * 1001)
-
-    def test_width_minimum(self):
-        with pytest.raises(ValidationError):
-            make_req(width=100)
-
-    def test_height_minimum(self):
-        with pytest.raises(ValidationError):
-            make_req(height=100)
-
-    def test_width_maximum(self):
-        with pytest.raises(ValidationError):
-            make_req(width=4096)
-
-    def test_seed_minus_one_allowed(self):
-        req = make_req(seed=-1)
-        assert req.seed == -1
-
-    def test_seed_too_low_rejected(self):
-        with pytest.raises(ValidationError):
-            make_req(seed=-2)
-
-    def test_seed_max_allowed(self):
-        req = make_req(seed=2147483647)
-        assert req.seed == 2147483647
-
-    def test_default_output_format_mp4_for_video(self):
-        req = make_req(model="anisora", type="video", mode="t2v")
-        assert req.output_format == "mp4"
+def test_unknown_fields_are_rejected():
+    with pytest.raises(ValidationError) as error:
+        make_request(motion_score=3.0)
+    assert "Extra inputs are not permitted" in str(error.value)
 
 
-# ─── Response schemas ─────────────────────────────────────────────────────────
+def test_img2img_requires_reference():
+    with pytest.raises(ValidationError):
+        make_request(mode="img2img")
 
-class TestResponseSchemas:
-    def test_generate_response(self):
-        resp = GenerateResponse(task_id="abc-123", status=TaskStatus.pending)
-        assert resp.task_id == "abc-123"
-        assert resp.status == TaskStatus.pending
 
-    def test_status_response_pending(self):
-        resp = StatusResponse(
-            task_id="abc-123",
-            status=TaskStatus.pending,
-            progress=0,
-        )
-        assert resp.progress == 0
-        assert resp.error is None
+def test_txt2img_rejects_reference():
+    with pytest.raises(ValidationError):
+        make_request(reference_image="data:image/png;base64,AAAA")
 
-    def test_status_response_done(self):
-        resp = StatusResponse(
-            task_id="abc-123",
-            status=TaskStatus.done,
-            progress=100,
-            result_url="https://example.com/results/abc-123",
-            preview_url="https://example.com/preview/abc-123",
-        )
-        assert resp.result_url is not None
 
-    def test_task_status_enum_values(self):
-        assert TaskStatus.pending.value == "pending"
-        assert TaskStatus.processing.value == "processing"
-        assert TaskStatus.done.value == "done"
-        assert TaskStatus.failed.value == "failed"
+def test_img2img_accepts_reference():
+    image = base64.b64encode(b"test").decode()
+    request = make_request(
+        mode="img2img",
+        reference_image=f"data:image/png;base64,{image}",
+    )
+    assert request.reference_image is not None
+
+
+@pytest.mark.parametrize("dimension", [511, 513, 1544])
+def test_dimensions_are_bounded_and_divisible_by_eight(dimension):
+    with pytest.raises(ValidationError):
+        make_request(width=dimension)
+
+
+def test_total_pixel_limit_prevents_t4_oom_configuration():
+    with pytest.raises(ValidationError):
+        make_request(width=1536, height=1536)
+
+
+def test_text_is_trimmed():
+    request = make_request(prompt="  hello  ", negative_prompt="  bad  ")
+    assert request.prompt == "hello"
+    assert request.negative_prompt == "bad"
+
+
+def test_status_has_no_fake_progress_field():
+    response = StatusResponse(
+        task_id="fc-123",
+        status=TaskStatus.processing,
+        message="Queued or generating on GPU",
+    )
+    assert "progress" not in response.model_dump()

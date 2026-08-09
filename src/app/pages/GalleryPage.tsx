@@ -1,699 +1,246 @@
-import { useState, useMemo } from "react";
-import { useNavigate } from "react-router";
-import { motion, AnimatePresence } from "motion/react";
+import { useEffect, useState } from "react";
 import {
   ArrowLeft,
-  Sparkles,
-  Image as ImageIcon,
-  Video,
   Download,
+  Loader2,
+  RefreshCw,
+  Search,
   Trash2,
   X,
-  Search,
-  Grid2x2,
-  LayoutGrid,
-  Play,
-  SlidersHorizontal,
 } from "lucide-react";
-import { useGallery, type GalleryItem } from "../context/GalleryContext";
-import { VideoPlayer } from "../components/VideoPlayer";
-
-type FilterType = "all" | "image" | "video";
-type SortMode = "newest" | "oldest";
-type GridSize = "lg" | "sm";
+import { useNavigate } from "react-router";
+import { fetchAsset, type GalleryItem } from "../api";
+import { useGallery } from "../context/GalleryContext";
 
 export function GalleryPage() {
   const navigate = useNavigate();
-  const { gallery, clearGallery, removeFromGallery } = useGallery();
+  const { gallery, loading, error, refresh, removeFromGallery, clearGallery } = useGallery();
+  const [query, setQuery] = useState("");
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [selected, setSelected] = useState<GalleryItem | null>(null);
+  const [fullUrl, setFullUrl] = useState<string | null>(null);
+  const [opening, setOpening] = useState(false);
 
-  const [filter, setFilter] = useState<FilterType>("all");
-  const [sort, setSort] = useState<SortMode>("newest");
-  const [gridSize, setGridSize] = useState<GridSize>("lg");
-  const [searchQuery, setSearchQuery] = useState("");
-  const [selectedItem, setSelectedItem] = useState<GalleryItem | null>(null);
-  const [showConfirmClear, setShowConfirmClear] = useState(false);
+  const filtered = gallery.filter((item) =>
+    item.prompt.toLowerCase().includes(query.toLowerCase()),
+  );
 
-  const filtered = useMemo(() => {
-    let items = [...gallery];
+  useEffect(() => {
+    return () => {
+      if (fullUrl) URL.revokeObjectURL(fullUrl);
+    };
+  }, [fullUrl]);
 
-    if (filter !== "all") {
-      items = items.filter((item) => item.type === filter);
+  const openItem = async (item: GalleryItem) => {
+    setSelected(item);
+    setOpening(true);
+    setActionError(null);
+    try {
+      const blob = await fetchAsset(item.result_url);
+      if (fullUrl) URL.revokeObjectURL(fullUrl);
+      setFullUrl(URL.createObjectURL(blob));
+    } catch (caught) {
+      setActionError(caught instanceof Error ? caught.message : "Could not open image");
+      setSelected(null);
+    } finally {
+      setOpening(false);
     }
+  };
 
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase();
-      items = items.filter(
-        (item) =>
-          item.prompt.toLowerCase().includes(q) ||
-          item.model.toLowerCase().includes(q)
-      );
+  const download = async (item: GalleryItem) => {
+    setActionError(null);
+    try {
+      const blob = await fetchAsset(item.result_url);
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `gooni-${item.id}.${item.output_format === "jpeg" ? "jpg" : "png"}`;
+      anchor.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (caught) {
+      setActionError(caught instanceof Error ? caught.message : "Download failed");
     }
+  };
 
-    if (sort === "oldest") {
-      items = items.reverse();
+  const remove = async (id: string) => {
+    if (!window.confirm("Delete this image permanently?")) return;
+    setActionError(null);
+    try {
+      await removeFromGallery(id);
+      if (selected?.id === id) {
+        setSelected(null);
+        setFullUrl(null);
+      }
+    } catch (caught) {
+      setActionError(caught instanceof Error ? caught.message : "Delete failed");
     }
+  };
 
-    return items;
-  }, [gallery, filter, sort, searchQuery]);
-
-  const imageCount = gallery.filter((i) => i.type === "image").length;
-  const videoCount = gallery.filter((i) => i.type === "video").length;
-
-  const colClass =
-    gridSize === "lg"
-      ? "grid-cols-2 md:grid-cols-3 lg:grid-cols-4"
-      : "grid-cols-3 md:grid-cols-4 lg:grid-cols-6";
+  const clear = async () => {
+    if (!gallery.length || !window.confirm(`Delete all ${gallery.length} images permanently?`)) {
+      return;
+    }
+    setActionError(null);
+    try {
+      await clearGallery();
+    } catch (caught) {
+      setActionError(caught instanceof Error ? caught.message : "Clear failed");
+    }
+  };
 
   return (
-    <div
-      className="min-h-screen flex flex-col"
-      style={{
-        background: "#0B0E14",
-        fontFamily: "'Space Grotesk', sans-serif",
-        color: "#E5E7EB",
-      }}
-    >
-      {/* Header */}
-      <header
-        className="flex-shrink-0 flex items-center justify-between px-6 border-b"
-        style={{
-          height: 64,
-          background: "rgba(15,17,23,0.95)",
-          backdropFilter: "blur(20px)",
-          borderColor: "rgba(255,255,255,0.06)",
-          position: "sticky",
-          top: 0,
-          zIndex: 20,
-        }}
-      >
-        {/* Left: back + brand */}
-        <div className="flex items-center gap-4">
-          <button
-            onClick={() => navigate("/")}
-            className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm transition-all duration-150"
-            style={{ color: "#9CA3AF" }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.color = "#E5E7EB";
-              e.currentTarget.style.background = "rgba(255,255,255,0.05)";
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.color = "#9CA3AF";
-              e.currentTarget.style.background = "transparent";
-            }}
-          >
-            <ArrowLeft className="w-4 h-4" />
-            Studio
-          </button>
-
-          <div
-            className="w-px h-5"
-            style={{ background: "rgba(255,255,255,0.08)" }}
+    <div className="min-h-screen bg-[#0f1117] text-gray-100">
+      <header className="sticky top-0 z-20 flex min-h-16 flex-wrap items-center gap-3 border-b border-white/[0.06] bg-[#0f1117]/95 px-4 py-3 backdrop-blur-xl sm:px-6">
+        <button
+          type="button"
+          onClick={() => navigate("/")}
+          className="flex items-center gap-2 rounded-lg px-3 py-2 text-xs text-gray-400 hover:bg-white/5 hover:text-gray-200"
+        >
+          <ArrowLeft className="h-4 w-4" />
+          Studio
+        </button>
+        <div>
+          <p className="text-sm text-gray-100">Gallery</p>
+          <p className="text-[10px] text-gray-600">{gallery.length} saved images</p>
+        </div>
+        <div className="flex-1" />
+        <label className="relative min-w-[180px] max-w-xs flex-1 sm:flex-none">
+          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-600" />
+          <input
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Search prompts"
+            className="w-full rounded-xl border border-white/10 bg-white/[0.04] py-2 pl-9 pr-3 text-xs text-gray-200 outline-none focus:border-blue-500/40"
           />
-
-          {/* Brand */}
-          <div className="flex items-center gap-2.5">
-            <div
-              className="w-7 h-7 rounded-lg flex items-center justify-center"
-              style={{
-                background: "linear-gradient(135deg, #4F8CFF, #6366F1)",
-                boxShadow: "0 0 14px rgba(79,140,255,0.35)",
-              }}
-            >
-              <Sparkles className="w-3.5 h-3.5 text-white" />
-            </div>
-            <span style={{ color: "#E5E7EB" }}>MediaGen</span>
-            <span
-              className="text-[10px] px-1.5 py-0.5 rounded"
-              style={{
-                background: "rgba(79,140,255,0.08)",
-                color: "#4F8CFF",
-                border: "1px solid rgba(79,140,255,0.15)",
-              }}
-            >
-              Gallery
-            </span>
-          </div>
-        </div>
-
-        {/* Right: actions */}
-        <div className="flex items-center gap-2">
-          {gallery.length > 0 && (
-            <button
-              onClick={() => setShowConfirmClear(true)}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs transition-all duration-150"
-              style={{ color: "#4B5563" }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.color = "#EF4444";
-                e.currentTarget.style.background = "rgba(239,68,68,0.06)";
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.color = "#4B5563";
-                e.currentTarget.style.background = "transparent";
-              }}
-            >
-              <Trash2 className="w-3.5 h-3.5" />
-              Clear All
-            </button>
-          )}
-        </div>
+        </label>
+        <button
+          type="button"
+          onClick={() => void refresh()}
+          disabled={loading}
+          className="rounded-lg p-2 text-gray-400 hover:bg-white/5 disabled:opacity-50"
+          title="Refresh gallery"
+        >
+          <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
+        </button>
+        <button
+          type="button"
+          onClick={() => void clear()}
+          disabled={!gallery.length}
+          className="flex items-center gap-2 rounded-lg px-3 py-2 text-xs text-red-300 hover:bg-red-500/10 disabled:opacity-30"
+        >
+          <Trash2 className="h-4 w-4" />
+          Clear all
+        </button>
       </header>
 
-      {/* Stats bar */}
-      <div
-        className="flex-shrink-0 px-6 py-4 flex items-center gap-6 border-b"
-        style={{ borderColor: "rgba(255,255,255,0.04)" }}
-      >
-        {[
-          { label: "Total", value: gallery.length, color: "#9CA3AF" },
-          { label: "Images", value: imageCount, color: "#34D399", Icon: ImageIcon },
-          { label: "Videos", value: videoCount, color: "#60A5FA", Icon: Video },
-        ].map((stat) => (
-          <div key={stat.label} className="flex items-center gap-2">
-            {stat.Icon && <stat.Icon className="w-3.5 h-3.5" style={{ color: stat.color }} />}
-            <span className="text-2xl tabular-nums" style={{ color: stat.color }}>
-              {stat.value}
-            </span>
-            <span className="text-xs" style={{ color: "#4B5563" }}>
-              {stat.label}
-            </span>
+      {(error || actionError) && (
+        <div className="mx-auto mt-5 max-w-7xl px-4 sm:px-6">
+          <p className="rounded-xl border border-red-500/20 bg-red-500/[0.08] px-4 py-3 text-xs text-red-300">
+            {actionError || error}
+          </p>
+        </div>
+      )}
+
+      <main className="mx-auto max-w-7xl p-4 sm:p-6">
+        {loading && gallery.length === 0 ? (
+          <div className="flex min-h-[420px] items-center justify-center gap-3 text-sm text-gray-500">
+            <Loader2 className="h-5 w-5 animate-spin" />
+            Loading gallery...
           </div>
-        ))}
-      </div>
-
-      {/* Toolbar */}
-      <div
-        className="flex-shrink-0 px-6 py-3 flex items-center gap-3 border-b"
-        style={{ borderColor: "rgba(255,255,255,0.04)" }}
-      >
-        {/* Filter tabs */}
-        <div
-          className="flex items-center gap-1 p-1 rounded-lg"
-          style={{ background: "rgba(255,255,255,0.04)" }}
-        >
-          {(["all", "image", "video"] as FilterType[]).map((f) => (
+        ) : filtered.length === 0 ? (
+          <div className="flex min-h-[420px] flex-col items-center justify-center gap-2 text-center">
+            <p className="text-sm text-gray-400">
+              {query ? "No prompts match your search" : "No generated images yet"}
+            </p>
             <button
-              key={f}
-              onClick={() => setFilter(f)}
-              className="px-3 py-1.5 rounded-md text-xs capitalize transition-all duration-150"
-              style={
-                filter === f
-                  ? {
-                      background: "rgba(79,140,255,0.15)",
-                      color: "#4F8CFF",
-                      border: "1px solid rgba(79,140,255,0.2)",
-                    }
-                  : { color: "#6B7280", border: "1px solid transparent" }
-              }
+              type="button"
+              onClick={() => navigate("/")}
+              className="mt-3 rounded-xl bg-blue-500/10 px-4 py-2 text-xs text-blue-300 hover:bg-blue-500/15"
             >
-              {f === "all" ? "All" : f === "image" ? "Images" : "Videos"}
+              Go to Studio
             </button>
-          ))}
-        </div>
-
-        {/* Search */}
-        <div
-          className="flex items-center gap-2 px-3 py-1.5 rounded-lg flex-1 max-w-xs"
-          style={{
-            background: "rgba(255,255,255,0.04)",
-            border: "1px solid rgba(255,255,255,0.06)",
-          }}
-        >
-          <Search className="w-3.5 h-3.5 flex-shrink-0" style={{ color: "#4B5563" }} />
-          <input
-            type="text"
-            placeholder="Search prompts, models..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            className="bg-transparent outline-none text-xs flex-1"
-            style={{ color: "#9CA3AF", fontFamily: "'Space Grotesk', sans-serif" }}
-          />
-          {searchQuery && (
-            <button onClick={() => setSearchQuery("")}>
-              <X className="w-3 h-3" style={{ color: "#4B5563" }} />
-            </button>
-          )}
-        </div>
-
-        <div className="flex-1" />
-
-        {/* Sort */}
-        <div className="flex items-center gap-1.5">
-          <SlidersHorizontal className="w-3.5 h-3.5" style={{ color: "#4B5563" }} />
-          <select
-            value={sort}
-            onChange={(e) => setSort(e.target.value as SortMode)}
-            className="bg-transparent text-xs outline-none cursor-pointer"
-            style={{ color: "#6B7280", fontFamily: "'Space Grotesk', sans-serif" }}
-          >
-            <option value="newest" style={{ background: "#151922" }}>
-              Newest first
-            </option>
-            <option value="oldest" style={{ background: "#151922" }}>
-              Oldest first
-            </option>
-          </select>
-        </div>
-
-        {/* Grid size */}
-        <div
-          className="flex items-center gap-0.5 p-0.5 rounded-lg"
-          style={{ background: "rgba(255,255,255,0.04)" }}
-        >
-          <button
-            onClick={() => setGridSize("lg")}
-            className="p-1.5 rounded-md transition-all duration-150"
-            style={
-              gridSize === "lg"
-                ? { background: "rgba(79,140,255,0.15)", color: "#4F8CFF" }
-                : { color: "#4B5563" }
-            }
-          >
-            <Grid2x2 className="w-3.5 h-3.5" />
-          </button>
-          <button
-            onClick={() => setGridSize("sm")}
-            className="p-1.5 rounded-md transition-all duration-150"
-            style={
-              gridSize === "sm"
-                ? { background: "rgba(79,140,255,0.15)", color: "#4F8CFF" }
-                : { color: "#4B5563" }
-            }
-          >
-            <LayoutGrid className="w-3.5 h-3.5" />
-          </button>
-        </div>
-      </div>
-
-      {/* Content grid */}
-      <div className="flex-1 overflow-y-auto p-6">
-        {filtered.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-64 gap-6">
-            <div
-              className="w-20 h-20 rounded-2xl flex items-center justify-center"
-              style={{
-                background: "rgba(79,140,255,0.04)",
-                border: "1px solid rgba(79,140,255,0.08)",
-              }}
-            >
-              <ImageIcon className="w-9 h-9" style={{ color: "rgba(79,140,255,0.2)" }} />
-            </div>
-            <div className="text-center">
-              <p className="text-base" style={{ color: "#4B5563" }}>
-                {searchQuery
-                  ? "No results found"
-                  : gallery.length === 0
-                  ? "Your gallery is empty"
-                  : "No items match the filter"}
-              </p>
-              <p className="text-sm mt-2" style={{ color: "#374151" }}>
-                {gallery.length === 0
-                  ? "Generate images and videos to see them here"
-                  : "Try adjusting your search or filter"}
-              </p>
-            </div>
-            {gallery.length === 0 && (
-              <button
-                onClick={() => navigate("/")}
-                className="flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm transition-all duration-150"
-                style={{
-                  background: "rgba(79,140,255,0.1)",
-                  border: "1px solid rgba(79,140,255,0.2)",
-                  color: "#4F8CFF",
-                }}
-              >
-                <ArrowLeft className="w-4 h-4" />
-                Go to Studio
-              </button>
-            )}
           </div>
         ) : (
-          <motion.div layout className={`grid ${colClass} gap-4`}>
-            <AnimatePresence>
-              {filtered.map((item, idx) => (
-                <GalleryCard
-                  key={item.id}
-                  item={item}
-                  index={idx}
-                  gridSize={gridSize}
-                  onClick={() => setSelectedItem(item)}
-                  onDelete={() => removeFromGallery(item.id)}
-                />
-              ))}
-            </AnimatePresence>
-          </motion.div>
-        )}
-      </div>
-
-      {/* Lightbox */}
-      <AnimatePresence>
-        {selectedItem && (
-          <Lightbox
-            item={selectedItem}
-            onClose={() => setSelectedItem(null)}
-          />
-        )}
-      </AnimatePresence>
-
-      {/* Confirm clear dialog */}
-      <AnimatePresence>
-        {showConfirmClear && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-50 flex items-center justify-center"
-            style={{ background: "rgba(0,0,0,0.7)", backdropFilter: "blur(8px)" }}
-            onClick={() => setShowConfirmClear(false)}
-          >
-            <motion.div
-              initial={{ scale: 0.9, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.9, opacity: 0 }}
-              className="rounded-2xl p-6 flex flex-col gap-4 w-80"
-              style={{
-                background: "#151922",
-                border: "1px solid rgba(255,255,255,0.08)",
-              }}
-              onClick={(e) => e.stopPropagation()}
-            >
-              <div className="flex items-center gap-3">
-                <div
-                  className="w-10 h-10 rounded-xl flex items-center justify-center"
-                  style={{
-                    background: "rgba(239,68,68,0.08)",
-                    border: "1px solid rgba(239,68,68,0.15)",
-                  }}
-                >
-                  <Trash2 className="w-4 h-4" style={{ color: "#EF4444" }} />
-                </div>
-                <div>
-                  <p className="text-sm" style={{ color: "#E5E7EB" }}>
-                    Clear gallery?
-                  </p>
-                  <p className="text-xs mt-0.5" style={{ color: "#6B7280" }}>
-                    This will remove all {gallery.length} items
-                  </p>
-                </div>
-              </div>
-              <div className="flex gap-2">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+            {filtered.map((item) => (
+              <article
+                key={item.id}
+                className="group overflow-hidden rounded-2xl border border-white/[0.06] bg-[#151922] transition hover:border-blue-500/25"
+              >
                 <button
-                  onClick={() => {
-                    clearGallery();
-                    setShowConfirmClear(false);
-                  }}
-                  className="flex-1 py-2 rounded-xl text-sm transition-all duration-150"
-                  style={{
-                    background: "rgba(239,68,68,0.12)",
-                    border: "1px solid rgba(239,68,68,0.25)",
-                    color: "#EF4444",
-                  }}
+                  type="button"
+                  onClick={() => void openItem(item)}
+                  className="block aspect-square w-full overflow-hidden bg-black/30"
                 >
-                  Clear All
+                  {item.thumbnailObjectUrl ? (
+                    <img
+                      src={item.thumbnailObjectUrl}
+                      alt={item.prompt}
+                      className="h-full w-full object-cover transition duration-500 group-hover:scale-[1.03]"
+                    />
+                  ) : (
+                    <div className="flex h-full items-center justify-center text-xs text-gray-600">
+                      Preview unavailable
+                    </div>
+                  )}
                 </button>
-                <button
-                  onClick={() => setShowConfirmClear(false)}
-                  className="flex-1 py-2 rounded-xl text-sm transition-all duration-150"
-                  style={{
-                    background: "rgba(255,255,255,0.04)",
-                    border: "1px solid rgba(255,255,255,0.08)",
-                    color: "#9CA3AF",
-                  }}
-                >
-                  Cancel
-                </button>
-              </div>
-            </motion.div>
-          </motion.div>
+                <div className="space-y-3 p-3">
+                  <p className="line-clamp-2 min-h-8 text-xs leading-relaxed text-gray-300">
+                    {item.prompt}
+                  </p>
+                  <div className="flex items-center justify-between text-[10px] text-gray-600">
+                    <span>
+                      {item.width}×{item.height} · seed {item.seed}
+                    </span>
+                    <div className="flex gap-1">
+                      <button
+                        type="button"
+                        onClick={() => void download(item)}
+                        className="rounded-lg p-2 text-gray-400 hover:bg-white/5 hover:text-blue-300"
+                        title="Download"
+                      >
+                        <Download className="h-4 w-4" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void remove(item.id)}
+                        className="rounded-lg p-2 text-gray-400 hover:bg-red-500/10 hover:text-red-300"
+                        title="Delete"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </article>
+            ))}
+          </div>
         )}
-      </AnimatePresence>
-    </div>
-  );
-}
+      </main>
 
-// ── Gallery Card ──────────────────────────────────────────────────────────────
-function GalleryCard({
-  item,
-  index,
-  gridSize,
-  onClick,
-  onDelete,
-}: {
-  item: GalleryItem;
-  index: number;
-  gridSize: GridSize;
-  onClick: () => void;
-  onDelete: () => void;
-}) {
-  const TypeIcon = item.type === "video" ? Video : ImageIcon;
-  const thumbSrc = item.thumbnailUrl || item.url;
-
-  return (
-    <motion.div
-      layout
-      initial={{ opacity: 0, scale: 0.92 }}
-      animate={{ opacity: 1, scale: 1 }}
-      exit={{ opacity: 0, scale: 0.88 }}
-      transition={{ duration: 0.2, delay: Math.min(index * 0.03, 0.3) }}
-      className="group relative rounded-xl overflow-hidden cursor-pointer"
-      style={{
-        background: "#1C212C",
-        border: "1px solid rgba(255,255,255,0.06)",
-        aspectRatio: "1 / 1",
-      }}
-      onClick={onClick}
-      whileHover={{ scale: 1.01 }}
-    >
-      {/* Thumbnail */}
-      <img
-        src={thumbSrc}
-        alt={item.prompt}
-        className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
-      />
-
-      {/* Hover gradient */}
-      <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-200" />
-
-      {/* Type badge */}
-      <div
-        className="absolute top-2 left-2 flex items-center gap-1 px-2 py-0.5 rounded-lg text-[10px]"
-        style={{
-          background: "rgba(0,0,0,0.55)",
-          backdropFilter: "blur(8px)",
-          color: "#E5E7EB",
-          border: "1px solid rgba(255,255,255,0.1)",
-        }}
-      >
-        <TypeIcon className="w-3 h-3" />
-        {item.type === "video" ? "Video" : "Image"}
-      </div>
-
-      {/* Play icon for videos */}
-      {item.type === "video" && (
-        <div className="absolute inset-0 flex items-center justify-center opacity-70 group-hover:opacity-100 transition-opacity">
-          <div
-            className="w-12 h-12 rounded-full flex items-center justify-center"
-            style={{
-              background: "rgba(0,0,0,0.5)",
-              backdropFilter: "blur(8px)",
-              border: "1.5px solid rgba(255,255,255,0.2)",
+      {(selected || opening) && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 p-4 backdrop-blur-sm">
+          <button
+            type="button"
+            onClick={() => {
+              setSelected(null);
+              setFullUrl(null);
             }}
+            className="absolute right-5 top-5 rounded-xl bg-white/10 p-2 text-white hover:bg-white/15"
           >
-            <Play className="w-5 h-5 text-white ml-0.5" />
-          </div>
-        </div>
-      )}
-
-      {/* Hover actions */}
-      <div className="absolute top-2 right-2 flex gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            window.open(item.url, "_blank");
-          }}
-          className="p-1.5 rounded-lg transition-all duration-150"
-          style={{
-            background: "rgba(79,140,255,0.85)",
-            color: "white",
-          }}
-          title="Download"
-        >
-          <Download className="w-3 h-3" />
-        </button>
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            onDelete();
-          }}
-          className="p-1.5 rounded-lg transition-all duration-150"
-          style={{
-            background: "rgba(239,68,68,0.7)",
-            color: "white",
-          }}
-          title="Delete"
-        >
-          <Trash2 className="w-3 h-3" />
-        </button>
-      </div>
-
-      {/* Info on hover (bottom) */}
-      {gridSize === "lg" && (
-        <div className="absolute bottom-0 left-0 right-0 p-3 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
-          <p
-            className="text-xs line-clamp-2"
-            style={{ color: "rgba(255,255,255,0.9)" }}
-          >
-            {item.prompt}
-          </p>
-          <div className="flex items-center gap-2 mt-1.5">
-            <span
-              className="text-[10px] px-1.5 py-0.5 rounded"
-              style={{
-                background: "rgba(0,0,0,0.5)",
-                color: "#9CA3AF",
-                border: "1px solid rgba(255,255,255,0.1)",
-              }}
-            >
-              {item.model.split(" ")[0]}
-            </span>
-            <span
-              className="text-[10px] px-1.5 py-0.5 rounded"
-              style={{
-                background: "rgba(0,0,0,0.5)",
-                color: "#9CA3AF",
-                border: "1px solid rgba(255,255,255,0.1)",
-              }}
-            >
-              {item.width}×{item.height}
-            </span>
-          </div>
-        </div>
-      )}
-    </motion.div>
-  );
-}
-
-// ── Lightbox ──────────────────────────────────────────────────────────────────
-function Lightbox({
-  item,
-  onClose,
-}: {
-  item: GalleryItem;
-  onClose: () => void;
-}) {
-  const TypeIcon = item.type === "video" ? Video : ImageIcon;
-
-  return (
-    <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      className="fixed inset-0 z-[60] flex items-center justify-center p-8"
-      onClick={onClose}
-    >
-      <div
-        className="absolute inset-0"
-        style={{ background: "rgba(0,0,0,0.92)", backdropFilter: "blur(24px)" }}
-      />
-
-      <motion.div
-        initial={{ scale: 0.92, opacity: 0 }}
-        animate={{ scale: 1, opacity: 1 }}
-        exit={{ scale: 0.92, opacity: 0 }}
-        transition={{ type: "spring", damping: 28 }}
-        className="relative max-w-5xl w-full flex flex-col gap-4"
-        style={{ maxHeight: "calc(100vh - 64px)" }}
-        onClick={(e) => e.stopPropagation()}
-      >
-        {/* Media */}
-        <div
-          className="relative rounded-2xl overflow-hidden"
-          style={{
-            border: "1px solid rgba(255,255,255,0.1)",
-            boxShadow: "0 24px 80px rgba(0,0,0,0.8)",
-            height: "70vh",
-          }}
-        >
-          {item.type === "video" ? (
-            <VideoPlayer src={item.url} poster={item.thumbnailUrl} className="h-full" />
+            <X className="h-5 w-5" />
+          </button>
+          {opening || !fullUrl ? (
+            <Loader2 className="h-8 w-8 animate-spin text-blue-400" />
           ) : (
             <img
-              src={item.url}
-              alt={item.prompt}
-              className="w-full h-full object-contain"
+              src={fullUrl}
+              alt={selected?.prompt || "Generated image"}
+              className="max-h-[90vh] max-w-[95vw] rounded-xl object-contain"
             />
           )}
         </div>
-
-        {/* Info panel */}
-        <div
-          className="rounded-2xl p-5"
-          style={{
-            background: "rgba(21,25,34,0.95)",
-            border: "1px solid rgba(255,255,255,0.08)",
-            backdropFilter: "blur(12px)",
-          }}
-        >
-          <div className="flex items-start justify-between gap-4">
-            <div className="flex-1 min-w-0">
-              <p className="text-sm line-clamp-2" style={{ color: "#E5E7EB" }}>
-                {item.prompt}
-              </p>
-              <div className="flex items-center gap-4 mt-3 text-xs" style={{ color: "#6B7280" }}>
-                <div className="flex items-center gap-1.5">
-                  <TypeIcon className="w-3.5 h-3.5" />
-                  <span>{item.type === "video" ? "Video" : "Image"}</span>
-                </div>
-                <span>•</span>
-                <span>{item.model}</span>
-                <span>•</span>
-                <span>{item.width}×{item.height}</span>
-                <span>•</span>
-                <span>Seed: {item.seed.toString().slice(0, 8)}</span>
-              </div>
-            </div>
-
-            <div className="flex gap-2 flex-shrink-0">
-              <button
-                onClick={() => window.open(item.url, "_blank")}
-                className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm transition-all duration-150"
-                style={{
-                  background: "rgba(79,140,255,0.1)",
-                  border: "1px solid rgba(79,140,255,0.2)",
-                  color: "#4F8CFF",
-                }}
-              >
-                <Download className="w-4 h-4" />
-                Download
-              </button>
-              <button
-                onClick={onClose}
-                className="px-4 py-2 rounded-xl text-sm transition-all duration-150"
-                style={{
-                  background: "rgba(255,255,255,0.04)",
-                  border: "1px solid rgba(255,255,255,0.08)",
-                  color: "#9CA3AF",
-                }}
-              >
-                Close
-              </button>
-            </div>
-          </div>
-        </div>
-      </motion.div>
-
-      {/* Close button */}
-      <button
-        onClick={onClose}
-        className="absolute top-4 right-4 p-2.5 rounded-xl z-10 transition-all duration-150"
-        style={{
-          background: "rgba(0,0,0,0.5)",
-          backdropFilter: "blur(8px)",
-          border: "1px solid rgba(255,255,255,0.1)",
-          color: "#E5E7EB",
-        }}
-      >
-        <X className="w-5 h-5" />
-      </button>
-    </motion.div>
+      )}
+    </div>
   );
 }

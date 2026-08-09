@@ -2,15 +2,16 @@
 
 ## Project Structure & Module Organization
 - `src/`: Vite + React frontend application.
-- `src/app/`: feature code (`components/`, `pages/`, `context/`, `admin/`, `utils/`).
+- `src/app/`: feature code (`components/`, `pages/`, `context/`, and the typed `api.ts` client).
 - `src/styles/`: global styling (`index.css`, `theme.css`, Tailwind entry files).
 - `backend/`: Modal-based FastAPI service (`app.py`, `config.py`, `auth.py`, `storage.py`).
-- `backend/models/`: model pipeline implementations (`anisora.py`, `phr00t.py`, `pony.py`, `flux.py`).
+- `backend/pony_contract.json`: shared source of truth for frontend/backend defaults and limits.
+- `backend/models/`: the Pony SDXL pipeline and its shared base helpers.
 - `backend/tests/`: pytest suite for API, auth, schemas, router, storage, and config behavior.
 - `dist/`: generated frontend build output (do not edit manually).
 
 ## Build, Test, and Development Commands
-- `npm install`: install frontend dependencies.
+- `npm ci`: install the locked frontend dependencies.
 - `npm run dev`: start local Vite dev server.
 - `npm run build`: create production frontend bundle in `dist/`.
 - `pip install -r backend/requirements.txt`: install backend runtime dependencies.
@@ -35,8 +36,8 @@
 ## Commit & Pull Request Guidelines
 - Follow the existing commit style from history: `type: short imperative summary` (for example, `fix: ...`).
 - Keep commits focused to one logical change.
-- PRs should include: purpose, linked issue/task, verification steps (`pytest backend/tests/`, `npm run build`), and screenshots for UI/admin changes.
+- PRs should include: purpose, linked issue/task, verification steps (`pytest backend/tests/`, `npm run build`), and screenshots for UI changes.
 
 ## Security & Configuration Tips
 - Do not commit secrets. Use `.env.example` as the template for local env files.
-- Keep runtime secrets in Modal secrets (`gooni-api-key`, `gooni-admin`, and `huggingface` when needed).
+- Keep the runtime API key in the Modal secret `gooni-api-key`; never embed it in the frontend bundle or query strings.

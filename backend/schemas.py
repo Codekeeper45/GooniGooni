@@ -1,29 +1,16 @@
-"""
-Pydantic schemas for request/response validation.
-Field names mirror exactly what configManager.buildPayload() sends from the frontend.
-"""
+"""Strict API contract shared by every backend endpoint."""
 from __future__ import annotations
 
-import uuid
 from datetime import datetime
 from enum import Enum
-from typing import Any, List, Literal, Optional
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from config import PONY_CONTRACT
 
-# ─── Enums ────────────────────────────────────────────────────────────────────
-
-class ModelId(str, Enum):
-    anisora = "anisora"
-    phr00t = "phr00t"
-    pony = "pony"
-    flux = "flux"
-
-
-class GenerationType(str, Enum):
-    image = "image"
-    video = "video"
+_defaults = PONY_CONTRACT["defaults"]
+_limits = PONY_CONTRACT["limits"]
 
 
 class TaskStatus(str, Enum):
@@ -31,124 +18,115 @@ class TaskStatus(str, Enum):
     processing = "processing"
     done = "done"
     failed = "failed"
+    cancelled = "cancelled"
 
-
-# ─── Nested models ────────────────────────────────────────────────────────────
-
-class ArbitraryFrame(BaseModel):
-    """A single keyframe for anisora arbitrary_frame mode."""
-    frame_index: int = Field(..., ge=0, le=160)
-    image: str  # base64-encoded image data URI
-    strength: float = Field(default=0.85, ge=0.1, le=1.0)
-
-
-# ─── Request ──────────────────────────────────────────────────────────────────
 
 class GenerateRequest(BaseModel):
-    """
-    Payload sent by the frontend via configManager.buildPayload().
-    All image data is transmitted as base64 data URIs (data:image/...;base64,...).
-    """
-    # ── Required ──────────────────────────────────────────────────────────────
-    model: ModelId
-    type: GenerationType
-    mode: str  # t2v | i2v | first_last_frame | arbitrary_frame | txt2img | img2img
+    """The complete and only supported generation payload."""
 
-    # ── Common parameters ─────────────────────────────────────────────────────
-    prompt: str = Field(..., min_length=1, max_length=2000)
-    negative_prompt: str = Field(default="", max_length=1000)
-    width: int = Field(default=720, ge=256, le=2048)
-    height: int = Field(default=1280, ge=256, le=2048)
-    seed: int = Field(default=-1, ge=-1, le=2147483647)
-    output_format: Literal["mp4", "webm", "png", "jpeg"] = "mp4"
+    model_config = ConfigDict(extra="forbid")
 
-    # ── Video parameters ──────────────────────────────────────────────────────
-    num_frames: Optional[int] = Field(default=81, ge=1, le=241)
-    fps: Optional[int] = Field(default=16)
-    motion_score: Optional[float] = Field(default=3.0, ge=0.0, le=5.0)
-    guidance_scale: Optional[float] = Field(default=1.0, ge=0.0, le=20.0)
-    cfg_scale: Optional[float] = Field(default=1.0, ge=0.0, le=20.0)
-    steps: Optional[int] = Field(default=None, ge=1, le=150)
-    lighting_variant: Optional[Literal["high_noise", "low_noise"]] = "low_noise"
+    model: Literal["pony"] = "pony"
+    type: Literal["image"] = "image"
+    mode: Literal["txt2img", "img2img"] = PONY_CONTRACT["model"]["default_mode"]
+    prompt: str = Field(min_length=1, max_length=_limits["prompt_max_length"])
+    negative_prompt: str = Field(
+        default=_defaults["negative_prompt"],
+        max_length=_limits["negative_prompt_max_length"],
+    )
+    width: int = Field(default=_defaults["width"], ge=_limits["width"]["min"], le=_limits["width"]["max"])
+    height: int = Field(default=_defaults["height"], ge=_limits["height"]["min"], le=_limits["height"]["max"])
+    steps: int = Field(default=_defaults["steps"], ge=_limits["steps"]["min"], le=_limits["steps"]["max"])
+    cfg_scale: float = Field(
+        default=_defaults["cfg_scale"],
+        ge=_limits["cfg_scale"]["min"],
+        le=_limits["cfg_scale"]["max"],
+    )
+    sampler: Literal[
+        "Euler a",
+        "DPM++ 2M Karras",
+        "DPM++ SDE Karras",
+    ] = _defaults["sampler"]
+    clip_skip: int = Field(
+        default=_defaults["clip_skip"],
+        ge=_limits["clip_skip"]["min"],
+        le=_limits["clip_skip"]["max"],
+    )
+    denoising_strength: float = Field(
+        default=_defaults["denoising_strength"],
+        ge=_limits["denoising_strength"]["min"],
+        le=_limits["denoising_strength"]["max"],
+    )
+    seed: int = Field(default=_defaults["seed"], ge=_limits["seed"]["min"], le=_limits["seed"]["max"])
+    output_format: Literal["png", "jpeg"] = _defaults["output_format"]
+    reference_image: str | None = Field(default=None, max_length=20_000_000)
 
-    # ── Reference image fields (base64 data URIs or None) ─────────────────────
-    reference_strength: Optional[float] = Field(default=0.85, ge=0.0, le=1.0)
-    reference_image: Optional[str] = None      # i2v or img2img
-    first_frame_image: Optional[str] = None   # first_last_frame
-    last_frame_image: Optional[str] = None    # first_last_frame
-    arbitrary_frames: Optional[List[ArbitraryFrame]] = []
-
-    # ── Image-specific parameters ─────────────────────────────────────────────
-    sampler: Optional[str] = None
-    clip_skip: Optional[int] = Field(default=2, ge=1, le=4)
-    denoising_strength: Optional[float] = Field(default=0.7, ge=0.0, le=1.0)
-    first_strength: Optional[float] = Field(default=1.0, ge=0.5, le=1.0)
-    last_strength: Optional[float] = Field(default=1.0, ge=0.5, le=1.0)
-
-    @field_validator("mode")
+    @field_validator("prompt", "negative_prompt")
     @classmethod
-    def validate_mode(cls, v: str, info: Any) -> str:
-        model = info.data.get("model")
-        gen_type = info.data.get("type")
+    def trim_text(cls, value: str) -> str:
+        return value.strip()
 
-        video_modes = {"t2v", "i2v", "first_last_frame", "arbitrary_frame"}
-        image_modes = {"txt2img", "img2img"}
-
-        if gen_type == GenerationType.video and v not in video_modes:
-            raise ValueError(f"Invalid mode '{v}' for video model. Valid: {video_modes}")
-        if gen_type == GenerationType.image and v not in image_modes:
-            raise ValueError(f"Invalid mode '{v}' for image model. Valid: {image_modes}")
-
-        # arbitrary_frame only for anisora
-        if v == "arbitrary_frame" and model != ModelId.anisora:
-            raise ValueError("arbitrary_frame mode is only supported by anisora")
-
-        return v
-
-    @field_validator("prompt")
+    @field_validator("width", "height")
     @classmethod
-    def validate_prompt(cls, v: str) -> str:
-        if not v.strip():
-            raise ValueError("prompt must not be empty")
-        return v
+    def dimensions_are_diffusion_safe(cls, value: int) -> int:
+        if value % 8:
+            raise ValueError("dimensions must be divisible by 8")
+        return value
 
+    @model_validator(mode="after")
+    def mode_matches_reference(self) -> "GenerateRequest":
+        if self.width * self.height > _limits["max_pixels"]:
+            raise ValueError(
+                f"width × height must not exceed {_limits['max_pixels']} pixels"
+            )
+        if self.mode == "img2img" and not self.reference_image:
+            raise ValueError("reference_image is required for img2img")
+        if self.mode == "txt2img" and self.reference_image is not None:
+            raise ValueError("reference_image is only accepted for img2img")
+        return self
 
-# ─── Responses ────────────────────────────────────────────────────────────────
 
 class GenerateResponse(BaseModel):
     task_id: str
     status: TaskStatus = TaskStatus.pending
+    message: str = "Generation queued"
+
+
+class ResultSummary(BaseModel):
+    id: str
+    model: Literal["pony"] = "pony"
+    mode: Literal["txt2img", "img2img"]
+    prompt: str
+    negative_prompt: str = ""
+    width: int
+    height: int
+    steps: int
+    cfg_scale: float
+    sampler: str
+    clip_skip: int
+    denoising_strength: float
+    seed: int
+    output_format: Literal["png", "jpeg"]
+    created_at: datetime
 
 
 class StatusResponse(BaseModel):
     task_id: str
     status: TaskStatus
-    progress: int = Field(default=0, ge=0, le=100)
-    result_url: Optional[str] = None
-    preview_url: Optional[str] = None
-    error: Optional[str] = None
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
+    message: str
+    result_url: str | None = None
+    preview_url: str | None = None
+    error: str | None = None
+    result: ResultSummary | None = None
 
 
-class GalleryItemResponse(BaseModel):
-    id: str
-    model: str
-    type: str
-    mode: str
-    prompt: str
-    negative_prompt: str = ""
-    parameters: dict[str, Any] = {}
-    width: int
-    height: int
-    seed: int
-    created_at: datetime
+class GalleryItemResponse(ResultSummary):
     preview_url: str
     result_url: str
 
 
 class GalleryResponse(BaseModel):
-    items: List[GalleryItemResponse]
+    items: list[GalleryItemResponse]
     total: int
     page: int
     per_page: int
@@ -156,7 +134,7 @@ class GalleryResponse(BaseModel):
 
 
 class ModelsResponse(BaseModel):
-    models: List[dict[str, Any]]
+    models: list[dict[str, Any]]
 
 
 class DeleteResponse(BaseModel):
@@ -166,22 +144,6 @@ class DeleteResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     status: Literal["ok"] = "ok"
-    version: str = "1.0.0"
-    app: str = "gooni-gooni-backend"
-
-
-class AddAccountRequest(BaseModel):
-    label: str
-    token_id: str
-    token_secret: str
-
-
-class AccountResponse(BaseModel):
-    id: str
-    label: str
-    workspace: Optional[str] = None
-    status: str
-    use_count: int
-    last_used: Optional[str] = None
-    last_error: Optional[str] = None
-    added_at: str
+    version: str
+    app: str
+    model: Literal["pony"] = "pony"

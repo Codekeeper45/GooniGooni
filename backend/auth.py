@@ -1,38 +1,27 @@
-"""
-API key authentication middleware.
-The key is stored in Modal Secret named 'gooni-api-key' as env var API_KEY.
-"""
+"""Header-only API key authentication."""
+from __future__ import annotations
+
 import hmac
 import os
 
-from fastapi import HTTPException, Security, status, Query
+from fastapi import HTTPException, Security, status
 from fastapi.security import APIKeyHeader
 
 _API_KEY_HEADER = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
-def verify_api_key(
-    header_key: str = Security(_API_KEY_HEADER),
-    query_key: str = Query(None, alias="api_key"),
-) -> str:
-    """
-    FastAPI dependency — raises 403 if API key is missing or wrong.
-    Uses constant-time comparison to prevent timing attacks.
-    """
-    api_key = header_key or query_key
+def verify_api_key(header_key: str | None = Security(_API_KEY_HEADER)) -> str:
     expected = os.environ.get("API_KEY", "")
     if not expected:
-        # Fail-open only in local dev (no secret configured); log a warning.
-        import logging
-        logging.warning(
-            "API_KEY environment variable is not set. "
-            "All requests will be allowed. Set it via Modal Secret in production."
+        if os.environ.get("ALLOW_UNAUTHENTICATED") == "1":
+            return ""
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Server API key is not configured",
         )
-        return ""
-
-    if not api_key or not hmac.compare_digest(api_key.encode(), expected.encode()):
+    if not header_key or not hmac.compare_digest(header_key, expected):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Invalid or missing X-API-Key header.",
+            detail="Invalid or missing X-API-Key header",
         )
-    return api_key
+    return header_key
